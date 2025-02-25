@@ -1,0 +1,11 @@
+prefix=@prefix@
+exec_prefix=@prefix@
+libdir=@libdir@
+includedir=@includedir@
+
+Name: dstm
+Description: Distributed Shared Timestamped Memory
+Version: @PACKAGE_VERSION@
+Requires: aml argobots
+Libs: -L${libdir} -ldstm
+Cflags: -I${includedir}
