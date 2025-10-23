@@ -30,7 +30,7 @@ extern "C" {
 #include "dstm/error.h"
 #include "dstm/version.h"
 // clang-format on
-//
+
 /*******************************************************************************
  * Library Init/Fini
  ******************************************************************************/
@@ -93,32 +93,67 @@ int dstm_log_init(FILE *f, const char *nm);
  * @param format: printf formatted string
  */
 void dstm_log_printf(int level,
-                    const char *file,
-                    unsigned int line,
-                    const char *format,
-                    ...);
+                     const char *file,
+                     unsigned int line,
+                     const char *format,
+                     ...);
 
 int dstm_log_setlevel(int level);
 
-#define dstm_log_error(...)                                                     \
+#define dstm_log_error(...)                                                    \
 	dstm_log_printf(DSTM_LOG_ERROR, __FILE__, __LINE__, __VA_ARGS__)
-#define dstm_log_warning(...)                                                   \
+#define dstm_log_warning(...)                                                  \
 	dstm_log_printf(DSTM_LOG_WARNING, __FILE__, __LINE__, __VA_ARGS__)
-#define dstm_log_normal(...)                                                    \
+#define dstm_log_normal(...)                                                   \
 	dstm_log_printf(DSTM_LOG_NORMAL, __FILE__, __LINE__, __VA_ARGS__)
-#define dstm_log_info(...)                                                      \
+#define dstm_log_info(...)                                                     \
 	dstm_log_printf(DSTM_LOG_INFO, __FILE__, __LINE__, __VA_ARGS__)
-#define dstm_log_debug(...)                                                     \
+#define dstm_log_debug(...)                                                    \
 	dstm_log_printf(DSTM_LOG_DEBUG, __FILE__, __LINE__, __VA_ARGS__)
-#define dstm_log_perror(...)                                                    \
+#define dstm_log_perror(...)                                                   \
 	do {                                                                   \
-		char *__dstm_errstr = strerror(errno);                          \
-		dstm_log_printf(DSTM_LOG_ERROR, __FILE__, __LINE__,              \
-		               __VA_ARGS__);                                   \
-		dstm_log_printf(DSTM_LOG_ERROR, __FILE__, __LINE__,              \
-		               "perror: %s\n", __dstm_errstr);                  \
+		char *__dstm_errstr = strerror(errno);                         \
+		dstm_log_printf(DSTM_LOG_ERROR, __FILE__, __LINE__,            \
+		                __VA_ARGS__);                                  \
+		dstm_log_printf(DSTM_LOG_ERROR, __FILE__, __LINE__,            \
+		                "perror: %s\n", __dstm_errstr);                \
 	} while (0)
 
+/*******************************************************************************
+ * Basic API
+ *
+ * 3 core concepts
+ *   - logical regions
+ *   - logical processes
+ *   - timestamped API
+ ******************************************************************************/
+
+struct dstm_communicator;
+typedef struct dstm_communicator dstm_comm_t;
+
+extern dstm_comm_t DSTM_COMM_WORLD;
+
+int dstm_comm_rank(dstm_comm_t *comm, int *rank);
+int dstm_comm_size(dstm_comm_t *comm, int *size);
+
+int dstm_comm_tree_split(dstm_comm_t *comm, int parent, dstm_comm_t **tree);
+int dstm_comm_destroy(dstm_comm_t **comm);
+
+struct dstm_logical_region;
+typedef struct dstm_logical_region dstm_lr_t;
+
+struct dstm_physical_location;
+typedef struct dstm_physical_location dstm_phy_t;
+
+int dstm_lr_create(dstm_lr_t **lr, dstm_phy_t, size_t size);
+void dstm_lr_destroy(dstm_lr_t **lr);
+
+struct dstm_logical_process;
+typedef struct dstm_logical_process dstm_lp_t;
+typedef int (*dstm_lp_func_t)(dstm_lp_t *self, void *arg);
+
+int dstm_lp_spawn(dstm_lp_t **lp, dstm_lp_func_t func, void *arg);
+int dstm_lp_join(dstm_lp_t **lp);
 
 #ifdef __cplusplus
 }

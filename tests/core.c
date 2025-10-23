@@ -30,6 +30,19 @@ START_TEST(test_init_null)
 }
 END_TEST
 
+START_TEST(test_hello_world)
+{
+	ck_assert(!dstm_init(NULL, NULL));
+
+
+
+
+
+	dstm_finalize();
+}
+END_TEST
+
+
 Suite *core_suite(void)
 {
 	Suite *s;
@@ -45,6 +58,10 @@ Suite *core_suite(void)
 	tc_version = tcase_create("version");
 	tcase_add_test(tc_version, test_version_values);
 	suite_add_tcase(s, tc_version);
+
+	tc_hello = tcase_create("hello");
+	tcase_add_test(tc_hello, test_hello_world);
+	suite_add_tcase(s, tc_hello);
 
 	return s;
 }
