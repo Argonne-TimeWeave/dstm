@@ -69,9 +69,6 @@ PKG_CHECK_MODULES([CHECK],[check],,
 PKG_CHECK_MODULES([AML],[aml],,
 		  AC_MSG_ERROR([unable to find aml]))
 
-PKG_CHECK_MODULES([ABT],[argobots],,
-		  AC_MSG_ERROR([unable to find argobots]))
-
 # PYTHON
 #########
 
@@ -122,12 +119,6 @@ AML:
 
 CFLAGS:  $AML_CFLAGS
 LDFLAGS: $AML_LIBS
-
-ABT:
-=======
-
-CFLAGS:  $ABT_CFLAGS
-LDFLAGS: $ABT_LIBS
 
 PYTHON BINDINGS:
 ======

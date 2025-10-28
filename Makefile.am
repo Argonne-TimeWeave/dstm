@@ -12,11 +12,9 @@ AM_CPPFLAGS = \
 	      -I$(top_srcdir)/include \
 	      -I$(top_builddir)/include
 
-AM_CFLAGS = $(AML_CFLAGS) \
-	    $(ABT_CFLAGS)
+AM_CFLAGS = $(AML_CFLAGS)
 
-AM_LDFLAGS = $(AML_LIBS) \
-	     $(ABT_LIBS)
+AM_LDFLAGS = $(AML_LIBS)
 
 EXTRA_DIST += autogen.sh dstm.pc README.markdown LICENSE AUTHORS
 
@@ -44,6 +42,9 @@ include_dstmdir=$(includedir)/dstm
 include_dstm_HEADERS = \
 		      include/dstm/version.h
 
+noinst_include_internaldir = $(includedir)/internal
+noinst_include_internal_HEADERS = \
+				  include/internal/region.h
 ###############################################################################
 # Library
 ###############################################################################
@@ -52,6 +53,8 @@ lib_LTLIBRARIES = libdstm.la
 
 libdstm_la_SOURCES = \
 		    src/log.c \
+		    src/error.c \
+		    src/region.c \
 		    src/dstm.c
 
 libdstm_la_LIBADD = $(LTLIBOBJS)

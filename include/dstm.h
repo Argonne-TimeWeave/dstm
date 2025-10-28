@@ -121,39 +121,55 @@ int dstm_log_setlevel(int level);
 
 /*******************************************************************************
  * Basic API
- *
- * 3 core concepts
- *   - logical regions
- *   - logical processes
- *   - timestamped API
  ******************************************************************************/
 
-struct dstm_communicator;
-typedef struct dstm_communicator dstm_comm_t;
+/* distance between ranks, expressed as a 1D array of length size *size; */
+struct dstm_distance_s {
+	int *distances;
+	size_t size;
+};
+typedef struct dstm_distance_s dstm_distance_t;
 
-extern dstm_comm_t DSTM_COMM_WORLD;
+extern dstm_distance_t DSTM_DISTANCE_IDENTITY;
 
-int dstm_comm_rank(dstm_comm_t *comm, int *rank);
-int dstm_comm_size(dstm_comm_t *comm, int *size);
+int dstm_distance_deepcopy(dstm_distance_t dst, dstm_distance_t src);
 
-int dstm_comm_tree_split(dstm_comm_t *comm, int parent, dstm_comm_t **tree);
-int dstm_comm_destroy(dstm_comm_t **comm);
+/* basic configuration of dstm:
+ */
+int dstm_start(dstm_distance_t dist);
+int dstm_fini();
 
-struct dstm_logical_region;
-typedef struct dstm_logical_region dstm_lr_t;
+/* a memory region: core object that get updated by the simulation using the
+ * DSTM model.
+ *
+ * Has a unique ID within the DSTM, and a current time. Internally maintains a
+ * list of pending requests to R/W to it.
+ */
 
-struct dstm_physical_location;
-typedef struct dstm_physical_location dstm_phy_t;
+struct dstm_region_s;
+typedef struct dstm_region_s dstm_region_t;
 
-int dstm_lr_create(dstm_lr_t **lr, dstm_phy_t, size_t size);
-void dstm_lr_destroy(dstm_lr_t **lr);
+/* type alias to a timestamp, this is logical time (within the simulation), not
+ * real time. */
+typedef int64_t dstm_time_t;
 
-struct dstm_logical_process;
-typedef struct dstm_logical_process dstm_lp_t;
-typedef int (*dstm_lp_func_t)(dstm_lp_t *self, void *arg);
+/* allocate space in a region for data */
+void *dstm_region_malloc(dstm_region_t *r, size_t size);
+void dstm_region_free(dstm_region_t *r, void *ptr);
 
-int dstm_lp_spawn(dstm_lp_t **lp, dstm_lp_func_t func, void *arg);
-int dstm_lp_join(dstm_lp_t **lp);
+
+dstm_region_t *dstm_get_local_region(int id);
+
+int dstm_put_local(dstm_region_t *r, dstm_time_t delta, void *dst, void *src, size_t
+		   size);
+int dstm_get_local(dstm_region_t *r, dstm_time_t delta, void *dst, void *src, size_t
+		   size);
+
+int dstm_put_remote(int rank, int region_id, dstm_time_t time, dstm_time_t delta, void *dst, void
+		    *src, size_t size);
+int dstm_get_remote(int rank, int region_id, dstm_time_t time, dstm_time_t delta, void *dst, void
+		    *src, size_t size);
+
 
 #ifdef __cplusplus
 }
