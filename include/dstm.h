@@ -154,22 +154,20 @@ typedef struct dstm_region_s dstm_region_t;
 typedef int64_t dstm_time_t;
 
 /* allocate space in a region for data */
-void *dstm_region_malloc(dstm_region_t *r, size_t size);
-void dstm_region_free(dstm_region_t *r, void *ptr);
+intptr_t dstm_region_malloc(dstm_region_t *r, size_t size);
+void dstm_region_free(dstm_region_t *r, intptr_t ptr);
 
 
-dstm_region_t *dstm_get_local_region(int id);
+int dstm_get_local_region_id(void);
+dstm_region_t *dstm_get_local_region(void);
 
-int dstm_put_local(dstm_region_t *r, dstm_time_t delta, void *dst, void *src, size_t
-		   size);
-int dstm_get_local(dstm_region_t *r, dstm_time_t delta, void *dst, void *src, size_t
-		   size);
+int dstm_put(int rank, int region_id, dstm_time_t time, dstm_time_t delta,
+	     intptr_t dst, void *src, size_t size);
+int dstm_get(int rank, int region_id, dstm_time_t time, dstm_time_t delta,
+	     void *dst, intptr_t src, size_t size);
 
-int dstm_put_remote(int rank, int region_id, dstm_time_t time, dstm_time_t delta, void *dst, void
-		    *src, size_t size);
-int dstm_get_remote(int rank, int region_id, dstm_time_t time, dstm_time_t delta, void *dst, void
-		    *src, size_t size);
-
+/* still not sure on this one */
+int dstm_step(dstm_region_t *r, int delta);
 
 #ifdef __cplusplus
 }

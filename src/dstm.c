@@ -11,6 +11,7 @@
 #include "config.h"
 
 #include "dstm.h"
+#include "internal/globals.h"
 #include "internal/region.h"
 #include <aml.h>
 #include <mpi.h>
@@ -29,24 +30,18 @@ int dstm_errno = 0;
  * Should be in a user controlled struct, but a singleton will do for now.
  ******************************************************************************/
 
-struct dstm_context_s {
-	MPI_Comm comm;
-	int world_size;
-	int rank;
-	dstm_region_t *region;
-	dstm_distance_t distances;
-};
-typedef struct dstm_context_s dstm_context_t;
-
 dstm_context_t dstm_global_context = { 0, 0 , 0, NULL, { NULL, 0}};
 
 /*******************************************************************************
  * Utils
  ******************************************************************************/
-
-dstm_region_t *dstm_get_local_region(int id)
+int dstm_get_local_region_id(void)
 {
-	assert(id == 0);
+	return dstm_global_context.rank;
+}
+
+dstm_region_t *dstm_get_local_region(void)
+{
 	return dstm_global_context.region;
 }
 
