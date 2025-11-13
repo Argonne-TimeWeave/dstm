@@ -84,7 +84,8 @@ VALGRIND_SUPPRESSIONS_FILES = $(top_srcdir)/.valgrind.supp
 @VALGRIND_CHECK_RULES@
 
 COMPILED_TESTS = \
-		tests/core
+		tests/core \
+		tests/pdes
 
 # unit tests
 UNIT_TESTS = \
