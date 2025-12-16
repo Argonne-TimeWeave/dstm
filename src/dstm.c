@@ -13,6 +13,7 @@
 #include "dstm.h"
 #include "internal/globals.h"
 #include "internal/region.h"
+#include "internal/msg.h"
 #include <aml.h>
 #include <mpi.h>
 #include <stdlib.h>
@@ -123,11 +124,14 @@ int dstm_init(int *argc, char **argv[])
 	dstm_global_context.world_size = world_size;
 	dstm_global_context.rank = rank;
 
+	dstm_msg_init();
+
 	return DSTM_SUCCESS;
 }
 
 int dstm_finalize(void)
 {
+	dstm_msg_finalize();
 	MPI_Finalize();
 	if (DSTM_DISTANCE_IDENTITY.distances != NULL)
 		free(DSTM_DISTANCE_IDENTITY.distances);
