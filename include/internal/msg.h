@@ -24,48 +24,65 @@ extern "C" {
  ******************************************************************************/
 
 #define DSTM_MSG_TYPE_PUT 0
-#define DSTM_MSG_TYPE_GET 1
-#define DSTM_MSG_TYPE_MAX 2
+#define DSTM_MSG_TYPE_GET_REQ 1
+#define DSTM_MSG_TYPE_GET_REP 2
+#define DSTM_MSG_TYPE_MAX 3
 
-struct dstm_msg_s {
+struct dstm_msg_hdr_s {
 	int type;
-	MPI_Request request;
-	void *header;
-	void *buf;
-};
-typedef struct dstm_msg_s dstm_msg_t;
-
-struct dstm_msg_put_s {
+	int dst_rank;
+	int src_rank;
 	dstm_time_t time;
 	dstm_time_t delta;
-	int rank;
+};
+typedef struct dstm_msg_hdr_s dstm_msg_hdr_t;
+
+struct dstm_msg_put_s {
 	intptr_t dst;
 	size_t size;
 };
 typedef struct dstm_msg_put_s dstm_msg_put_t;
 
 struct dstm_msg_get_s {
-	dstm_time_t time;
-	dstm_time_t delta;
-	int rank;
-	intptr_t src;
+	intptr_t ptr;
 	size_t size;
 };
 typedef struct dstm_msg_get_s dstm_msg_get_t;
 
+struct dstm_msg_s {
+	/* required for asynchronous requests */
+	MPI_Request request;
+	dstm_msg_hdr_t header;
+	union {
+		dstm_msg_put_t put;
+		dstm_msg_get_t get;
+	} u;
+	/* data buffer, if needed */
+	void *data;
+	/* packing buffer, if needed */
+	void *packbuf;
+};
+typedef struct dstm_msg_s dstm_msg_t;
+
 /*******************************************************************************
- * Create/Destroy
+ * Create/Destroy: No memory allocation implyed
  ******************************************************************************/
 
-int dstm_msg_create_put(dstm_msg_t **msg, int type, dstm_time_t time, dstm_time_t delta,
-		    int rank, intptr_t src, size_t size);
-int dstm_msg_create_get(dstm_msg_t **msg, int type, dstm_time_t time, dstm_time_t delta,
-		    int rank, intptr_t src, size_t size);
-void dstm_msg_destroy(dstm_msg_t **msg);
+int dstm_msg_init(void);
+int dstm_msg_finalize(void);
 
-int dstm_msg_isend(int dst, int src, dstm_msg_t **m);
-int dstm_msg_send(int dst, int src, dstm_msg_t **m);
-int dstm_msg_irecv(dstm_request_t *req, int src, void *buf, size_t size);
+int dstm_msg_fill_hdr(dstm_msg_t *msg, int type, dstm_time_t time, dstm_time_t
+		       delta, int dst_rank, int src_rank);
+
+int dstm_msg_fill_put(dstm_msg_t *msg, intptr_t dst, void *src, size_t size);
+int dstm_msg_fill_getreq(dstm_msg_t *msg, intptr_t src, size_t size);
+int dstm_msg_fill_getrep(dstm_msg_t *msg, void *dst, size_t size);
+
+int dstm_msg_send(dstm_msg_t *msg);
+int dstm_msg_isend(dstm_msg_t *msg);
+
+int dstm_msg_irecv(dstm_msg_t *msg);
+int dstm_msg_recvany(dstm_msg_t *msg);
 
 #ifdef __cplusplus
 }

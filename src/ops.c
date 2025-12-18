@@ -30,7 +30,8 @@
 #define DSTM_REQUEST_STATUS_INIT 0
 #define DSTM_REQUEST_STATUS_ISEND 1
 #define DSTM_REQUEST_STATUS_IRECV 2
-#define DSTM_REQUEST_STATUS_MAX 3
+#define DSTM_REQUEST_STATUS_DONE 3
+#define DSTM_REQUEST_STATUS_MAX 4
 
 struct dstm_request_s {
 	int type;
@@ -41,7 +42,7 @@ struct dstm_request_s {
 	intptr_t dst;
 	intptr_t src;
 	size_t size;
-	dstm_msg_t *msg;
+	dstm_msg_t msg;
 	struct dstm_request_s *prev, *next;
 };
 typedef struct dstm_request_s dstm_request_t;
@@ -79,7 +80,7 @@ int dstm_request_create(dstm_request_t **r, int type, dstm_time_t time, dstm_tim
 
 	dstm_request_t *req = calloc(1, sizeof(dstm_request_t));
 	if (req == NULL)
-		return NULL;
+		return -DSTM_ENOMEM;
 
 	req->type = type;
 	req->status = DSTM_REQUEST_STATUS_INIT;
@@ -93,10 +94,24 @@ int dstm_request_create(dstm_request_t **r, int type, dstm_time_t time, dstm_tim
 	return 0;
 }
 
+int dstm_request_destroy(dstm_request_t **r)
+{
+	if(r == NULL || *r == NULL)
+		return 0;
+	free(*r);
+	*r = NULL;
+	return 0;
+}
+
 
 /*******************************************************************************
  * Request Mechanics
  ******************************************************************************/
+
+int dstm_request_isdone(dstm_request_t *req)
+{
+	return req->status == DSTM_REQUEST_STATUS_DONE;
+}
 
 int dstm_request_progress(dstm_request_t *req) {
 	assert(req != NULL);
@@ -143,16 +158,12 @@ int dstm_put(int rank, int region_id, dstm_time_t time, dstm_time_t delta,
 		dstm_request_create(&req, DSTM_REQUEST_TYPE_OUT_PUT, time, delta,
 				 rank, dst, (intptr_t)src, size);
 
-		/* create a buffer containing the data needed for a MPI_ISEND
+		/* send out the operation asynchronously, with an extra copy of
+		 * the source buffer
 		 */
-		dsmt_msg_t *msg;
-		dstm_msg_create_put(&msg, time, delta, dstm_global_context.rank,
-						  dst, src, size);
-
-		/* isend the message, and progress the request to ISEND,
-		 * can't destroy the message, so keep it in the request */
-		dstm_msg_isend(msg, rank);
-		req->msg = msg;
+		dstm_msg_fill_hdr(&req->msg, DSTM_MSG_TYPE_PUT, time, delta, rank, dstm_global_context.rank);
+		dstm_msg_fill_put(&req->msg, dst, src, size);
+		dstm_msg_isend(&req->msg);
 		req->status = DSTM_REQUEST_STATUS_ISEND;
 	}
 	DL_INSERT_INORDER(requests, req, dstm_request_cmp_departure);
@@ -169,18 +180,23 @@ int dstm_put(int rank, int region_id, dstm_time_t time, dstm_time_t delta,
 		done = 0;
 	
 	while(!done) {
+
+		/* TODO: receive incoming requests */
 			
 		/* loop over all requests, see what can be progressed */
-		dstm_req_t *it, *tmp;
+		dstm_request_t *it, *tmp;
 		DL_FOREACH_SAFE(requests, it, tmp) {
-			dstm_req_progress(it);	
-			if(dstm_req_isdone(it)) {
+			/* don't go further than new time */
+			if (it->time >= time)
+				break;
+			dstm_request_progress(it);	
+			if(dstm_request_isdone(it)) {
 				DL_DELETE(requests, it);
 				if (it == req) {
 					/* we're done, post process */
 					done = 1;
 				}
-				dstm_req_destroy(it);
+				dstm_request_destroy(&it);
 			}
 		}
 	}
@@ -248,11 +264,13 @@ int dstm_get(int rank, int region_id, dstm_time_t time, dstm_time_t delta,
 		 * completes.
 		 */
 
-		dsmt_msg_t *msg;
-		dstm_msg_create_get(&msg, time, delta, dstm_global_context.rank,
-						  src, size);
-		dstm_msg_send(rank, dstm_global_context.rank, &msg);
-		dstm_msg_irecv(req, rank, dst, size);
+		dstm_msg_fill_hdr(&req->msg, DSTM_MSG_TYPE_GET_REQ, time, delta, rank, dstm_global_context.rank);
+		dstm_msg_fill_getreq(&req->msg, src, size);
+		dstm_msg_send(&req->msg);
+
+		dstm_msg_fill_hdr(&req->msg, DSTM_MSG_TYPE_GET_REP, time, delta, rank, dstm_global_context.rank);
+		dstm_msg_fill_getrep(&req->msg, dst, size);
+		dstm_msg_irecv(&req->msg);
 		req->status = DSTM_REQUEST_STATUS_IRECV;
 	}
 	DL_INSERT_INORDER(requests, req, dstm_request_cmp_departure);
@@ -265,23 +283,26 @@ int dstm_get(int rank, int region_id, dstm_time_t time, dstm_time_t delta,
 	int done = 0;
 	while(!done) {
 		/* see if we have any messages pending, handle them */
-		dstm_msg_t *pd = dstm_msg_recvany();
-		if (pd != NULL) {
+		dstm_msg_t pd;
+		//dstm_msg_probe(&pd);
+		if (pd.header.type != -1) {
+			//dstm_msg_recv(&pd);
 			/* TODO */
+			/* is the msg a new request ? */
 
 		}
 
 		/* loop over all requests, see what can be progressed */
-		dstm_req_t *it, *tmp;
+		dstm_request_t *it, *tmp;
 		DL_FOREACH_SAFE(requests, it, tmp) {
-			dstm_req_progress(it);	
-			if(dstm_req_isdone(it)) {
+			dstm_request_progress(it);	
+			if(dstm_request_isdone(it)) {
 				DL_DELETE(requests, it);
 				if (it == req) {
 					/* we're done, post process */
 					done = 1;
 				}
-				dstm_req_destroy(it);
+				dstm_request_destroy(&it);
 			}
 		}
 	}
