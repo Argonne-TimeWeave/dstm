@@ -56,6 +56,7 @@ libdstm_la_SOURCES = \
 		    src/error.c \
 		    src/region.c \
 		    src/ops.c \
+		    src/msg.c \
 		    src/dstm.c
 
 libdstm_la_LIBADD = $(LTLIBOBJS)

@@ -180,8 +180,11 @@ int dstm_put(int rank, int region_id, dstm_time_t time, dstm_time_t delta,
 		done = 0;
 	
 	while(!done) {
-
-		/* TODO: receive incoming requests */
+		dstm_msg_t m;
+		/* block until we receive one incoming message */
+		dstm_msg_recvany(&m);
+		
+		/* TODO handle the message */
 			
 		/* loop over all requests, see what can be progressed */
 		dstm_request_t *it, *tmp;
@@ -282,14 +285,39 @@ int dstm_get(int rank, int region_id, dstm_time_t time, dstm_time_t delta,
 	 */
 	int done = 0;
 	while(!done) {
-		/* see if we have any messages pending, handle them */
-		dstm_msg_t pd;
-		//dstm_msg_probe(&pd);
-		if (pd.header.type != -1) {
-			//dstm_msg_recv(&pd);
-			/* TODO */
-			/* is the msg a new request ? */
+		dstm_request_t *nr;
+		dstm_msg_t m;
+		/* block until we receive one incoming message */
+		dstm_msg_recvany(&m);
 
+		switch(m.header.type) {
+			case DSTM_MSG_TYPE_PUT:
+				/* request for a put, enqueue the request as an
+				 * incoming put
+				 */
+				dstm_request_create(&nr, DSTM_REQUEST_TYPE_IN_PUT, m.header.time, m.header.delta,
+				 m.header.dst_rank, m.u.put.dst, (intptr_t)m.data,
+				 m.u.put.size);
+				nr->msg = m;
+				DL_INSERT_INORDER(requests, nr, dstm_request_cmp_departure);
+				break;
+			case DSTM_MSG_TYPE_GET_REQ:
+				/* request for a get, enqueue as an incoming
+				 * get
+				 */
+				dstm_request_create(&nr, DSTM_REQUEST_TYPE_IN_PUT, m.header.time, m.header.delta,
+				 m.header.dst_rank, (intptr_t)m.data, m.u.get.ptr,
+				 m.u.get.size);
+				nr->msg = m;
+				DL_INSERT_INORDER(requests, nr, dstm_request_cmp_departure);
+				break;
+			case DSTM_MSG_TYPE_GET_REP:
+				/* response for a get, not supposed to arrive
+				 * here?
+				 * TODO figure out how existing irecvs and  mpi_probe interact
+				 */
+			default:
+				assert(0);
 		}
 
 		/* loop over all requests, see what can be progressed */

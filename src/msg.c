@@ -45,6 +45,7 @@ int dstm_msg_init(void)
 int dstm_msg_finalize(void)
 {
 	MPI_Type_free(&dstm_msg_hdr_dt);
+	return 0;
 }
 
 /*******************************************************************************
@@ -54,43 +55,42 @@ int dstm_msg_finalize(void)
 int dstm_msg_fill_hdr(dstm_msg_t *m, int type, dstm_time_t time, dstm_time_t delta, int src_rank, int dst_rank)
 {
 	assert(type < DSTM_MSG_TYPE_MAX);
-	msg->header.type = DSTM_MSG_TYPE_PUT;
-	msg->header.dst_rank = dst_rank;
-	msg->header.src_rank = src_rank;
-	msg->header.time = time;
-	msg->header.delta = delta;
+	m->header.type = DSTM_MSG_TYPE_PUT;
+	m->header.dst_rank = dst_rank;
+	m->header.src_rank = src_rank;
+	m->header.time = time;
+	m->header.delta = delta;
 	return 0;
 }
 
-int dstm_msg_fill_put(dstm_msg_t *m, intptr_t dst, intptr_t src, size_t size)
+int dstm_msg_fill_put(dstm_msg_t *m, intptr_t dst, void *src, size_t size)
 {
 	assert(src != NULL);
-	msg->u.put.dst = dst;
-	msg->u.put.size = size;
+	m->u.put.dst = dst;
+	m->u.put.size = size;
 
 	/* TODO: should work, but needs to be tested */
-	msg->data = src;
+	m->data = src;
 	return 0;
 }
 
 int dstm_msg_fill_getreq(dstm_msg_t *m, intptr_t src, size_t size)
 {
-	assert(src != NULL);
-	msg->u.get.ptr = src;
-	msg->u.get.size = size;
+	assert(src != 0);
+	m->u.get.ptr = src;
+	m->u.get.size = size;
 
-	msg->data = NULL;
+	m->data = NULL;
 	return 0;
 }
 
-int dstm_msg_fill_getrep(dstm_msg_t *m, intptr_t dst, size_t size)
+int dstm_msg_fill_getrep(dstm_msg_t *m, void *dst, size_t size)
 {
-	assert(src != NULL);
-	msg->u.get.ptr = dst;
-	msg->u.get.size = size;
+	m->u.get.ptr = (intptr_t)dst;
+	m->u.get.size = size;
 
 	/* TODO: should work, but needs to be tested */
-	msg->data = dst;
+	m->data = dst;
 	return 0;
 }
 
@@ -122,7 +122,7 @@ int dstm_msg_isend_put(dstm_msg_t *msg)
 		 dstm_global_context.comm);
 
 	/* send the message */
-	MPI_Isend(msg->packbuf, pos, MPI_PACKED, msg->header->dst_rank, MPI_TAG_ANY,
+	MPI_Isend(msg->packbuf, pos, MPI_PACKED, msg->header.dst_rank, MPI_ANY_TAG,
 		  dstm_global_context.comm, &msg->request);
 	return 0;
 }
@@ -158,7 +158,8 @@ int dstm_msg_send_getreq(dstm_msg_t *msg)
 		 dstm_global_context.comm);
 
 	/* send the message */
-	MPI_Send(msg->packbuf, pos, MPI_PACKED, msg->header->dst_rank, MPI_TAG_ANY,
+	MPI_Send(msg->packbuf, pos, MPI_PACKED, msg->header.dst_rank,
+		 MPI_ANY_TAG,
 		  dstm_global_context.comm);
 	
 	free(msg->packbuf);
@@ -178,7 +179,7 @@ int dstm_msg_send(dstm_msg_t *msg)
 }
 
 /*******************************************************************************
- * Receiving Messages
+ * Receiving Specific Messages
  ******************************************************************************/
 
 int dstm_msg_irecv_getrep(dstm_msg_t *msg)
@@ -195,7 +196,7 @@ int dstm_msg_irecv_getrep(dstm_msg_t *msg)
 		return -DSTM_ENOMEM;
 
 	/* receive the message */
-	MPI_Irecv(msg->packbuf, bufsz, MPI_PACKED, msg->header->dst_rank, MPI_TAG_ANY,
+	MPI_Irecv(msg->packbuf, bufsz, MPI_PACKED, msg->header.dst_rank, MPI_ANY_TAG,
 		  dstm_global_context.comm, &msg->request);
 	return 0;
 }
@@ -212,8 +213,52 @@ int dstm_msg_irecv(dstm_msg_t *msg)
 	return 0;
 }
 
-int dstm_msg_recvany(dstm_msg_t **msg)
-{
+/*******************************************************************************
+ * Receiving Unknown Messages
+ ******************************************************************************/
 
+int dstm_msg_recvany(dstm_msg_t *msg)
+{
+	int source, tag;
+	MPI_Status status;
+	
+	MPI_Probe(MPI_ANY_SOURCE, MPI_ANY_TAG, dstm_global_context.comm,  &status);
+	source = status.MPI_SOURCE;
+	tag = status.MPI_TAG;
+
+	/* there's a message to receive, let's receive it */
+	/* figure out the size of the message that we need to receive */
+	int bufsz;
+	MPI_Get_count(&status, MPI_PACKED, &bufsz);
+
+	msg->packbuf = calloc(bufsz, sizeof(char));
+	assert(msg->packbuf != NULL);
+	MPI_Recv(msg->packbuf, bufsz, MPI_PACKED, source, tag,
+		 dstm_global_context.comm, &status);
+	
+	/* unpack message header first, so that we know what we received */
+	int pos = 0;
+	MPI_Unpack(msg->packbuf, bufsz, &pos, &msg->header, 1, dstm_msg_hdr_dt,
+		   dstm_global_context.comm);
+
+	switch(msg->header.type) {
+		case DSTM_MSG_TYPE_PUT:
+			MPI_Unpack(msg->packbuf, bufsz, &pos, &msg->u.put, 1,
+				   dstm_msg_put_dt, dstm_global_context.comm);
+			msg->data = (char*)msg->packbuf + pos;
+		break;
+		case DSTM_MSG_TYPE_GET_REQ:
+			MPI_Unpack(msg->packbuf, bufsz, &pos, &msg->u.get, 1,
+				   dstm_msg_get_dt, dstm_global_context.comm);
+		break;
+		case DSTM_MSG_TYPE_GET_REP:
+			MPI_Unpack(msg->packbuf, bufsz, &pos, &msg->u.get, 1,
+				   dstm_msg_get_dt, dstm_global_context.comm);
+			msg->data = (char*)msg->packbuf + pos;
+		break;
+	default:
+		assert(0);
+	}
+	return 0;
 }
 
