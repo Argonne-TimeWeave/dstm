@@ -76,3 +76,26 @@ int dstm_region_set_ninfo(dstm_region_t *region, int rank, dstm_time_t time)
 	ni->time = time;
 	return 0;
 }
+
+/*******************************************************************************
+ * Alloc functions
+ ******************************************************************************/
+
+intptr_t dstm_region_malloc(dstm_region_t *r, size_t size)
+{
+	/* TODO: obviously, some missing translation here between a local
+	 * pointer and a region ptr value.
+	 */
+	if(r == NULL || size == 0)
+		return 0;
+	return (intptr_t) aml_alloc(r->allocator, size);
+}
+
+
+void dstm_region_free(dstm_region_t *r, intptr_t ptr)
+{
+	if (r == NULL)
+		return;
+	aml_free(r->allocator, (void *)ptr);
+}
+
