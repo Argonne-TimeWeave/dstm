@@ -113,12 +113,63 @@ int dstm_request_isdone(dstm_request_t *req)
 	return req->status == DSTM_REQUEST_STATUS_DONE;
 }
 
+typedef struct dstm_request_progress_s
+{
+	int type;
+	int status;
+	int (*progress)(dstm_request_t *req);
+} dstm_request_progress_t;
+
+/* TODO: implement all those transitions */
+
+dstm_request_progress_t
+progress_sm[DSTM_REQUEST_TYPE_MAX][DSTM_REQUEST_STATUS_MAX] = {
+	{
+		{DSTM_REQUEST_TYPE_LOCAL_PUT, DSTM_REQUEST_STATUS_INIT, NULL},
+		{DSTM_REQUEST_TYPE_LOCAL_PUT, DSTM_REQUEST_STATUS_ISEND, NULL},
+		{DSTM_REQUEST_TYPE_LOCAL_PUT, DSTM_REQUEST_STATUS_IRECV, NULL},
+		{DSTM_REQUEST_TYPE_LOCAL_PUT, DSTM_REQUEST_STATUS_DONE, NULL},
+	},
+	{
+		{DSTM_REQUEST_TYPE_LOCAL_GET, DSTM_REQUEST_STATUS_INIT, NULL},
+		{DSTM_REQUEST_TYPE_LOCAL_GET, DSTM_REQUEST_STATUS_ISEND, NULL},
+		{DSTM_REQUEST_TYPE_LOCAL_GET, DSTM_REQUEST_STATUS_IRECV, NULL},
+		{DSTM_REQUEST_TYPE_LOCAL_GET, DSTM_REQUEST_STATUS_DONE, NULL},
+	},
+	{
+		{DSTM_REQUEST_TYPE_IN_PUT, DSTM_REQUEST_STATUS_INIT, NULL},
+		{DSTM_REQUEST_TYPE_IN_PUT, DSTM_REQUEST_STATUS_ISEND, NULL},
+		{DSTM_REQUEST_TYPE_IN_PUT, DSTM_REQUEST_STATUS_IRECV, NULL},
+		{DSTM_REQUEST_TYPE_IN_PUT, DSTM_REQUEST_STATUS_DONE, NULL},
+	},
+	{
+		{DSTM_REQUEST_TYPE_IN_GET, DSTM_REQUEST_STATUS_INIT, NULL},
+		{DSTM_REQUEST_TYPE_IN_GET, DSTM_REQUEST_STATUS_ISEND, NULL},
+		{DSTM_REQUEST_TYPE_IN_GET, DSTM_REQUEST_STATUS_IRECV, NULL},
+		{DSTM_REQUEST_TYPE_IN_GET, DSTM_REQUEST_STATUS_DONE, NULL},
+	},
+	{
+		{DSTM_REQUEST_TYPE_OUT_PUT, DSTM_REQUEST_STATUS_INIT, NULL},
+		{DSTM_REQUEST_TYPE_OUT_PUT, DSTM_REQUEST_STATUS_ISEND, NULL},
+		{DSTM_REQUEST_TYPE_OUT_PUT, DSTM_REQUEST_STATUS_IRECV, NULL},
+		{DSTM_REQUEST_TYPE_OUT_PUT, DSTM_REQUEST_STATUS_DONE, NULL},
+	},
+	{
+		{DSTM_REQUEST_TYPE_OUT_GET, DSTM_REQUEST_STATUS_INIT, NULL},
+		{DSTM_REQUEST_TYPE_OUT_GET, DSTM_REQUEST_STATUS_ISEND, NULL},
+		{DSTM_REQUEST_TYPE_OUT_GET, DSTM_REQUEST_STATUS_IRECV, NULL},
+		{DSTM_REQUEST_TYPE_OUT_GET, DSTM_REQUEST_STATUS_DONE, NULL},
+	},
+
+};
+
 int dstm_request_progress(dstm_request_t *req) {
 	assert(req != NULL);
 	/* state machine logic: based on the request type and the current state, 
 	 * make the next action
 	 */
-	/* TODO */
+	if (progress_sm[req->type][req->status].progress != NULL)
+		return progress_sm[req->type][req->status].progress(req);
 	return 0;
 }
 
@@ -180,11 +231,40 @@ int dstm_put(int rank, int region_id, dstm_time_t time, dstm_time_t delta,
 		done = 0;
 	
 	while(!done) {
+		dstm_request_t *nr;
 		dstm_msg_t m;
 		/* block until we receive one incoming message */
 		dstm_msg_recvany(&m);
 		
-		/* TODO handle the message */
+		switch(m.header.type) {
+			case DSTM_MSG_TYPE_PUT:
+				/* request for a put, enqueue the request as an
+				 * incoming put
+				 */
+				dstm_request_create(&nr, DSTM_REQUEST_TYPE_IN_PUT, m.header.time, m.header.delta,
+				 m.header.dst_rank, m.u.put.dst, (intptr_t)m.data,
+				 m.u.put.size);
+				nr->msg = m;
+				DL_INSERT_INORDER(requests, nr, dstm_request_cmp_departure);
+				break;
+			case DSTM_MSG_TYPE_GET_REQ:
+				/* request for a get, enqueue as an incoming
+				 * get
+				 */
+				dstm_request_create(&nr, DSTM_REQUEST_TYPE_IN_PUT, m.header.time, m.header.delta,
+				 m.header.dst_rank, (intptr_t)m.data, m.u.get.ptr,
+				 m.u.get.size);
+				nr->msg = m;
+				DL_INSERT_INORDER(requests, nr, dstm_request_cmp_departure);
+				break;
+			case DSTM_MSG_TYPE_GET_REP:
+				/* response for a get, not supposed to arrive
+				 * here?
+				 * TODO figure out how existing irecvs and  mpi_probe interact
+				 */
+			default:
+				assert(0);
+		}
 			
 		/* loop over all requests, see what can be progressed */
 		dstm_request_t *it, *tmp;
