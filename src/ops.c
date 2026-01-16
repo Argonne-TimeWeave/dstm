@@ -235,7 +235,11 @@ int dstm_put(int rank, int region_id, dstm_time_t time, dstm_time_t delta,
 		dstm_msg_t m;
 		/* block until we receive one incoming message */
 		dstm_msg_recvany(&m);
-		
+
+		/* Update neighbor's highest received timestamp */
+		dstm_region_set_ninfo(dstm_global_context.region,
+		                      m.header.src_rank, m.header.time);
+
 		switch(m.header.type) {
 			case DSTM_MSG_TYPE_PUT:
 				/* request for a put, enqueue the request as an
@@ -369,6 +373,10 @@ int dstm_get(int rank, int region_id, dstm_time_t time, dstm_time_t delta,
 		dstm_msg_t m;
 		/* block until we receive one incoming message */
 		dstm_msg_recvany(&m);
+
+		/* Update neighbor's highest received timestamp */
+		dstm_region_set_ninfo(dstm_global_context.region,
+		                      m.header.src_rank, m.header.time);
 
 		switch(m.header.type) {
 			case DSTM_MSG_TYPE_PUT:

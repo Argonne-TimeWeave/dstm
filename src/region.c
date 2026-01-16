@@ -65,15 +65,22 @@ int dstm_region_set_ninfo(dstm_region_t *region, int rank, dstm_time_t time)
 	if (region == NULL)
 		return -DSTM_EINVAL;
 
+	/* if the neighbor region is already known, only update if the time is
+	 * higher
+	 */
 	dstm_region_ninfo_t *ni;
 	HASH_FIND_INT(region->ninfos, &rank, ni);
 	if (ni == NULL) {
 		ni = calloc(1, sizeof(*ni));
 		assert(ni != NULL);
 		ni->rank = rank;
+		ni->time = time;
 		HASH_ADD_INT(region->ninfos, rank, ni);
+	} else {
+		if (time > ni->time) {
+			ni->time = time;
+		}
 	}
-	ni->time = time;
 	return 0;
 }
 
