@@ -73,6 +73,9 @@ endif
 # TESTS
 ###############################################################################
 
+# mpi tests use a different driver (bats), so we configure them in a subdir
+SUBDIRS += tests/mpi
+
 AM_COLOR_TESTS = yes
 AM_CPPFLAGS += $(CHECK_CFLAGS)
 AM_CFLAGS += $(CHECK_CFLAGS)
@@ -85,8 +88,7 @@ VALGRIND_SUPPRESSIONS_FILES = $(top_srcdir)/.valgrind.supp
 @VALGRIND_CHECK_RULES@
 
 COMPILED_TESTS = \
-		tests/core \
-		tests/pdes
+		tests/core
 
 # unit tests
 UNIT_TESTS = \

@@ -69,6 +69,10 @@ PKG_CHECK_MODULES([CHECK],[check],,
 PKG_CHECK_MODULES([AML],[aml],,
 		  AC_MSG_ERROR([unable to find aml]))
 
+# support for testing command line programs
+AC_CHECK_PROG([BATS], [bats], [bats])
+AS_IF([test "x$BATS" = "x"],[AC_MSG_ERROR(could not find bats)],[])
+
 # PYTHON
 #########
 
@@ -95,7 +99,9 @@ AC_CONFIG_HEADERS([src/config.h])
 AC_CONFIG_FILES([Makefile
 		 bindings/python/Makefile
 		 dstm.pc
-		 include/dstm/version.h])
+		 include/dstm/version.h
+		 tests/mpi/bats-driver.sh
+		 tests/mpi/Makefile])
 AC_OUTPUT
 
 # print out what was configured
