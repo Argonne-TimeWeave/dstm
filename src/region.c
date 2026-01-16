@@ -28,7 +28,7 @@ int dstm_region_create(dstm_region_t **region, size_t size)
 		return -DSTM_ENOMEM;
 
 	err = aml_allocator_buddy_create(&ret->allocator, &aml_area_linux,
-				   NULL);
+	                                 NULL);
 	if (err != AML_SUCCESS)
 		goto end;
 
@@ -52,7 +52,8 @@ void dstm_region_destroy(dstm_region_t **region)
 		return;
 
 	dstm_region_ninfo_t *ni, *tmp;
-	HASH_ITER(hh, r->ninfos, ni, tmp) {
+	HASH_ITER(hh, r->ninfos, ni, tmp)
+	{
 		HASH_DEL(r->ninfos, ni);
 		free(ni);
 	}
@@ -93,11 +94,10 @@ intptr_t dstm_region_malloc(dstm_region_t *r, size_t size)
 	/* TODO: obviously, some missing translation here between a local
 	 * pointer and a region ptr value.
 	 */
-	if(r == NULL || size == 0)
+	if (r == NULL || size == 0)
 		return 0;
-	return (intptr_t) aml_alloc(r->allocator, size);
+	return (intptr_t)aml_alloc(r->allocator, size);
 }
-
 
 void dstm_region_free(dstm_region_t *r, intptr_t ptr)
 {
@@ -105,4 +105,3 @@ void dstm_region_free(dstm_region_t *r, intptr_t ptr)
 		return;
 	aml_free(r->allocator, (void *)ptr);
 }
-

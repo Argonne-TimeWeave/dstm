@@ -10,15 +10,18 @@
 
 #include "config.h"
 
-#include "dstm.h"
-#include "internal/region.h"
-#include "internal/globals.h"
-#include "internal/utlist.h"
-#include "internal/msg.h"
 #include <mpi.h>
 #include <stdlib.h>
 
-/* we need to make the distinction between local, incoming, or outgoing request */
+#include "dstm.h"
+
+#include "internal/globals.h"
+#include "internal/msg.h"
+#include "internal/region.h"
+#include "internal/utlist.h"
+
+/* we need to make the distinction between local, incoming, or outgoing request
+ */
 #define DSTM_REQUEST_TYPE_LOCAL_PUT 0
 #define DSTM_REQUEST_TYPE_LOCAL_GET 1
 #define DSTM_REQUEST_TYPE_IN_PUT 2
@@ -72,8 +75,14 @@ int dstm_request_cmp_departure(dstm_request_t *a, dstm_request_t *b)
  * Basic request management
  ******************************************************************************/
 
-int dstm_request_create(dstm_request_t **r, int type, dstm_time_t time, dstm_time_t delta, int rank,
-		     intptr_t dst, intptr_t src, size_t size)
+int dstm_request_create(dstm_request_t **r,
+                        int type,
+                        dstm_time_t time,
+                        dstm_time_t delta,
+                        int rank,
+                        intptr_t dst,
+                        intptr_t src,
+                        size_t size)
 {
 	assert(type < DSTM_REQUEST_TYPE_MAX);
 	assert(r != NULL);
@@ -96,13 +105,12 @@ int dstm_request_create(dstm_request_t **r, int type, dstm_time_t time, dstm_tim
 
 int dstm_request_destroy(dstm_request_t **r)
 {
-	if(r == NULL || *r == NULL)
+	if (r == NULL || *r == NULL)
 		return 0;
 	free(*r);
 	*r = NULL;
 	return 0;
 }
-
 
 /*******************************************************************************
  * Request Mechanics
@@ -113,8 +121,7 @@ int dstm_request_isdone(dstm_request_t *req)
 	return req->status == DSTM_REQUEST_STATUS_DONE;
 }
 
-typedef struct dstm_request_progress_s
-{
+typedef struct dstm_request_progress_s {
 	int type;
 	int status;
 	int (*progress)(dstm_request_t *req);
@@ -122,50 +129,50 @@ typedef struct dstm_request_progress_s
 
 /* TODO: implement all those transitions */
 
-dstm_request_progress_t
-progress_sm[DSTM_REQUEST_TYPE_MAX][DSTM_REQUEST_STATUS_MAX] = {
-	{
-		{DSTM_REQUEST_TYPE_LOCAL_PUT, DSTM_REQUEST_STATUS_INIT, NULL},
-		{DSTM_REQUEST_TYPE_LOCAL_PUT, DSTM_REQUEST_STATUS_ISEND, NULL},
-		{DSTM_REQUEST_TYPE_LOCAL_PUT, DSTM_REQUEST_STATUS_IRECV, NULL},
-		{DSTM_REQUEST_TYPE_LOCAL_PUT, DSTM_REQUEST_STATUS_DONE, NULL},
-	},
-	{
-		{DSTM_REQUEST_TYPE_LOCAL_GET, DSTM_REQUEST_STATUS_INIT, NULL},
-		{DSTM_REQUEST_TYPE_LOCAL_GET, DSTM_REQUEST_STATUS_ISEND, NULL},
-		{DSTM_REQUEST_TYPE_LOCAL_GET, DSTM_REQUEST_STATUS_IRECV, NULL},
-		{DSTM_REQUEST_TYPE_LOCAL_GET, DSTM_REQUEST_STATUS_DONE, NULL},
-	},
-	{
-		{DSTM_REQUEST_TYPE_IN_PUT, DSTM_REQUEST_STATUS_INIT, NULL},
-		{DSTM_REQUEST_TYPE_IN_PUT, DSTM_REQUEST_STATUS_ISEND, NULL},
-		{DSTM_REQUEST_TYPE_IN_PUT, DSTM_REQUEST_STATUS_IRECV, NULL},
-		{DSTM_REQUEST_TYPE_IN_PUT, DSTM_REQUEST_STATUS_DONE, NULL},
-	},
-	{
-		{DSTM_REQUEST_TYPE_IN_GET, DSTM_REQUEST_STATUS_INIT, NULL},
-		{DSTM_REQUEST_TYPE_IN_GET, DSTM_REQUEST_STATUS_ISEND, NULL},
-		{DSTM_REQUEST_TYPE_IN_GET, DSTM_REQUEST_STATUS_IRECV, NULL},
-		{DSTM_REQUEST_TYPE_IN_GET, DSTM_REQUEST_STATUS_DONE, NULL},
-	},
-	{
-		{DSTM_REQUEST_TYPE_OUT_PUT, DSTM_REQUEST_STATUS_INIT, NULL},
-		{DSTM_REQUEST_TYPE_OUT_PUT, DSTM_REQUEST_STATUS_ISEND, NULL},
-		{DSTM_REQUEST_TYPE_OUT_PUT, DSTM_REQUEST_STATUS_IRECV, NULL},
-		{DSTM_REQUEST_TYPE_OUT_PUT, DSTM_REQUEST_STATUS_DONE, NULL},
-	},
-	{
-		{DSTM_REQUEST_TYPE_OUT_GET, DSTM_REQUEST_STATUS_INIT, NULL},
-		{DSTM_REQUEST_TYPE_OUT_GET, DSTM_REQUEST_STATUS_ISEND, NULL},
-		{DSTM_REQUEST_TYPE_OUT_GET, DSTM_REQUEST_STATUS_IRECV, NULL},
-		{DSTM_REQUEST_TYPE_OUT_GET, DSTM_REQUEST_STATUS_DONE, NULL},
-	},
+dstm_request_progress_t progress_sm[DSTM_REQUEST_TYPE_MAX][DSTM_REQUEST_STATUS_MAX] = {
+        {
+                {DSTM_REQUEST_TYPE_LOCAL_PUT, DSTM_REQUEST_STATUS_INIT, NULL},
+                {DSTM_REQUEST_TYPE_LOCAL_PUT, DSTM_REQUEST_STATUS_ISEND, NULL},
+                {DSTM_REQUEST_TYPE_LOCAL_PUT, DSTM_REQUEST_STATUS_IRECV, NULL},
+                {DSTM_REQUEST_TYPE_LOCAL_PUT, DSTM_REQUEST_STATUS_DONE, NULL},
+        },
+        {
+                {DSTM_REQUEST_TYPE_LOCAL_GET, DSTM_REQUEST_STATUS_INIT, NULL},
+                {DSTM_REQUEST_TYPE_LOCAL_GET, DSTM_REQUEST_STATUS_ISEND, NULL},
+                {DSTM_REQUEST_TYPE_LOCAL_GET, DSTM_REQUEST_STATUS_IRECV, NULL},
+                {DSTM_REQUEST_TYPE_LOCAL_GET, DSTM_REQUEST_STATUS_DONE, NULL},
+        },
+        {
+                {DSTM_REQUEST_TYPE_IN_PUT, DSTM_REQUEST_STATUS_INIT, NULL},
+                {DSTM_REQUEST_TYPE_IN_PUT, DSTM_REQUEST_STATUS_ISEND, NULL},
+                {DSTM_REQUEST_TYPE_IN_PUT, DSTM_REQUEST_STATUS_IRECV, NULL},
+                {DSTM_REQUEST_TYPE_IN_PUT, DSTM_REQUEST_STATUS_DONE, NULL},
+        },
+        {
+                {DSTM_REQUEST_TYPE_IN_GET, DSTM_REQUEST_STATUS_INIT, NULL},
+                {DSTM_REQUEST_TYPE_IN_GET, DSTM_REQUEST_STATUS_ISEND, NULL},
+                {DSTM_REQUEST_TYPE_IN_GET, DSTM_REQUEST_STATUS_IRECV, NULL},
+                {DSTM_REQUEST_TYPE_IN_GET, DSTM_REQUEST_STATUS_DONE, NULL},
+        },
+        {
+                {DSTM_REQUEST_TYPE_OUT_PUT, DSTM_REQUEST_STATUS_INIT, NULL},
+                {DSTM_REQUEST_TYPE_OUT_PUT, DSTM_REQUEST_STATUS_ISEND, NULL},
+                {DSTM_REQUEST_TYPE_OUT_PUT, DSTM_REQUEST_STATUS_IRECV, NULL},
+                {DSTM_REQUEST_TYPE_OUT_PUT, DSTM_REQUEST_STATUS_DONE, NULL},
+        },
+        {
+                {DSTM_REQUEST_TYPE_OUT_GET, DSTM_REQUEST_STATUS_INIT, NULL},
+                {DSTM_REQUEST_TYPE_OUT_GET, DSTM_REQUEST_STATUS_ISEND, NULL},
+                {DSTM_REQUEST_TYPE_OUT_GET, DSTM_REQUEST_STATUS_IRECV, NULL},
+                {DSTM_REQUEST_TYPE_OUT_GET, DSTM_REQUEST_STATUS_DONE, NULL},
+        },
 
 };
 
-int dstm_request_progress(dstm_request_t *req) {
+int dstm_request_progress(dstm_request_t *req)
+{
 	assert(req != NULL);
-	/* state machine logic: based on the request type and the current state, 
+	/* state machine logic: based on the request type and the current state,
 	 * make the next action
 	 */
 	if (progress_sm[req->type][req->status].progress != NULL)
@@ -177,8 +184,13 @@ int dstm_request_progress(dstm_request_t *req) {
  * Distributed mechanics
  ******************************************************************************/
 
-int dstm_put(int rank, int region_id, dstm_time_t time, dstm_time_t delta,
-	     intptr_t dst, void *src, size_t size)
+int dstm_put(int rank,
+             int region_id,
+             dstm_time_t time,
+             dstm_time_t delta,
+             intptr_t dst,
+             void *src,
+             size_t size)
 {
 	(void)region_id;
 	if (src == NULL)
@@ -191,28 +203,28 @@ int dstm_put(int rank, int region_id, dstm_time_t time, dstm_time_t delta,
 	/* request tracking part:
 	 * making sure the request is being sent to the right place
 	 */
-	
+
 	/* first, figure out if this is a local request or a remote one */
 	dstm_request_t *req;
 	if (rank == dstm_global_context.rank) {
 		/* local put:
 		 * we just enqueue it locally
 		 * */
-		dstm_request_create(&req, DSTM_REQUEST_TYPE_LOCAL_PUT, time, delta,
-				 rank, dst, (intptr_t)src, size);
-	}
-	else {
+		dstm_request_create(&req, DSTM_REQUEST_TYPE_LOCAL_PUT, time,
+		                    delta, rank, dst, (intptr_t)src, size);
+	} else {
 		/* outgoing put
 		 * we enqueue it for tracking purposes, and push it out to the
 		 * appropriate rank.
 		 */
-		dstm_request_create(&req, DSTM_REQUEST_TYPE_OUT_PUT, time, delta,
-				 rank, dst, (intptr_t)src, size);
+		dstm_request_create(&req, DSTM_REQUEST_TYPE_OUT_PUT, time,
+		                    delta, rank, dst, (intptr_t)src, size);
 
 		/* send out the operation asynchronously, with an extra copy of
 		 * the source buffer
 		 */
-		dstm_msg_fill_hdr(&req->msg, DSTM_MSG_TYPE_PUT, time, delta, rank, dstm_global_context.rank);
+		dstm_msg_fill_hdr(&req->msg, DSTM_MSG_TYPE_PUT, time, delta,
+		                  rank, dstm_global_context.rank);
 		dstm_msg_fill_put(&req->msg, dst, src, size);
 		dstm_msg_isend(&req->msg);
 		req->status = DSTM_REQUEST_STATUS_ISEND;
@@ -229,8 +241,8 @@ int dstm_put(int rank, int region_id, dstm_time_t time, dstm_time_t delta,
 	int done = 1;
 	if (time > dstm_global_context.region->time)
 		done = 0;
-	
-	while(!done) {
+
+	while (!done) {
 		dstm_request_t *nr;
 		dstm_msg_t m;
 		/* block until we receive one incoming message */
@@ -240,44 +252,50 @@ int dstm_put(int rank, int region_id, dstm_time_t time, dstm_time_t delta,
 		dstm_region_set_ninfo(dstm_global_context.region,
 		                      m.header.src_rank, m.header.time);
 
-		switch(m.header.type) {
-			case DSTM_MSG_TYPE_PUT:
-				/* request for a put, enqueue the request as an
-				 * incoming put
-				 */
-				dstm_request_create(&nr, DSTM_REQUEST_TYPE_IN_PUT, m.header.time, m.header.delta,
-				 m.header.dst_rank, m.u.put.dst, (intptr_t)m.data,
-				 m.u.put.size);
-				nr->msg = m;
-				DL_INSERT_INORDER(requests, nr, dstm_request_cmp_departure);
-				break;
-			case DSTM_MSG_TYPE_GET_REQ:
-				/* request for a get, enqueue as an incoming
-				 * get
-				 */
-				dstm_request_create(&nr, DSTM_REQUEST_TYPE_IN_PUT, m.header.time, m.header.delta,
-				 m.header.dst_rank, (intptr_t)m.data, m.u.get.ptr,
-				 m.u.get.size);
-				nr->msg = m;
-				DL_INSERT_INORDER(requests, nr, dstm_request_cmp_departure);
-				break;
-			case DSTM_MSG_TYPE_GET_REP:
-				/* response for a get, not supposed to arrive
-				 * here?
-				 * TODO figure out how existing irecvs and  mpi_probe interact
-				 */
-			default:
-				assert(0);
+		switch (m.header.type) {
+		case DSTM_MSG_TYPE_PUT:
+			/* request for a put, enqueue the request as an
+			 * incoming put
+			 */
+			dstm_request_create(&nr, DSTM_REQUEST_TYPE_IN_PUT,
+			                    m.header.time, m.header.delta,
+			                    m.header.dst_rank, m.u.put.dst,
+			                    (intptr_t)m.data, m.u.put.size);
+			nr->msg = m;
+			DL_INSERT_INORDER(requests, nr,
+			                  dstm_request_cmp_departure);
+			break;
+		case DSTM_MSG_TYPE_GET_REQ:
+			/* request for a get, enqueue as an incoming
+			 * get
+			 */
+			dstm_request_create(&nr, DSTM_REQUEST_TYPE_IN_PUT,
+			                    m.header.time, m.header.delta,
+			                    m.header.dst_rank, (intptr_t)m.data,
+			                    m.u.get.ptr, m.u.get.size);
+			nr->msg = m;
+			DL_INSERT_INORDER(requests, nr,
+			                  dstm_request_cmp_departure);
+			break;
+		case DSTM_MSG_TYPE_GET_REP:
+			/* response for a get, not supposed to arrive
+			 * here?
+			 * TODO figure out how existing irecvs and  mpi_probe
+			 * interact
+			 */
+		default:
+			assert(0);
 		}
-			
+
 		/* loop over all requests, see what can be progressed */
 		dstm_request_t *it, *tmp;
-		DL_FOREACH_SAFE(requests, it, tmp) {
+		DL_FOREACH_SAFE(requests, it, tmp)
+		{
 			/* don't go further than new time */
 			if (it->time >= time)
 				break;
-			dstm_request_progress(it);	
-			if(dstm_request_isdone(it)) {
+			dstm_request_progress(it);
+			if (dstm_request_isdone(it)) {
 				DL_DELETE(requests, it);
 				if (it == req) {
 					/* we're done, post process */
@@ -291,8 +309,13 @@ int dstm_put(int rank, int region_id, dstm_time_t time, dstm_time_t delta,
 	return 0;
 }
 
-int dstm_get(int rank, int region_id, dstm_time_t time, dstm_time_t delta,
-	     void *dst, intptr_t src, size_t size)
+int dstm_get(int rank,
+             int region_id,
+             dstm_time_t time,
+             dstm_time_t delta,
+             void *dst,
+             intptr_t src,
+             size_t size)
 {
 	(void)region_id;
 	if (dst == NULL)
@@ -301,7 +324,6 @@ int dstm_get(int rank, int region_id, dstm_time_t time, dstm_time_t delta,
 	/* no idea what the semantic of a get in the future would be for now */
 	if (delta > 0)
 		return -DSTM_EINVAL;
-
 
 	/* request tracking part:
 	 * making sure the request is being sent to the right place
@@ -313,16 +335,15 @@ int dstm_get(int rank, int region_id, dstm_time_t time, dstm_time_t delta,
 		/* local get:
 		 * we just enqueue it locally
 		 * */
-		dstm_request_create(&req, DSTM_REQUEST_TYPE_LOCAL_GET, time, delta,
-				 rank, (intptr_t)dst, src, size);
-	}
-	else {
+		dstm_request_create(&req, DSTM_REQUEST_TYPE_LOCAL_GET, time,
+		                    delta, rank, (intptr_t)dst, src, size);
+	} else {
 		/* outgoing get
 		 * we enqueue it for tracking purposes, and push it out to the
 		 * appropriate rank.
 		 */
-		dstm_request_create(&req, DSTM_REQUEST_TYPE_OUT_GET, time, delta,
-				 rank, (intptr_t)dst, src, size);
+		dstm_request_create(&req, DSTM_REQUEST_TYPE_OUT_GET, time,
+		                    delta, rank, (intptr_t)dst, src, size);
 
 		/* this is the place where MPI RMA might make sense, if we could
 		 * use windows to make sure the MPI processes are in the right
@@ -351,11 +372,13 @@ int dstm_get(int rank, int region_id, dstm_time_t time, dstm_time_t delta,
 		 * completes.
 		 */
 
-		dstm_msg_fill_hdr(&req->msg, DSTM_MSG_TYPE_GET_REQ, time, delta, rank, dstm_global_context.rank);
+		dstm_msg_fill_hdr(&req->msg, DSTM_MSG_TYPE_GET_REQ, time, delta,
+		                  rank, dstm_global_context.rank);
 		dstm_msg_fill_getreq(&req->msg, src, size);
 		dstm_msg_send(&req->msg);
 
-		dstm_msg_fill_hdr(&req->msg, DSTM_MSG_TYPE_GET_REP, time, delta, rank, dstm_global_context.rank);
+		dstm_msg_fill_hdr(&req->msg, DSTM_MSG_TYPE_GET_REP, time, delta,
+		                  rank, dstm_global_context.rank);
 		dstm_msg_fill_getrep(&req->msg, dst, size);
 		dstm_msg_irecv(&req->msg);
 		req->status = DSTM_REQUEST_STATUS_IRECV;
@@ -368,7 +391,7 @@ int dstm_get(int rank, int region_id, dstm_time_t time, dstm_time_t delta,
 	 *
 	 */
 	int done = 0;
-	while(!done) {
+	while (!done) {
 		dstm_request_t *nr;
 		dstm_msg_t m;
 		/* block until we receive one incoming message */
@@ -378,41 +401,47 @@ int dstm_get(int rank, int region_id, dstm_time_t time, dstm_time_t delta,
 		dstm_region_set_ninfo(dstm_global_context.region,
 		                      m.header.src_rank, m.header.time);
 
-		switch(m.header.type) {
-			case DSTM_MSG_TYPE_PUT:
-				/* request for a put, enqueue the request as an
-				 * incoming put
-				 */
-				dstm_request_create(&nr, DSTM_REQUEST_TYPE_IN_PUT, m.header.time, m.header.delta,
-				 m.header.dst_rank, m.u.put.dst, (intptr_t)m.data,
-				 m.u.put.size);
-				nr->msg = m;
-				DL_INSERT_INORDER(requests, nr, dstm_request_cmp_departure);
-				break;
-			case DSTM_MSG_TYPE_GET_REQ:
-				/* request for a get, enqueue as an incoming
-				 * get
-				 */
-				dstm_request_create(&nr, DSTM_REQUEST_TYPE_IN_PUT, m.header.time, m.header.delta,
-				 m.header.dst_rank, (intptr_t)m.data, m.u.get.ptr,
-				 m.u.get.size);
-				nr->msg = m;
-				DL_INSERT_INORDER(requests, nr, dstm_request_cmp_departure);
-				break;
-			case DSTM_MSG_TYPE_GET_REP:
-				/* response for a get, not supposed to arrive
-				 * here?
-				 * TODO figure out how existing irecvs and  mpi_probe interact
-				 */
-			default:
-				assert(0);
+		switch (m.header.type) {
+		case DSTM_MSG_TYPE_PUT:
+			/* request for a put, enqueue the request as an
+			 * incoming put
+			 */
+			dstm_request_create(&nr, DSTM_REQUEST_TYPE_IN_PUT,
+			                    m.header.time, m.header.delta,
+			                    m.header.dst_rank, m.u.put.dst,
+			                    (intptr_t)m.data, m.u.put.size);
+			nr->msg = m;
+			DL_INSERT_INORDER(requests, nr,
+			                  dstm_request_cmp_departure);
+			break;
+		case DSTM_MSG_TYPE_GET_REQ:
+			/* request for a get, enqueue as an incoming
+			 * get
+			 */
+			dstm_request_create(&nr, DSTM_REQUEST_TYPE_IN_PUT,
+			                    m.header.time, m.header.delta,
+			                    m.header.dst_rank, (intptr_t)m.data,
+			                    m.u.get.ptr, m.u.get.size);
+			nr->msg = m;
+			DL_INSERT_INORDER(requests, nr,
+			                  dstm_request_cmp_departure);
+			break;
+		case DSTM_MSG_TYPE_GET_REP:
+			/* response for a get, not supposed to arrive
+			 * here?
+			 * TODO figure out how existing irecvs and  mpi_probe
+			 * interact
+			 */
+		default:
+			assert(0);
 		}
 
 		/* loop over all requests, see what can be progressed */
 		dstm_request_t *it, *tmp;
-		DL_FOREACH_SAFE(requests, it, tmp) {
-			dstm_request_progress(it);	
-			if(dstm_request_isdone(it)) {
+		DL_FOREACH_SAFE(requests, it, tmp)
+		{
+			dstm_request_progress(it);
+			if (dstm_request_isdone(it)) {
 				DL_DELETE(requests, it);
 				if (it == req) {
 					/* we're done, post process */
@@ -424,4 +453,3 @@ int dstm_get(int rank, int region_id, dstm_time_t time, dstm_time_t delta,
 	}
 	return 0;
 }
-
