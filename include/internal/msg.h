@@ -84,6 +84,8 @@ int dstm_msg_isend(dstm_msg_t *msg);
 int dstm_msg_irecv(dstm_msg_t *msg);
 int dstm_msg_recvany(dstm_msg_t *msg);
 
+int dstm_msg_test(dstm_msg_t msg);
+
 #ifdef __cplusplus
 }
 #endif

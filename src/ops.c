@@ -123,62 +123,129 @@ int dstm_request_isdone(dstm_request_t *req)
 
 typedef struct dstm_request_progress_s {
 	int type;
-	int status;
-	int (*progress)(dstm_request_t *req, dstm_time_t maxtime);
+	int (*progress)(dstm_request_t *req, dstm_time_t step);
 } dstm_request_progress_t;
 
 /* TODO: implement all those transitions */
 
-dstm_request_progress_t progress_sm[DSTM_REQUEST_TYPE_MAX][DSTM_REQUEST_STATUS_MAX] = {
-        {
-                {DSTM_REQUEST_TYPE_LOCAL_PUT, DSTM_REQUEST_STATUS_INIT, NULL},
-                {DSTM_REQUEST_TYPE_LOCAL_PUT, DSTM_REQUEST_STATUS_ISEND, NULL},
-                {DSTM_REQUEST_TYPE_LOCAL_PUT, DSTM_REQUEST_STATUS_IRECV, NULL},
-                {DSTM_REQUEST_TYPE_LOCAL_PUT, DSTM_REQUEST_STATUS_DONE, NULL},
-        },
-        {
-                {DSTM_REQUEST_TYPE_LOCAL_GET, DSTM_REQUEST_STATUS_INIT, NULL},
-                {DSTM_REQUEST_TYPE_LOCAL_GET, DSTM_REQUEST_STATUS_ISEND, NULL},
-                {DSTM_REQUEST_TYPE_LOCAL_GET, DSTM_REQUEST_STATUS_IRECV, NULL},
-                {DSTM_REQUEST_TYPE_LOCAL_GET, DSTM_REQUEST_STATUS_DONE, NULL},
-        },
-        {
-                {DSTM_REQUEST_TYPE_IN_PUT, DSTM_REQUEST_STATUS_INIT, NULL},
-                {DSTM_REQUEST_TYPE_IN_PUT, DSTM_REQUEST_STATUS_ISEND, NULL},
-                {DSTM_REQUEST_TYPE_IN_PUT, DSTM_REQUEST_STATUS_IRECV, NULL},
-                {DSTM_REQUEST_TYPE_IN_PUT, DSTM_REQUEST_STATUS_DONE, NULL},
-        },
-        {
-                {DSTM_REQUEST_TYPE_IN_GET, DSTM_REQUEST_STATUS_INIT, NULL},
-                {DSTM_REQUEST_TYPE_IN_GET, DSTM_REQUEST_STATUS_ISEND, NULL},
-                {DSTM_REQUEST_TYPE_IN_GET, DSTM_REQUEST_STATUS_IRECV, NULL},
-                {DSTM_REQUEST_TYPE_IN_GET, DSTM_REQUEST_STATUS_DONE, NULL},
-        },
-        {
-                {DSTM_REQUEST_TYPE_OUT_PUT, DSTM_REQUEST_STATUS_INIT, NULL},
-                {DSTM_REQUEST_TYPE_OUT_PUT, DSTM_REQUEST_STATUS_ISEND, NULL},
-                {DSTM_REQUEST_TYPE_OUT_PUT, DSTM_REQUEST_STATUS_IRECV, NULL},
-                {DSTM_REQUEST_TYPE_OUT_PUT, DSTM_REQUEST_STATUS_DONE, NULL},
-        },
-        {
-                {DSTM_REQUEST_TYPE_OUT_GET, DSTM_REQUEST_STATUS_INIT, NULL},
-                {DSTM_REQUEST_TYPE_OUT_GET, DSTM_REQUEST_STATUS_ISEND, NULL},
-                {DSTM_REQUEST_TYPE_OUT_GET, DSTM_REQUEST_STATUS_IRECV, NULL},
-                {DSTM_REQUEST_TYPE_OUT_GET, DSTM_REQUEST_STATUS_DONE, NULL},
-        },
+int dstm_request_progress_local_put(dstm_request_t *req, dstm_time_t step)
+{
+	/* logic of a local put:
+	 * - starts in INIT state, enqueued as a request to put data associated
+	 *   with the request buffer into the local region memory.
+	 *
+	 * - when step == req->time + delta, apply the request to the local
+	 *   memory.
+	 */
+	assert(req->status == DSTM_REQUEST_STATUS_INIT);
+	if (req->time + req->delta == step) {
+		/* TODO: is that a real pointer or an offset into a region */
+		memcpy((void *)req->dst, (void *)req->src, req->size);
+		req->status = DSTM_REQUEST_STATUS_DONE;
+	}
+	return 0;
+}
 
+int dstm_request_progress_local_get(dstm_request_t *req, dstm_time_t step)
+{
+	/* logic of a local put:
+	 * - starts in INIT state, enqueued as a request to put data associated
+	 *   with the request buffer into the local region memory.
+	 *
+	 * - when step == req->time + delta, apply the request to the local
+	 *   memory.
+	 */
+	assert(req->status == DSTM_REQUEST_STATUS_INIT);
+	if (req->time + req->delta == step) {
+		/* TODO: is that a real pointer or an offset into a region */
+		memcpy((void *)req->dst, (void *)req->src, req->size);
+		req->status = DSTM_REQUEST_STATUS_DONE;
+	}
+	return 0;
+}
+
+int dstm_request_progress_in_put(dstm_request_t *req, dstm_time_t step)
+{
+	/* logic:
+	 * - init: input request received from external rank
+	 * - done: applied put
+	 */
+	assert(req->status == DSTM_REQUEST_STATUS_INIT);
+	if (req->time + req->delta == step) {
+		memcpy((void *)req->dst, req->msg.data, req->size);
+		req->status = DSTM_REQUEST_STATUS_DONE;
+	}
+	return 0;
+}
+
+int dstm_request_progress_in_get(dstm_request_t *req, dstm_time_t step)
+{
+	/* logic:
+	 * - init: input request received from external rank
+	 * -     : filled out get, sent data back
+	 *       : send completed
+	 */
+	if (req->status == DSTM_REQUEST_STATUS_INIT) {
+		if (req->time + req->delta == step) {
+			dstm_msg_fill_hdr(&req->msg, DSTM_MSG_TYPE_GET_REP,
+			                  req->time, req->delta,
+			                  dstm_global_context.rank, req->rank);
+			dstm_msg_fill_getrep(&req->msg, (void *)req->src,
+			                     req->size);
+			dstm_msg_isend(&req->msg);
+			req->status = DSTM_REQUEST_STATUS_ISEND;
+		}
+	} else if (req->status == DSTM_REQUEST_STATUS_ISEND) {
+		if (dstm_msg_test(req->msg)) {
+			req->status = DSTM_REQUEST_STATUS_DONE;
+		}
+	}
+	return 0;
+}
+
+int dstm_request_progress_out_put(dstm_request_t *req, dstm_time_t step)
+{
+	/* logic:
+	 * - isend: data sent out, isend posted
+	 * - done: send completed.
+	 */
+	(void)step;
+	assert(req->status == DSTM_REQUEST_STATUS_ISEND);
+	if (dstm_msg_test(req->msg)) {
+		req->status = DSTM_REQUEST_STATUS_DONE;
+	}
+	return 0;
+}
+
+int dstm_request_progress_out_get(dstm_request_t *req, dstm_time_t step)
+{
+	/* logic:
+	 * - irecv: request sent, recv posted, waiting for completion
+	 * - done: recv completed, get filled out
+	 */
+	(void)step;
+	assert(req->status == DSTM_REQUEST_STATUS_IRECV);
+	if (dstm_msg_test(req->msg)) {
+		memcpy((void *)req->dst, (void *)req->msg.data, req->src);
+		req->status = DSTM_REQUEST_STATUS_DONE;
+	}
+	return 0;
+}
+
+dstm_request_progress_t progress_sm[DSTM_REQUEST_TYPE_MAX] = {
+        {DSTM_REQUEST_TYPE_LOCAL_PUT, dstm_request_progress_local_put},
+        {DSTM_REQUEST_TYPE_LOCAL_GET, dstm_request_progress_local_get},
+        {DSTM_REQUEST_TYPE_IN_PUT, dstm_request_progress_in_put},
+        {DSTM_REQUEST_TYPE_IN_GET, dstm_request_progress_in_get},
+        {DSTM_REQUEST_TYPE_OUT_PUT, dstm_request_progress_out_put},
+        {DSTM_REQUEST_TYPE_OUT_GET, dstm_request_progress_out_get},
 };
 
-int dstm_request_progress(dstm_request_t *req, dstm_time_t maxtime)
+int dstm_request_progress(dstm_request_t *req, dstm_time_t step)
 {
 	assert(req != NULL);
-	/* state machine logic: based on the request type and the current state,
-	 * make the next action
-	 */
-	if (progress_sm[req->type][req->status].progress != NULL)
-		return progress_sm[req->type][req->status].progress(req,
-		                                                    maxtime);
-	return 0;
+	assert(progress_sm[req->type].progress != NULL);
+	return progress_sm[req->type].progress(req, step);
 }
 
 dstm_time_t dstm_max_time_progress(int rank,
@@ -267,6 +334,11 @@ int dstm_put(int rank,
 	 * In order to force progress, we consider that if the current put is at
 	 * a timestep later than the current region, then we need to update that
 	 * region and flush all the requests that would be at an earlier time.
+	 *
+	 * TODO: this entire loop is quite convoluted, there's a better version
+	 * of that that only goes through events that actually matter, by
+	 * alternating between handling all pending messages and the list of
+	 * requests that can be processed in the allowed interval.
 	 */
 	int done = 1;
 	if (time > dstm_global_context.region->time)
@@ -299,7 +371,7 @@ int dstm_put(int rank,
 			/* request for a get, enqueue as an incoming
 			 * get
 			 */
-			dstm_request_create(&nr, DSTM_REQUEST_TYPE_IN_PUT,
+			dstm_request_create(&nr, DSTM_REQUEST_TYPE_IN_GET,
 			                    m.header.time, m.header.delta,
 			                    m.header.dst_rank, (intptr_t)m.data,
 			                    m.u.get.ptr, m.u.get.size);
@@ -327,21 +399,29 @@ int dstm_put(int rank,
 		        dstm_global_context.region->time, time);
 		assert(maxtime <= time);
 
-		/* loop over all requests, see what can be progressed */
-		dstm_request_t *it, *tmp;
-		DL_FOREACH_SAFE(requests, it, tmp)
-		{
-			/* don't go further than new time */
-			if (it->time >= maxtime)
-				break;
-			dstm_request_progress(it, maxtime);
-			if (dstm_request_isdone(it)) {
-				DL_DELETE(requests, it);
-				if (it == req) {
-					/* we're done, post process */
-					done = 1;
+		/* loop over all requests, see what can be progressed, one
+		 * timestep at a time. We have to go through each timestep to
+		 * make sure that we progress requests in the right order.
+		 */
+		for (dstm_time_t nextt = dstm_global_context.region->time;
+		     nextt <= maxtime; nextt++) {
+
+			dstm_request_t *it, *tmp;
+			DL_FOREACH_SAFE(requests, it, tmp)
+			{
+				/* don't go further than new time */
+				if (it->time >= maxtime)
+					break;
+
+				dstm_request_progress(it, nextt);
+				if (dstm_request_isdone(it)) {
+					DL_DELETE(requests, it);
+					if (it == req) {
+						/* we're done, post process */
+						done = 1;
+					}
+					dstm_request_destroy(&it);
 				}
-				dstm_request_destroy(&it);
 			}
 		}
 	}

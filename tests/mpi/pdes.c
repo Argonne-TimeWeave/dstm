@@ -48,6 +48,8 @@ int main(int argc, char *argv[])
 	dstm_region_t *myregion = dstm_get_local_region();
 	intptr_t messages = dstm_region_malloc(myregion, sizeof(int) * 4 *
 					   MAX_MESSAGES);
+
+	/* we should be awarded the first slot in the region */
 	assert(messages == 0);
 	/* loop:
 	 *

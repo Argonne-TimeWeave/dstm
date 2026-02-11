@@ -262,3 +262,14 @@ int dstm_msg_recvany(dstm_msg_t *msg)
 	return 0;
 }
 
+/*******************************************************************************
+ * Checking for progress
+ ******************************************************************************/
+
+int dstm_msg_test(dstm_msg_t msg)
+{
+	MPI_Status status;
+	int flag = 0;
+	MPI_Test(&msg.request, &flag, &status);
+	return flag;
+}

@@ -111,10 +111,6 @@ int dstm_init(int *argc, char **argv[])
 	if (err != AML_SUCCESS)
 		return err;
 
-	err = MPI_Init(NULL, NULL);
-	if (err)
-		return err;
-
 	int world_size, rank;
 	MPI_Comm_size(MPI_COMM_WORLD, &world_size);
 	MPI_Comm_rank(MPI_COMM_WORLD, &rank);
@@ -137,7 +133,6 @@ int dstm_init(int *argc, char **argv[])
 int dstm_finalize(void)
 {
 	dstm_msg_finalize();
-	MPI_Finalize();
 	if (DSTM_DISTANCE_IDENTITY.distances != NULL)
 		free(DSTM_DISTANCE_IDENTITY.distances);
 	aml_finalize();
