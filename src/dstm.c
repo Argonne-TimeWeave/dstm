@@ -65,6 +65,11 @@ int dstm_distance_deepcopy(dstm_distance_t dst, dstm_distance_t src)
 	return DSTM_SUCCESS;
 }
 
+int dstm_distance_get(dstm_distance_t dst, int i, int j)
+{
+	return dst.distances[dst.size * i + j];
+}
+
 int dstm_start(dstm_distance_t dist)
 {
 	int err;

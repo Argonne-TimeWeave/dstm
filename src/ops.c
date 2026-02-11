@@ -124,7 +124,7 @@ int dstm_request_isdone(dstm_request_t *req)
 typedef struct dstm_request_progress_s {
 	int type;
 	int status;
-	int (*progress)(dstm_request_t *req);
+	int (*progress)(dstm_request_t *req, dstm_time_t maxtime);
 } dstm_request_progress_t;
 
 /* TODO: implement all those transitions */
@@ -169,15 +169,45 @@ dstm_request_progress_t progress_sm[DSTM_REQUEST_TYPE_MAX][DSTM_REQUEST_STATUS_M
 
 };
 
-int dstm_request_progress(dstm_request_t *req)
+int dstm_request_progress(dstm_request_t *req, dstm_time_t maxtime)
 {
 	assert(req != NULL);
 	/* state machine logic: based on the request type and the current state,
 	 * make the next action
 	 */
 	if (progress_sm[req->type][req->status].progress != NULL)
-		return progress_sm[req->type][req->status].progress(req);
+		return progress_sm[req->type][req->status].progress(req,
+		                                                    maxtime);
 	return 0;
+}
+
+dstm_time_t dstm_max_time_progress(int rank,
+                                   dstm_time_t currenttime,
+                                   dstm_time_t maxtime_requested)
+{
+	assert(currenttime <= maxtime_requested);
+	/* compute across neighbors the maximum time delta that can be
+	 * progressed without drifting too much:
+	 *
+	 * each neighbor can be at most at a fixed distance from us, we compute
+	 * the largest value smaller than that distance, i.e. the min of all
+	 * distances.
+	 *
+	 * TODO: this is static once past init, so pre-compute and store it
+	 */
+	dstm_time_t min = maxtime_requested;
+	for (int i = 0; i < dstm_global_context.world_size; i++) {
+		int dist = dstm_distance_get(dstm_global_context.distances,
+		                             rank, i);
+
+		/* skip non neighbors */
+		if (dist <= 0)
+			continue;
+
+		if (currenttime + dist <= min)
+			min = currenttime + dist;
+	}
+	return min;
 }
 
 /*******************************************************************************
@@ -287,14 +317,24 @@ int dstm_put(int rank,
 			assert(0);
 		}
 
+		/* there's a chance that we cannot progress by as much as the
+		 * new timestamp: if the neighbors are not as far along as
+		 * expected. So compute the largest delta we can progress
+		 * on based on current neighbor data before engaging in request
+		 * progress. */
+		dstm_time_t maxtime = dstm_max_time_progress(
+		        dstm_global_context.rank,
+		        dstm_global_context.region->time, time);
+		assert(maxtime <= time);
+
 		/* loop over all requests, see what can be progressed */
 		dstm_request_t *it, *tmp;
 		DL_FOREACH_SAFE(requests, it, tmp)
 		{
 			/* don't go further than new time */
-			if (it->time >= time)
+			if (it->time >= maxtime)
 				break;
-			dstm_request_progress(it);
+			dstm_request_progress(it, maxtime);
 			if (dstm_request_isdone(it)) {
 				DL_DELETE(requests, it);
 				if (it == req) {
@@ -388,7 +428,6 @@ int dstm_get(int rank,
 	/* synchronization part:
 	 * this is a blocking call, so we take advantage of it to make progress
 	 * on stuff, until we can verify that the request itself is completed:
-	 *
 	 */
 	int done = 0;
 	while (!done) {
@@ -436,11 +475,24 @@ int dstm_get(int rank,
 			assert(0);
 		}
 
+		/* there's a chance that we cannot progress by as much as the
+		 * new timestamp: if the neighbors are not as far along as
+		 * expected. So compute the largest delta we can progress
+		 * on based on current neighbor data before engaging in request
+		 * progress. */
+		dstm_time_t maxtime = dstm_max_time_progress(
+		        dstm_global_context.rank,
+		        dstm_global_context.region->time, time);
+		assert(maxtime <= time);
+
 		/* loop over all requests, see what can be progressed */
 		dstm_request_t *it, *tmp;
 		DL_FOREACH_SAFE(requests, it, tmp)
 		{
-			dstm_request_progress(it);
+			/* don't go further than new time */
+			if (it->time >= maxtime)
+				break;
+			dstm_request_progress(it, maxtime);
 			if (dstm_request_isdone(it)) {
 				DL_DELETE(requests, it);
 				if (it == req) {

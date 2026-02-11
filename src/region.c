@@ -85,6 +85,19 @@ int dstm_region_set_ninfo(dstm_region_t *region, int rank, dstm_time_t time)
 	return 0;
 }
 
+int dstm_region_get_ntime(dstm_region_t *region, int rank, dstm_time_t *time)
+{
+	if (region == NULL)
+		return -DSTM_EINVAL;
+
+	dstm_region_ninfo_t *ni;
+	HASH_FIND_INT(region->ninfos, &rank, ni);
+	if (ni == NULL)
+		return -DSTM_EINVAL;
+
+	*time = ni->time;
+	return 0;
+}
 /*******************************************************************************
  * Alloc functions
  ******************************************************************************/

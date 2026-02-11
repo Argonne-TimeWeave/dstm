@@ -133,6 +133,7 @@ typedef struct dstm_distance_s dstm_distance_t;
 extern dstm_distance_t DSTM_DISTANCE_IDENTITY;
 
 int dstm_distance_deepcopy(dstm_distance_t dst, dstm_distance_t src);
+int dstm_distance_get(dstm_distance_t dst, int i, int j);
 
 /* basic configuration of dstm:
  */
