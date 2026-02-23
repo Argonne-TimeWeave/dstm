@@ -154,21 +154,61 @@ typedef struct dstm_region_s dstm_region_t;
  * real time. */
 typedef int64_t dstm_time_t;
 
-/* allocate space in a region for data */
-intptr_t dstm_region_malloc(dstm_region_t *r, size_t size);
-void dstm_region_free(dstm_region_t *r, intptr_t ptr);
+/* distributed array over regions */
+struct dstm_darray_s;
+typedef struct dstm_darray_s dstm_darray_t;
 
+int dstm_darray_create(dstm_darray_t **ret, size_t element_size, size_t local_elements);
+int dstm_darray_create_equal(dstm_darray_t **ret, size_t element_size,
+                                        size_t total_elements);
+void dstm_darray_destroy(dstm_darray_t **darray);
+
+
+void *dstm_darray_get_local_ptr(dstm_darray_t *darray);
+size_t dstm_darray_local_count(dstm_darray_t *darray);
+size_t dstm_darray_global_offset(dstm_darray_t *darray);
+
+int dstm_darray_get(dstm_darray_t *darray,
+                    size_t global_index,
+                    void *dst,
+                    dstm_time_t time,
+                    dstm_time_t delta);
+int dstm_darray_put(dstm_darray_t *darray,
+                    size_t global_index,
+                    void *src,
+                    dstm_time_t time,
+                    dstm_time_t delta);
+
+/* opaque type for pointers into regions */
+#define DSTM_REGIONID_INVALID -1
+#define DSTM_REGIONID_LOCAL -2
+struct dstm_ptr_s {
+	int region_id;
+	intptr_t offset;
+};
+typedef struct dstm_ptr_s dstm_ptr_t;
+
+void *dstm_ptr_tovoid(dstm_ptr_t ptr);
+dstm_ptr_t dstm_ptr_fromvoid(dstm_region_t *r, void *ptr);
+int dstm_ptr_isnull(dstm_ptr_t ptr);
 
 int dstm_get_local_region_id(void);
 dstm_region_t *dstm_get_local_region(void);
 
-int dstm_put(int rank, int region_id, dstm_time_t time, dstm_time_t delta,
-	     intptr_t dst, void *src, size_t size);
-int dstm_get(int rank, int region_id, dstm_time_t time, dstm_time_t delta,
-	     void *dst, intptr_t src, size_t size);
-
-/* still not sure on this one */
-int dstm_step(dstm_region_t *r, int delta);
+int dstm_put(int rank,
+             int region_id,
+             dstm_time_t time,
+             dstm_time_t delta,
+             dstm_ptr_t dst,
+             void *src,
+             size_t size);
+int dstm_get(int rank,
+             int region_id,
+             dstm_time_t time,
+             dstm_time_t delta,
+             void *dst,
+             dstm_ptr_t src,
+             size_t size);
 
 #ifdef __cplusplus
 }

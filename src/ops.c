@@ -42,8 +42,8 @@ struct dstm_request_s {
 	dstm_time_t time;
 	dstm_time_t delta;
 	int rank;
-	intptr_t dst;
-	intptr_t src;
+	dstm_ptr_t dst;
+	dstm_ptr_t src;
 	size_t size;
 	dstm_msg_t msg;
 	struct dstm_request_s *prev, *next;
@@ -80,8 +80,8 @@ int dstm_request_create(dstm_request_t **r,
                         dstm_time_t time,
                         dstm_time_t delta,
                         int rank,
-                        intptr_t dst,
-                        intptr_t src,
+                        dstm_ptr_t dst,
+                        dstm_ptr_t src,
                         size_t size)
 {
 	assert(type < DSTM_REQUEST_TYPE_MAX);
@@ -139,8 +139,9 @@ int dstm_request_progress_local_put(dstm_request_t *req, dstm_time_t step)
 	 */
 	assert(req->status == DSTM_REQUEST_STATUS_INIT);
 	if (req->time + req->delta == step) {
-		/* TODO: is that a real pointer or an offset into a region */
-		memcpy((void *)req->dst, (void *)req->src, req->size);
+		void *dptr = dstm_ptr_tovoid(req->dst);
+		void *sptr = dstm_ptr_tovoid(req->src);
+		memcpy(dptr, sptr, req->size);
 		req->status = DSTM_REQUEST_STATUS_DONE;
 	}
 	return 0;
@@ -157,8 +158,9 @@ int dstm_request_progress_local_get(dstm_request_t *req, dstm_time_t step)
 	 */
 	assert(req->status == DSTM_REQUEST_STATUS_INIT);
 	if (req->time + req->delta == step) {
-		/* TODO: is that a real pointer or an offset into a region */
-		memcpy((void *)req->dst, (void *)req->src, req->size);
+		void *dptr = dstm_ptr_tovoid(req->dst);
+		void *sptr = dstm_ptr_tovoid(req->src);
+		memcpy(dptr, sptr, req->size);
 		req->status = DSTM_REQUEST_STATUS_DONE;
 	}
 	return 0;
@@ -172,7 +174,9 @@ int dstm_request_progress_in_put(dstm_request_t *req, dstm_time_t step)
 	 */
 	assert(req->status == DSTM_REQUEST_STATUS_INIT);
 	if (req->time + req->delta == step) {
-		memcpy((void *)req->dst, req->msg.data, req->size);
+		/* TODO: missing conversion */
+		void *dptr = dstm_ptr_tovoid(req->dst);
+		memcpy(dptr, req->msg.data, req->size);
 		req->status = DSTM_REQUEST_STATUS_DONE;
 	}
 	return 0;
@@ -190,7 +194,8 @@ int dstm_request_progress_in_get(dstm_request_t *req, dstm_time_t step)
 			dstm_msg_fill_hdr(&req->msg, DSTM_MSG_TYPE_GET_REP,
 			                  req->time, req->delta,
 			                  dstm_global_context.rank, req->rank);
-			dstm_msg_fill_getrep(&req->msg, (void *)req->src,
+			dstm_msg_fill_getrep(&req->msg,
+					     dstm_ptr_tovoid(req->src),
 			                     req->size);
 			dstm_msg_isend(&req->msg);
 			req->status = DSTM_REQUEST_STATUS_ISEND;
@@ -226,7 +231,8 @@ int dstm_request_progress_out_get(dstm_request_t *req, dstm_time_t step)
 	(void)step;
 	assert(req->status == DSTM_REQUEST_STATUS_IRECV);
 	if (dstm_msg_test(req->msg)) {
-		memcpy((void *)req->dst, (void *)req->msg.data, req->src);
+		void *dptr = dstm_ptr_tovoid(req->dst);
+		memcpy(dptr, (void *)req->msg.data, req->size);
 		req->status = DSTM_REQUEST_STATUS_DONE;
 	}
 	return 0;
@@ -285,7 +291,7 @@ int dstm_put(int rank,
              int region_id,
              dstm_time_t time,
              dstm_time_t delta,
-             intptr_t dst,
+             dstm_ptr_t dst,
              void *src,
              size_t size)
 {
@@ -307,22 +313,24 @@ int dstm_put(int rank,
 		/* local put:
 		 * we just enqueue it locally
 		 * */
+		dstm_ptr_t sptr = { DSTM_REGIONID_LOCAL, (intptr_t ) src };
 		dstm_request_create(&req, DSTM_REQUEST_TYPE_LOCAL_PUT, time,
-		                    delta, rank, dst, (intptr_t)src, size);
+		                    delta, rank, dst, sptr, size);
 	} else {
 		/* outgoing put
 		 * we enqueue it for tracking purposes, and push it out to the
 		 * appropriate rank.
 		 */
+		dstm_ptr_t sptr = { DSTM_REGIONID_LOCAL, (intptr_t )src };
 		dstm_request_create(&req, DSTM_REQUEST_TYPE_OUT_PUT, time,
-		                    delta, rank, dst, (intptr_t)src, size);
+		                    delta, rank, dst, sptr, size);
 
 		/* send out the operation asynchronously, with an extra copy of
 		 * the source buffer
 		 */
 		dstm_msg_fill_hdr(&req->msg, DSTM_MSG_TYPE_PUT, time, delta,
 		                  rank, dstm_global_context.rank);
-		dstm_msg_fill_put(&req->msg, dst, src, size);
+		dstm_msg_fill_put(&req->msg, dst.offset, src, size);
 		dstm_msg_isend(&req->msg);
 		req->status = DSTM_REQUEST_STATUS_ISEND;
 	}
@@ -434,7 +442,7 @@ int dstm_get(int rank,
              dstm_time_t time,
              dstm_time_t delta,
              void *dst,
-             intptr_t src,
+             dstm_ptr_t src,
              size_t size)
 {
 	(void)region_id;

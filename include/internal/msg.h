@@ -38,12 +38,14 @@ struct dstm_msg_hdr_s {
 typedef struct dstm_msg_hdr_s dstm_msg_hdr_t;
 
 struct dstm_msg_put_s {
+	int region;
 	intptr_t dst;
 	size_t size;
 };
 typedef struct dstm_msg_put_s dstm_msg_put_t;
 
 struct dstm_msg_get_s {
+	int region;
 	intptr_t ptr;
 	size_t size;
 };

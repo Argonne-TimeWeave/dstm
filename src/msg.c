@@ -66,6 +66,7 @@ int dstm_msg_fill_hdr(dstm_msg_t *m, int type, dstm_time_t time, dstm_time_t del
 int dstm_msg_fill_put(dstm_msg_t *m, intptr_t dst, void *src, size_t size)
 {
 	assert(src != NULL);
+	m->u.put.region = 0;
 	m->u.put.dst = dst;
 	m->u.put.size = size;
 
@@ -77,6 +78,7 @@ int dstm_msg_fill_put(dstm_msg_t *m, intptr_t dst, void *src, size_t size)
 int dstm_msg_fill_getreq(dstm_msg_t *m, intptr_t src, size_t size)
 {
 	assert(src != 0);
+	m->u.get.region = 0;
 	m->u.get.ptr = src;
 	m->u.get.size = size;
 
@@ -86,6 +88,7 @@ int dstm_msg_fill_getreq(dstm_msg_t *m, intptr_t src, size_t size)
 
 int dstm_msg_fill_getrep(dstm_msg_t *m, void *dst, size_t size)
 {
+	m->u.put.region = 0;
 	m->u.get.ptr = (intptr_t)dst;
 	m->u.get.size = size;
 

@@ -1,0 +1,199 @@
+/*******************************************************************************
+ * Copyright 2025 UChicago Argonne, LLC.
+ * (c.f. AUTHORS, LICENSE)
+ *
+ * This file is part of the dstm project.
+ * For more info, see https://github.com/anlsys/dstm
+ *
+ * SPDX-License-Identifier: BSD-3-Clause
+ ******************************************************************************/
+
+#include "config.h"
+
+#include <mpi.h>
+#include <stdlib.h>
+
+#include "dstm.h"
+
+#include "internal/globals.h"
+#include "internal/region.h"
+
+struct dstm_darray_s {
+	size_t element_size;
+	size_t total_elements;
+	size_t local_elements;
+	void *local_ptr;
+	dstm_region_t *region;
+	/* per-rank offset from the global indices */
+	size_t *rank_offsets;
+	/* per-rank size of the local part, needed for gather operations */
+	size_t *rank_elements;
+};
+
+/* from a global index into the darray, figure out the rank to query.
+ * Can be done with a binary search into the per-rank offsets: just find
+ * witch rank has the largest lower than index offset. */
+static int darray_find_rank(dstm_darray_t *darray, size_t global_index)
+{
+	int lo = 0;
+	int hi = dstm_global_context.world_size - 1;
+
+	while (lo < hi) {
+		int mid = lo + ((hi - lo + 1) / 2);
+		if (darray->rank_offsets[mid] <= global_index)
+			lo = mid;
+		else
+			hi = mid - 1;
+	}
+	return lo;
+}
+
+int dstm_darray_create(dstm_darray_t **ret, size_t element_size, size_t local_elements)
+{
+	int err = 0;
+	int world_size = dstm_global_context.world_size;
+	MPI_Comm comm = dstm_global_context.comm;
+
+	dstm_darray_t *darray = malloc(sizeof(*darray));
+	if (darray == NULL)
+		return -DSTM_ENOMEM;
+
+	darray->rank_elements = calloc(world_size,  sizeof(size_t));
+	if (darray->rank_elements == NULL) {
+		err = -DSTM_ENOMEM;
+		goto err;
+	}
+
+	darray->rank_offsets = calloc(world_size, sizeof(size_t));
+	if (darray->rank_offsets == NULL) {
+		err = -DSTM_ENOMEM;
+		goto err_elements;
+	}
+
+	dstm_region_t *region = dstm_get_local_region();
+	darray->region = region;
+
+	size_t local_size = element_size * local_elements;
+	darray->local_ptr = dstm_region_malloc(region, local_size);
+	if (darray->local_ptr == NULL) {
+		err = -DSTM_ENOMEM;
+		goto err_off;
+	}
+
+	/* gather on all ranks the size of each local part */
+	darray->element_size = element_size;
+	darray->local_elements = local_elements;
+
+	err = MPI_Allgather(&local_elements, 1, MPI_UNSIGNED_LONG_LONG,
+	                   darray->rank_elements, 1, MPI_UNSIGNED_LONG_LONG,
+	                   comm);
+	if (err != MPI_SUCCESS) {
+		err = -DSTM_FAILURE;
+		goto err_mpi;
+	}
+
+	size_t total = 0;
+	for (int i = 0; i < world_size; i++)
+		total += darray->rank_elements[i];
+	darray->total_elements = total;
+
+	for (int i = 0; i < world_size; i++) {
+		darray->rank_offsets[i] = 0;
+		for (int j = 0; j < i; j++)
+			darray->rank_offsets[i] += darray->rank_elements[j];
+	}
+
+	*ret = darray;
+	return 0;
+err_mpi:
+	free(darray->local_ptr);
+err_off:
+	free(darray->rank_offsets);
+err_elements:
+	free(darray->rank_elements);
+err:
+	free(darray);
+	*ret = NULL;
+	return err;
+}
+
+int dstm_darray_create_equal(dstm_darray_t **ret, size_t element_size,
+                                        size_t total_elements)
+{
+	int world_size = dstm_global_context.world_size;
+	int rank = dstm_global_context.rank;
+
+	size_t local_elements = total_elements / (size_t)world_size;
+	size_t remainder = total_elements % (size_t)world_size;
+	if (rank < (int)remainder)
+		local_elements++;
+
+	return dstm_darray_create(ret, element_size, local_elements);
+}
+
+void dstm_darray_destroy(dstm_darray_t **darray)
+{
+	if (darray == NULL || *darray == NULL)
+		return;
+
+	dstm_darray_t *d = *darray;
+	if (d->local_ptr)
+		dstm_region_free(d->region, d->local_ptr);
+
+	free(d->rank_offsets);
+	free(d->rank_elements);
+	free(d);
+	*darray = NULL;
+}
+
+void *dstm_darray_get_local_ptr(dstm_darray_t *darray)
+{
+	return darray->local_ptr;
+}
+
+size_t dstm_darray_local_count(dstm_darray_t *darray)
+{
+	return darray->local_elements;
+}
+
+size_t dstm_darray_global_offset(dstm_darray_t *darray)
+{
+	int rank = dstm_global_context.rank;
+	return darray->rank_offsets[rank];
+}
+
+int dstm_darray_get(dstm_darray_t *darray,
+                    size_t global_index,
+                    void *dst,
+                    dstm_time_t time,
+                    dstm_time_t delta)
+{
+	int rank = darray_find_rank(darray, global_index);
+	int local_offset =
+	        (int)(global_index - (size_t)darray->rank_offsets[rank]);
+
+	dstm_ptr_t src;
+	src.region_id = rank;
+	src.offset = local_offset * darray->element_size;
+
+	return dstm_get(rank, src.region_id, time, delta, dst, src,
+	                  darray->element_size);
+}
+
+int dstm_darray_put(dstm_darray_t *darray,
+                    size_t global_index,
+                    void *src,
+                    dstm_time_t time,
+                    dstm_time_t delta)
+{
+	int rank = darray_find_rank(darray, global_index);
+	int local_offset =
+	        (int)(global_index - (size_t)darray->rank_offsets[rank]);
+
+	dstm_ptr_t dst;
+	dst.region_id = rank;
+	dst.offset = local_offset * darray->element_size;
+
+	return dstm_put(rank, dst.region_id, time, delta, dst, src,
+	                  darray->element_size);
+}

@@ -54,6 +54,10 @@ void dstm_region_destroy(dstm_region_t **region);
 
 int dstm_region_set_ninfo(dstm_region_t *region, int rank, dstm_time_t time);
 
+
+void *dstm_region_malloc(dstm_region_t *r, size_t size);
+void dstm_region_free(dstm_region_t *r, void *ptr);
+
 #ifdef __cplusplus
 }
 #endif
