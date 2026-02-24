@@ -76,8 +76,8 @@ int dstm_msg_finalize(void);
 int dstm_msg_fill_hdr(dstm_msg_t *msg, int type, dstm_time_t time, dstm_time_t
 		       delta, int dst_rank, int src_rank);
 
-int dstm_msg_fill_put(dstm_msg_t *msg, intptr_t dst, void *src, size_t size);
-int dstm_msg_fill_getreq(dstm_msg_t *msg, intptr_t src, size_t size);
+int dstm_msg_fill_put(dstm_msg_t *msg, dstm_ptr_t dst, void *src, size_t size);
+int dstm_msg_fill_getreq(dstm_msg_t *msg, dstm_ptr_t src, size_t size);
 int dstm_msg_fill_getrep(dstm_msg_t *msg, void *dst, size_t size);
 
 int dstm_msg_send(dstm_msg_t *msg);

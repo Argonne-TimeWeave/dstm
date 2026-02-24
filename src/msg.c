@@ -63,11 +63,11 @@ int dstm_msg_fill_hdr(dstm_msg_t *m, int type, dstm_time_t time, dstm_time_t del
 	return 0;
 }
 
-int dstm_msg_fill_put(dstm_msg_t *m, intptr_t dst, void *src, size_t size)
+int dstm_msg_fill_put(dstm_msg_t *m, dstm_ptr_t dst, void *src, size_t size)
 {
 	assert(src != NULL);
-	m->u.put.region = 0;
-	m->u.put.dst = dst;
+	m->u.put.region = dst.region;
+	m->u.put.dst = dst.offset;
 	m->u.put.size = size;
 
 	/* TODO: should work, but needs to be tested */
@@ -75,25 +75,26 @@ int dstm_msg_fill_put(dstm_msg_t *m, intptr_t dst, void *src, size_t size)
 	return 0;
 }
 
-int dstm_msg_fill_getreq(dstm_msg_t *m, intptr_t src, size_t size)
+int dstm_msg_fill_getreq(dstm_msg_t *m, dstm_ptr_t src, size_t size)
 {
-	assert(src != 0);
-	m->u.get.region = 0;
-	m->u.get.ptr = src;
+	assert(!dstm_ptr_isnull(src));
+	m->u.get.region = src.region;
+	m->u.get.ptr = src.offset;
 	m->u.get.size = size;
 
 	m->data = NULL;
 	return 0;
 }
 
-int dstm_msg_fill_getrep(dstm_msg_t *m, void *dst, size_t size)
+/* TODO: dst might need to be dstm_ptr_t */
+int dstm_msg_fill_getrep(dstm_msg_t *m, void *src, size_t size)
 {
-	m->u.put.region = 0;
-	m->u.get.ptr = (intptr_t)dst;
+	m->u.get.region = DSTM_REGIONID_LOCAL;
+	m->u.get.ptr = (intptr_t)src;
 	m->u.get.size = size;
 
 	/* TODO: should work, but needs to be tested */
-	m->data = dst;
+	m->data = src;
 	return 0;
 }
 
@@ -130,12 +131,44 @@ int dstm_msg_isend_put(dstm_msg_t *msg)
 	return 0;
 }
 
+int dstm_msg_isend_getrep(dstm_msg_t *msg)
+{
+	assert(msg != NULL);
+
+	/* deal with copying the data and packing it into a buffer */
+	int hsz, gsz, dsz;
+	MPI_Pack_size(1, dstm_msg_hdr_dt, dstm_global_context.comm, &hsz);
+	MPI_Pack_size(1, dstm_msg_get_dt, dstm_global_context.comm, &gsz);
+	MPI_Pack_size(msg->u.get.size, MPI_CHAR, dstm_global_context.comm, &dsz);
+	size_t bufsz = hsz + gsz + dsz;
+
+	msg->packbuf = calloc(bufsz, sizeof(char));
+	if (msg->packbuf == NULL)
+		return -DSTM_ENOMEM;
+
+	int pos = 0;
+	MPI_Pack(&msg->header, 1, dstm_msg_hdr_dt, msg->packbuf, bufsz, &pos,
+		 dstm_global_context.comm);
+	MPI_Pack(&msg->u.get, 1, dstm_msg_get_dt, msg->packbuf, bufsz, &pos,
+		 dstm_global_context.comm);
+	MPI_Pack(&msg->data, msg->u.get.size, MPI_CHAR, msg->packbuf, bufsz, &pos,
+		 dstm_global_context.comm);
+
+	/* send the message */
+	MPI_Isend(msg->packbuf, pos, MPI_PACKED, msg->header.dst_rank, MPI_ANY_TAG,
+		  dstm_global_context.comm, &msg->request);
+	return 0;
+
+}
+
 int dstm_msg_isend(dstm_msg_t *msg)
 {
 	assert(msg != NULL);
 	switch(msg->header.type) {
 		case DSTM_MSG_TYPE_PUT:
 			return dstm_msg_isend_put(msg);
+		case DSTM_MSG_TYPE_GET_REP:
+			return dstm_msg_isend_getrep(msg);
 		default:
 			assert(0);
 	}

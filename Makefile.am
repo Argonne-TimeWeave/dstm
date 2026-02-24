@@ -40,11 +40,16 @@ include_HEADERS = include/dstm.h
 
 include_dstmdir=$(includedir)/dstm
 include_dstm_HEADERS = \
+		      include/dstm/error.h \
 		      include/dstm/version.h
 
 noinst_include_internaldir = $(includedir)/internal
 noinst_include_internal_HEADERS = \
-				  include/internal/region.h
+				  include/internal/globals.h \
+				  include/internal/msg.h \
+				  include/internal/region.h \
+				  include/internal/uthash.h \
+				  include/internal/utlist.h
 ###############################################################################
 # Library
 ###############################################################################
@@ -89,7 +94,8 @@ VALGRIND_SUPPRESSIONS_FILES = $(top_srcdir)/.valgrind.supp
 @VALGRIND_CHECK_RULES@
 
 COMPILED_TESTS = \
-		tests/core
+		tests/core \
+		tests/region
 
 # unit tests
 UNIT_TESTS = \

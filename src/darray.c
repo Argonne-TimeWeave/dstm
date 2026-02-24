@@ -22,7 +22,7 @@ struct dstm_darray_s {
 	size_t element_size;
 	size_t total_elements;
 	size_t local_elements;
-	void *local_ptr;
+	dstm_ptr_t local_ptr;
 	dstm_region_t *region;
 	/* per-rank offset from the global indices */
 	size_t *rank_offsets;
@@ -75,7 +75,7 @@ int dstm_darray_create(dstm_darray_t **ret, size_t element_size, size_t local_el
 
 	size_t local_size = element_size * local_elements;
 	darray->local_ptr = dstm_region_malloc(region, local_size);
-	if (darray->local_ptr == NULL) {
+	if (dstm_ptr_isnull(darray->local_ptr)) {
 		err = -DSTM_ENOMEM;
 		goto err_off;
 	}
@@ -105,8 +105,9 @@ int dstm_darray_create(dstm_darray_t **ret, size_t element_size, size_t local_el
 
 	*ret = darray;
 	return 0;
+
 err_mpi:
-	free(darray->local_ptr);
+	dstm_region_free(darray->region, darray->local_ptr);
 err_off:
 	free(darray->rank_offsets);
 err_elements:
@@ -137,7 +138,7 @@ void dstm_darray_destroy(dstm_darray_t **darray)
 		return;
 
 	dstm_darray_t *d = *darray;
-	if (d->local_ptr)
+	if (!dstm_ptr_isnull(d->local_ptr))
 		dstm_region_free(d->region, d->local_ptr);
 
 	free(d->rank_offsets);
@@ -148,7 +149,7 @@ void dstm_darray_destroy(dstm_darray_t **darray)
 
 void *dstm_darray_get_local_ptr(dstm_darray_t *darray)
 {
-	return darray->local_ptr;
+	return dstm_region_ptr_tovoid(darray->region, darray->local_ptr);
 }
 
 size_t dstm_darray_local_count(dstm_darray_t *darray)
@@ -173,10 +174,10 @@ int dstm_darray_get(dstm_darray_t *darray,
 	        (int)(global_index - (size_t)darray->rank_offsets[rank]);
 
 	dstm_ptr_t src;
-	src.region_id = rank;
+	src.region = rank;
 	src.offset = local_offset * darray->element_size;
 
-	return dstm_get(rank, src.region_id, time, delta, dst, src,
+	return dstm_get(rank, src.region, time, delta, dst, src,
 	                  darray->element_size);
 }
 
@@ -191,9 +192,9 @@ int dstm_darray_put(dstm_darray_t *darray,
 	        (int)(global_index - (size_t)darray->rank_offsets[rank]);
 
 	dstm_ptr_t dst;
-	dst.region_id = rank;
+	dst.region = rank;
 	dst.offset = local_offset * darray->element_size;
 
-	return dstm_put(rank, dst.region_id, time, delta, dst, src,
+	return dstm_put(rank, dst.region, time, delta, dst, src,
 	                  darray->element_size);
 }

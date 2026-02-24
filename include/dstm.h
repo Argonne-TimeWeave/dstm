@@ -183,13 +183,13 @@ int dstm_darray_put(dstm_darray_t *darray,
 #define DSTM_REGIONID_INVALID -1
 #define DSTM_REGIONID_LOCAL -2
 struct dstm_ptr_s {
-	int region_id;
+	int region;
 	intptr_t offset;
 };
 typedef struct dstm_ptr_s dstm_ptr_t;
 
-void *dstm_ptr_tovoid(dstm_ptr_t ptr);
-dstm_ptr_t dstm_ptr_fromvoid(dstm_region_t *r, void *ptr);
+dstm_ptr_t dstm_region_ptr_fromvoid(dstm_region_t *r, void *ptr);
+void *dstm_region_ptr_tovoid(dstm_region_t *r, dstm_ptr_t ptr);
 int dstm_ptr_isnull(dstm_ptr_t ptr);
 
 int dstm_get_local_region_id(void);

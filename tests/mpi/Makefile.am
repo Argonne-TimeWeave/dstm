@@ -19,7 +19,7 @@ VALGRIND_SUPPRESSIONS_FILES = $(top_srcdir)/.valgrind.supp
 .NOTPARALLEL:
 
 COMPILED_TESTS = \
-		pdes
+		darray
 
 check_PROGRAMS = $(COMPILED_TESTS)
 
