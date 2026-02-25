@@ -1,4 +1,4 @@
-# development shell, includes aml dependencies and dev-related helpers
+# development shell, includes dependencies and dev-related helpers
 { pkgs ? import ./. { } }:
 with pkgs;
 mkShell {

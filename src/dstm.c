@@ -14,7 +14,6 @@
 #include "internal/globals.h"
 #include "internal/region.h"
 #include "internal/msg.h"
-#include <aml.h>
 #include <mpi.h>
 #include <stdlib.h>
 
@@ -99,17 +98,12 @@ int dstm_init(int *argc, char **argv[])
 {
 	(void)argc;
 	(void)argv;
-	int err;
 
 	/* setup a default log config to handle errors in this part of the
 	 * initialization
 	 */
 	if (!dstm_log_initialized)
 		dstm_log_init(stderr, "dstm");
-
-	err = aml_init(argc, argv);
-	if (err != AML_SUCCESS)
-		return err;
 
 	int world_size, rank;
 	MPI_Comm_size(MPI_COMM_WORLD, &world_size);
@@ -135,6 +129,5 @@ int dstm_finalize(void)
 	dstm_msg_finalize();
 	if (DSTM_DISTANCE_IDENTITY.distances != NULL)
 		free(DSTM_DISTANCE_IDENTITY.distances);
-	aml_finalize();
 	return 0;
 }

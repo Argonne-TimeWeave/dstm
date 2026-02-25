@@ -1,5 +1,4 @@
 { stdenv
-, aml
 , autoreconfHook
 , check
 , git
@@ -10,5 +9,5 @@ stdenv.mkDerivation {
   src = ../.;
   name = "dstm";
   nativeBuildInputs = [ autoreconfHook pkg-config git ];
-  buildInputs = [ aml check mpich ];
+  buildInputs = [ check mpich ];
 }
