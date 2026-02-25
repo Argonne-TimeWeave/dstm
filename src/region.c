@@ -36,7 +36,7 @@ int dstm_ptr_isnull(dstm_ptr_t ptr)
 
 dstm_ptr_t dstm_region_ptr_fromvoid(dstm_region_t *r, void *ptr)
 {
-	dstm_ptr_t p = { DSTM_REGIONID_INVALID, 0 };
+	dstm_ptr_t p = {DSTM_REGIONID_INVALID, 0};
 	if (r == NULL || ptr == NULL)
 		return p;
 
@@ -53,13 +53,14 @@ dstm_ptr_t dstm_region_ptr_fromvoid(dstm_region_t *r, void *ptr)
 
 void *dstm_region_ptr_tovoid(dstm_region_t *r, dstm_ptr_t ptr)
 {
-	if (ptr.region == DSTM_REGIONID_INVALID || r == NULL) 
+	if (ptr.region == DSTM_REGIONID_INVALID || r == NULL)
 		return NULL;
 
 	if (ptr.region == DSTM_REGIONID_LOCAL)
 		return (void *)ptr.offset;
 
-	if (ptr.region != dstm_global_context.rank || ptr.offset > (intptr_t)r->size)
+	if (ptr.region != dstm_global_context.rank ||
+	    ptr.offset > (intptr_t)r->size)
 		return NULL;
 
 	return (void *)((char *)r->buffer + ptr.offset);
@@ -458,7 +459,7 @@ int dstm_region_get_ntime(dstm_region_t *region, int rank, dstm_time_t *time)
 
 dstm_ptr_t dstm_region_malloc(dstm_region_t *r, size_t size)
 {
-	dstm_ptr_t ret = { DSTM_REGIONID_INVALID, 0 };
+	dstm_ptr_t ret = { DSTM_REGIONID_INVALID, 0};	
 	if (r == NULL || size == 0)
 		return ret;
 
@@ -504,11 +505,14 @@ void dstm_region_free(dstm_region_t *r, dstm_ptr_t p)
 		return;
 	}
 
-	/* Calculate the order of this block by checking split bits */
+	/* Calculate the order of this block by checking split bits
+	 * Start from order 0 and walk up until we find a parent that is NOT
+	 * split This tells us the actual order of this allocated block
+	 */
 	size_t index = dstm_region_ptr_to_index(r, ptr);
 	int order = 0;
 
-	/* Find the order by walking up the tree */
+	/* Find the order by checking if parent is split */
 	while (order < r->max_order) {
 		size_t parent_index = index >> (order + 1);
 		if (!dstm_region_is_split(r, parent_index))
@@ -516,18 +520,18 @@ void dstm_region_free(dstm_region_t *r, dstm_ptr_t p)
 		order++;
 	}
 
-	/* Merge with buddy if possible */
+	/* Try to merge with buddy */
 	ptr = dstm_region_merge_block(r, ptr, order);
-	if (ptr < r->buffer || ptr >= (void *)((char *)r->buffer + r->size)) {
-		/* After merge, recalculate order */
-		index = dstm_region_ptr_to_index(r, ptr);
-		order = 0;
-		while (order < r->max_order) {
-			size_t parent_index = index >> (order + 1);
-			if (!dstm_region_is_split(r, parent_index))
-				break;
-			order++;
-		}
+
+	/* merge_block returns the merged pointer and updates via merging
+	 * We need to calculate the final order after all merging */
+	index = dstm_region_ptr_to_index(r, ptr);
+	order = 0;
+	while (order < r->max_order) {
+		size_t parent_index = index >> (order + 1);
+		if (!dstm_region_is_split(r, parent_index))
+			break;
+		order++;
 	}
 
 	/* Add to free list */

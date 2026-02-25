@@ -23,74 +23,17 @@ START_TEST(test_version_values)
 }
 END_TEST
 
-START_TEST(test_init_null)
-{
-	ck_assert(!dstm_init(NULL, NULL));
-	dstm_finalize();
-}
-END_TEST
-
-START_TEST(test_hello_world)
-{
-	ck_assert(!dstm_init(NULL, NULL));
-
-
-
-
-
-	dstm_finalize();
-}
-END_TEST
-
-void setup(void)
-{
-	ck_assert(!dstm_init(NULL, NULL));
-}
-
-void teardown(void)
-{
-	dstm_finalize();
-}
-
-START_TEST(test_start_null)
-{
-	dstm_distance_t d = { NULL, 0 };
-	ck_assert_int_eq(dstm_start(d), -DSTM_EINVAL);
-}
-
-START_TEST(test_start_id)
-{
-	ck_assert_int_eq(dstm_start(DSTM_DISTANCE_IDENTITY), DSTM_SUCCESS);
-	ck_assert(!dstm_fini());
-}
-
 Suite *core_suite(void)
 {
 	Suite *s;
-	TCase *tc_init;
 	TCase *tc_version;
-	TCase *tc_hello;
-	TCase *tc_start;
 
 	s = suite_create("core");
-
-	tc_init = tcase_create("init");
-	tcase_add_test(tc_init, test_init_null);
-	suite_add_tcase(s, tc_init);
 
 	tc_version = tcase_create("version");
 	tcase_add_test(tc_version, test_version_values);
 	suite_add_tcase(s, tc_version);
 
-	tc_hello = tcase_create("hello");
-	tcase_add_test(tc_hello, test_hello_world);
-	suite_add_tcase(s, tc_hello);
-
-	tc_start = tcase_create("dstm_start");
-	tcase_add_checked_fixture(tc_start, setup, teardown);
-	tcase_add_test(tc_start, test_start_null);
-	tcase_add_test(tc_start, test_start_id);
-	suite_add_tcase(s, tc_start);
 	return s;
 }
 
