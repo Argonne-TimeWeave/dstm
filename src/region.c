@@ -110,6 +110,9 @@ static int log2_pow2(size_t x)
 /* Convert size to order (size = MIN_BLOCK_SIZE * 2^order) */
 static int dstm_region_size_to_order(size_t size)
 {
+	/* Account for header overhead in allocated blocks */
+	size += DSTM_REGION_HEADER_SIZE;
+
 	if (size < DSTM_REGION_MIN_BLOCK_SIZE)
 		size = DSTM_REGION_MIN_BLOCK_SIZE;
 
@@ -243,17 +246,17 @@ static void dstm_region_split_block(dstm_region_t *r,
  ******************************************************************************/
 
 /* Try to merge block with its buddy, recursively */
-static void *dstm_region_merge_block(dstm_region_t *r, void *block, int order)
+static void *dstm_region_merge_block(dstm_region_t *r, void *block, int *order)
 {
-	while (order < r->max_order) {
-		void *buddy = dstm_region_get_buddy(r, block, order);
+	while (*order < r->max_order) {
+		void *buddy = dstm_region_get_buddy(r, block, *order);
 
 		/* Check if buddy is free */
-		if (!dstm_region_is_in_free_list(r, buddy, order))
+		if (!dstm_region_is_in_free_list(r, buddy, *order))
 			break;
 
 		/* Remove buddy from free list */
-		dstm_region_remove_from_free_list(r, buddy, order);
+		dstm_region_remove_from_free_list(r, buddy, *order);
 
 		/* Merge: use the lower address as the merged block */
 		if (buddy < block)
@@ -261,9 +264,9 @@ static void *dstm_region_merge_block(dstm_region_t *r, void *block, int order)
 
 		/* Clear split bit for parent */
 		size_t index = dstm_region_ptr_to_index(r, block);
-		dstm_region_clear_split(r, index >> (order + 1));
+		dstm_region_clear_split(r, index >> (*order + 1));
 
-		order++;
+		(*order)++;
 	}
 
 	return block;
@@ -283,6 +286,14 @@ static int dstm_region_init_allocator(dstm_region_t *r)
 	/* Validate minimum size */
 	if (r->size < DSTM_REGION_MIN_BLOCK_SIZE)
 		return -DSTM_EINVAL;
+
+	/* Ensure minimum block size can accommodate both:
+	 * - Allocation header (when allocated)
+	 * - Free list pointer (when free)
+	 */
+	assert(DSTM_REGION_MIN_BLOCK_SIZE >=
+	       sizeof(dstm_region_block_header_t));
+	assert(DSTM_REGION_MIN_BLOCK_SIZE >= sizeof(dstm_region_block_t));
 
 	/* Calculate max order */
 	r->max_order =
@@ -459,7 +470,7 @@ int dstm_region_get_ntime(dstm_region_t *region, int rank, dstm_time_t *time)
 
 dstm_ptr_t dstm_region_malloc(dstm_region_t *r, size_t size)
 {
-	dstm_ptr_t ret = { DSTM_REGIONID_INVALID, 0};	
+	dstm_ptr_t ret = {DSTM_REGIONID_INVALID, 0};
 	if (r == NULL || size == 0)
 		return ret;
 
@@ -490,50 +501,40 @@ dstm_ptr_t dstm_region_malloc(dstm_region_t *r, size_t size)
 		dstm_region_split_block(r, block, current_order, order);
 	}
 
-	return dstm_region_ptr_fromvoid(r, block);
+	/* Store allocation order in header */
+	dstm_region_block_header_t *header =
+	        (dstm_region_block_header_t *)block;
+	header->order = (uint8_t)order;
+
+	/* Return pointer to user data (after header) */
+	void *user_ptr = (char *)block + DSTM_REGION_HEADER_SIZE;
+	return dstm_region_ptr_fromvoid(r, user_ptr);
 }
 
 void dstm_region_free(dstm_region_t *r, dstm_ptr_t p)
 {
-	void *ptr = dstm_region_ptr_tovoid(r, p);
+	void *user_ptr = dstm_region_ptr_tovoid(r, p);
 
-	if (r == NULL || ptr == NULL)
+	if (r == NULL || user_ptr == NULL)
 		return;
 
-	/* Validate pointer is within region */
-	if (ptr < r->buffer || ptr >= (void *)((char *)r->buffer + r->size)) {
+	/* Get actual block pointer (before header) */
+	void *block_ptr = (char *)user_ptr - DSTM_REGION_HEADER_SIZE;
+
+	/* Validate block pointer is within region */
+	if (block_ptr < r->buffer ||
+	    block_ptr >= (void *)((char *)r->buffer + r->size)) {
 		return;
 	}
 
-	/* Calculate the order of this block by checking split bits
-	 * Start from order 0 and walk up until we find a parent that is NOT
-	 * split This tells us the actual order of this allocated block
-	 */
-	size_t index = dstm_region_ptr_to_index(r, ptr);
-	int order = 0;
+	/* Read allocation order from header */
+	dstm_region_block_header_t *header =
+	        (dstm_region_block_header_t *)block_ptr;
+	int order = header->order;
 
-	/* Find the order by checking if parent is split */
-	while (order < r->max_order) {
-		size_t parent_index = index >> (order + 1);
-		if (!dstm_region_is_split(r, parent_index))
-			break;
-		order++;
-	}
+	/* Try to merge with buddy (updates order to final merged order) */
+	void *merged_ptr = dstm_region_merge_block(r, block_ptr, &order);
 
-	/* Try to merge with buddy */
-	ptr = dstm_region_merge_block(r, ptr, order);
-
-	/* merge_block returns the merged pointer and updates via merging
-	 * We need to calculate the final order after all merging */
-	index = dstm_region_ptr_to_index(r, ptr);
-	order = 0;
-	while (order < r->max_order) {
-		size_t parent_index = index >> (order + 1);
-		if (!dstm_region_is_split(r, parent_index))
-			break;
-		order++;
-	}
-
-	/* Add to free list */
-	dstm_region_add_to_free_list(r, ptr, order);
+	/* Add to free list at final order */
+	dstm_region_add_to_free_list(r, merged_ptr, order);
 }

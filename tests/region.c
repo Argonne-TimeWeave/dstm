@@ -297,7 +297,7 @@ END_TEST
 START_TEST(test_region_malloc_exact_sizes)
 {
 	dstm_region_t *region = NULL;
-	dstm_region_create(&region, 4096);
+	dstm_region_create(&region, 8192);
 
 	/* Test power-of-2 sizes from min to large */
 	size_t sizes[] = {64, 128, 256, 512, 1024, 2048, 4096};
@@ -336,19 +336,24 @@ END_TEST
 
 START_TEST(test_region_malloc_max_size)
 {
-	size_t region_size = 4096;
+	size_t region_size = 8192;
 	dstm_region_t *region = NULL;
 	dstm_region_create(&region, region_size);
 
-	/* Should be able to allocate entire region */
+	/* Should be able to allocate half the region */
 	void *ptr = dstm_region_ptr_tovoid(
-	        region, dstm_region_malloc(region, region_size));
+	        region, dstm_region_malloc(region, (region_size / 2) - 16));
 	ck_assert_ptr_nonnull(ptr);
 
-	/* Second allocation should fail */
-	void *ptr2 =
+	/* Second allocation of the other half should succeed */
+	void *ptr2 = dstm_region_ptr_tovoid(
+	        region, dstm_region_malloc(region, (region_size / 2) - 16));
+	ck_assert_ptr_nonnull(ptr2);
+
+	/* Third allocation should fail */
+	void *ptr3 =
 	        dstm_region_ptr_tovoid(region, dstm_region_malloc(region, 64));
-	ck_assert_ptr_null(ptr2);
+	ck_assert_ptr_null(ptr3);
 
 	dstm_region_destroy(&region);
 }
@@ -373,8 +378,8 @@ START_TEST(test_region_coalesce_simple)
 	dstm_region_create(&region, 2048);
 
 	/* Allocate two buddy blocks */
-	dstm_ptr_t ptr1 = dstm_region_malloc(region, 1024);
-	dstm_ptr_t ptr2 = dstm_region_malloc(region, 1024);
+	dstm_ptr_t ptr1 = dstm_region_malloc(region, 1000);
+	dstm_ptr_t ptr2 = dstm_region_malloc(region, 1000);
 	ck_assert(!dstm_ptr_isnull(ptr1));
 	ck_assert(!dstm_ptr_isnull(ptr2));
 
@@ -382,8 +387,8 @@ START_TEST(test_region_coalesce_simple)
 	dstm_region_free(region, ptr1);
 	dstm_region_free(region, ptr2);
 
-	/* Should now be able to allocate 2048 (or larger) */
-	dstm_ptr_t ptr3 = dstm_region_malloc(region, 2048);
+	/* Should now be able to allocate 2048-16 after coalescing */
+	dstm_ptr_t ptr3 = dstm_region_malloc(region, 2000);
 	ck_assert(!dstm_ptr_isnull(ptr3));
 
 	dstm_region_destroy(&region);
@@ -398,7 +403,7 @@ START_TEST(test_region_coalesce_complex)
 	/* Allocate 4 blocks of 512 each */
 	dstm_ptr_t ptrs[4];
 	for (int i = 0; i < 4; i++) {
-		ptrs[i] = dstm_region_malloc(region, 512);
+		ptrs[i] = dstm_region_malloc(region, 480);
 		ck_assert(!dstm_ptr_isnull(ptrs[i]));
 	}
 
@@ -408,8 +413,8 @@ START_TEST(test_region_coalesce_complex)
 	}
 
 	/* Should be able to allocate larger block now */
-	void *large = dstm_region_ptr_tovoid(region,
-	                                     dstm_region_malloc(region, 2048));
+	void *large = dstm_region_ptr_tovoid(
+	        region, dstm_region_malloc(region, 2000));
 	ck_assert_ptr_nonnull(large);
 
 	dstm_region_destroy(&region);
@@ -457,13 +462,13 @@ START_TEST(test_region_reuse_freed_blocks)
 	dstm_region_create(&region, 256);
 
 	/* Allocate and free */
-	dstm_ptr_t ptr1 = dstm_region_malloc(region, 256);
+	dstm_ptr_t ptr1 = dstm_region_malloc(region, 200);
 	void *p1 = dstm_region_ptr_tovoid(region, ptr1);
 	ck_assert_ptr_nonnull(p1);
 	dstm_region_free(region, ptr1);
 
 	/* Allocate again - should reuse freed block */
-	dstm_ptr_t ptr2 = dstm_region_malloc(region, 256);
+	dstm_ptr_t ptr2 = dstm_region_malloc(region, 200);
 	void *p2 = dstm_region_ptr_tovoid(region, ptr2);
 	ck_assert_ptr_nonnull(p2);
 	ck_assert_ptr_eq(p1, p2); /* Should be same address */
@@ -481,7 +486,7 @@ START_TEST(test_region_fragmentation_interleaved)
 
 	/* Allocate 8 blocks */
 	for (int i = 0; i < 8; i++) {
-		ptrs[i] = dstm_region_malloc(region, 512);
+		ptrs[i] = dstm_region_malloc(region, 480);
 		ck_assert(!dstm_ptr_isnull(ptrs[i]));
 	}
 
@@ -492,7 +497,7 @@ START_TEST(test_region_fragmentation_interleaved)
 
 	/* Should be able to allocate 4 more blocks of same size */
 	for (int i = 0; i < 4; i++) {
-		dstm_ptr_t p = dstm_region_malloc(region, 512);
+		dstm_ptr_t p = dstm_region_malloc(region, 480);
 		ck_assert(!dstm_ptr_isnull(p));
 	}
 
@@ -506,21 +511,22 @@ START_TEST(test_region_fragmentation_pattern)
 	dstm_region_create(&region, 2048);
 
 	/* Create a specific fragmentation pattern */
-	dstm_ptr_t p1 = dstm_region_malloc(region, 512);
-	dstm_ptr_t p2 = dstm_region_malloc(region, 512);
-	dstm_ptr_t p3 = dstm_region_malloc(region, 512);
-	dstm_ptr_t p4 = dstm_region_malloc(region, 512);
+	dstm_ptr_t p1 = dstm_region_malloc(region, 400);
+	dstm_ptr_t p2 = dstm_region_malloc(region, 400);
+	dstm_ptr_t p3 = dstm_region_malloc(region, 400);
+	dstm_ptr_t p4 = dstm_region_malloc(region, 400);
 
-	ck_assert(dstm_ptr_isnull(p1));
-	ck_assert(dstm_ptr_isnull(p2));
-	ck_assert(dstm_ptr_isnull(p3));
-	ck_assert(dstm_ptr_isnull(p4));
+	ck_assert(!dstm_ptr_isnull(p1));
+	ck_assert(!dstm_ptr_isnull(p2));
+	ck_assert(!dstm_ptr_isnull(p3));
+	ck_assert(!dstm_ptr_isnull(p4));
 
 	/* Free middle block */
 	dstm_region_free(region, p2);
 
 	/* Allocate smaller block - should fit in freed space */
-	void *p5 = dstm_region_ptr_tovoid(region, dstm_region_malloc(region, 256));
+	void *p5 =
+	        dstm_region_ptr_tovoid(region, dstm_region_malloc(region, 256));
 	ck_assert_ptr_nonnull(p5);
 
 	dstm_region_destroy(&region);
@@ -541,14 +547,14 @@ START_TEST(test_region_exhaustion)
 
 	/* Allocate until exhausted */
 	for (int i = 0; i < 64; i++) {
-		ptrs[i] = dstm_region_malloc(region, 64);
+		ptrs[i] = dstm_region_malloc(region, 48);
 		if (!dstm_ptr_isnull(ptrs[i]))
 			count++;
 		else
 			break;
 	}
 
-	ck_assert_int_eq(count, 64); /* 4096 / 64 = 64 blocks */
+	ck_assert_int_eq(count, 64);
 
 	/* Next allocation should fail */
 	dstm_ptr_t ptr = dstm_region_malloc(region, 64);
@@ -561,20 +567,20 @@ END_TEST
 START_TEST(test_region_exhaustion_recovery)
 {
 	dstm_region_t *region = NULL;
-	dstm_region_create(&region, 4096);
+	dstm_region_create(&region, 8192);
 
-	/* Fill region */
-	dstm_ptr_t ptr1 = dstm_region_malloc(region, 4096);
+	/* Fill region completely */
+	dstm_ptr_t ptr1 = dstm_region_malloc(region, 8192 - 32);
 	ck_assert(!dstm_ptr_isnull(ptr1));
 
-	/* Should fail */
+	/* Second allocation should fail - region is full */
 	dstm_ptr_t ptr2 = dstm_region_malloc(region, 64);
-	ck_assert(!dstm_ptr_isnull(ptr2));
-
-	/* Free and try again */
-	dstm_region_free(region, ptr1);
-	ptr2 = dstm_region_malloc(region, 64);
 	ck_assert(dstm_ptr_isnull(ptr2));
+
+	/* Free first allocation and try again - should succeed */
+	dstm_region_free(region, ptr1);
+	dstm_ptr_t ptr3 = dstm_region_malloc(region, 64);
+	ck_assert(!dstm_ptr_isnull(ptr3));
 
 	dstm_region_destroy(&region);
 }
@@ -590,7 +596,7 @@ START_TEST(test_region_stress_mixed_sizes)
 	dstm_region_create(&region, 65536);
 
 	dstm_ptr_t ptrs[100];
-	size_t sizes[] = {64, 128, 256, 512, 1024};
+	size_t sizes[] = {48, 112, 240, 498, 1008};
 	int allocated = 0;
 
 	/* Allocate mix of sizes */
@@ -613,7 +619,7 @@ START_TEST(test_region_stress_mixed_sizes)
 
 	/* Allocate more */
 	for (int i = 0; i < 20; i++) {
-		dstm_ptr_t ptr = dstm_region_malloc(region, 128);
+		dstm_ptr_t ptr = dstm_region_malloc(region, 112);
 		ck_assert(!dstm_ptr_isnull(ptr));
 	}
 
@@ -630,7 +636,7 @@ START_TEST(test_region_stress_many_small)
 	dstm_ptr_t ptrs[200];
 	int count = 0;
 	for (int i = 0; i < 200; i++) {
-		ptrs[i] = dstm_region_malloc(region, 64);
+		ptrs[i] = dstm_region_malloc(region, 48);
 		if (!dstm_ptr_isnull(ptrs[i]))
 			count++;
 	}

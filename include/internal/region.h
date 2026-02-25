@@ -42,6 +42,34 @@ struct dstm_region_block_s {
 };
 typedef struct dstm_region_block_s dstm_region_block_t;
 
+/**
+ * Allocation block header - prepended to each allocated block
+ *
+ * Layout in memory:
+ *   [header: 16 bytes][user data: block_size - 16 bytes]
+ *
+ * The header stores metadata needed to free the block correctly.
+ * Using a 16-byte header ensures user data starts at a 16-byte aligned
+ * address (since blocks are always power-of-2 sized and >= 64 bytes),
+ * which is beneficial for SIMD operations and cache alignment.
+ *
+ * When a block is allocated:
+ *   - The header is written with the allocation order
+ *   - A pointer to the user data (after header) is returned
+ *
+ * When a block is freed:
+ *   - The header is read to determine the block's order
+ *   - The block is merged with buddies if possible
+ *   - The header space is reused for free list linkage
+ */
+struct dstm_region_block_header_s {
+	uint8_t order; /* Allocation order (0 to max_order) */
+	uint8_t _padding[15]; /* Padding to 16 bytes for alignment */
+};
+typedef struct dstm_region_block_header_s dstm_region_block_header_t;
+
+#define DSTM_REGION_HEADER_SIZE sizeof(dstm_region_block_header_t)
+
 /* Neighbor info for distributed memory tracking */
 struct dstm_region_ninfo_s {
 	int rank;
