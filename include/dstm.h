@@ -138,18 +138,6 @@ int dstm_distance_get(dstm_distance_t *dst, int i, int j);
 size_t dstm_distance_size(dstm_distance_t *dst);
 
 /**
- * Create identity distance matrix.
- *
- * Each node is connected to every other node at distance 1.
- *
- * @param[out] ret: pointer to distance structure pointer (must be non-NULL)
- * @param[in] size: number of nodes (must be >= 1)
- * @return DSTM_SUCCESS on success, -DSTM_EINVAL for invalid parameters,
- *         -DSTM_ENOMEM for allocation failures
- */
-int dstm_distance_create_identity(dstm_distance_t **ret, size_t size);
-
-/**
  * Create ring topology distance matrix.
  *
  * In a ring topology, each node is connected to exactly two neighbors
@@ -203,6 +191,11 @@ int dstm_distance_create_star(dstm_distance_t **ret, size_t size);
  *         -DSTM_ENOMEM for allocation failures
  */
 int dstm_distance_create_line(dstm_distance_t **ret, size_t size);
+int dstm_distance_create_mesh(dstm_distance_t **ret, size_t size);
+int dstm_distance_create_torus(dstm_distance_t **ret, size_t size);
+int dstm_distance_create_tree(dstm_distance_t **ret, size_t size);
+int dstm_distance_create_hypercube(dstm_distance_t **ret, size_t size);
+int dstm_distance_create_dragonfly(dstm_distance_t **ret, size_t size);
 
 /**
  * Destroy a distance matrix and free all associated resources.

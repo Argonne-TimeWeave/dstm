@@ -12,6 +12,7 @@
 #include <stdlib.h>
 
 #include "dstm.h"
+
 #include "internal/distance.h"
 
 /*******************************************************************************
@@ -421,6 +422,463 @@ START_TEST(test_line_two_nodes)
 END_TEST
 
 /*******************************************************************************
+ * Mesh Topology Tests
+ ******************************************************************************/
+
+START_TEST(test_mesh_null_pointer)
+{
+	int rc = dstm_distance_create_mesh(NULL, 9);
+	ck_assert_int_eq(rc, -DSTM_EINVAL);
+	ck_assert_int_eq(dstm_errno, DSTM_EINVAL);
+}
+END_TEST
+
+START_TEST(test_mesh_invalid_size_zero)
+{
+	dstm_distance_t *dist = NULL;
+	int rc = dstm_distance_create_mesh(&dist, 0);
+	ck_assert_int_eq(rc, -DSTM_EINVAL);
+	ck_assert_ptr_null(dist);
+}
+END_TEST
+
+START_TEST(test_mesh_invalid_size_too_large)
+{
+	dstm_distance_t *dist = NULL;
+	int rc = dstm_distance_create_mesh(&dist, DSTM_DISTANCE_MAX_SIZE + 1);
+	ck_assert_int_eq(rc, -DSTM_EINVAL);
+	ck_assert_ptr_null(dist);
+}
+END_TEST
+
+START_TEST(test_mesh_create_destroy)
+{
+	dstm_distance_t *dist = NULL;
+	int rc = dstm_distance_create_mesh(&dist, 9);
+	ck_assert_int_eq(rc, DSTM_SUCCESS);
+	ck_assert_ptr_nonnull(dist);
+	ck_assert_ptr_nonnull(dist->distances);
+	ck_assert_uint_eq(dist->size, 9);
+
+	dstm_distance_destroy(&dist);
+	ck_assert_ptr_null(dist);
+}
+END_TEST
+
+START_TEST(test_mesh_properties)
+{
+	/* 3x4 grid: 12 nodes */
+	dstm_distance_t *dist = NULL;
+	int rc = dstm_distance_create_mesh(&dist, 12);
+	ck_assert_int_eq(rc, DSTM_SUCCESS);
+
+	ck_assert(is_symmetric(dist));
+	ck_assert(diagonal_is_zero(dist));
+	ck_assert(all_nonnegative(dist));
+
+	/* 3x4 grid, cols=4: node i at (i/4, i%4)
+	 * node 0=(0,0), node 3=(0,3), node 8=(2,0), node 11=(2,3)
+	 * dist(0,3) = |0-0|+|0-3| = 3
+	 * dist(0,8) = |0-2|+|0-0| = 2
+	 * dist(0,11)= |0-2|+|0-3| = 5
+	 * dist(1,6) = |0-1|+|1-2| = 2
+	 */
+	ck_assert_int_eq(dstm_distance_get(dist, 0, 1), 1);
+	ck_assert_int_eq(dstm_distance_get(dist, 0, 4), 1);
+	ck_assert_int_eq(dstm_distance_get(dist, 0, 3), 3);
+	ck_assert_int_eq(dstm_distance_get(dist, 0, 8), 2);
+	ck_assert_int_eq(dstm_distance_get(dist, 0, 11), 5);
+	ck_assert_int_eq(dstm_distance_get(dist, 1, 6), 2);
+
+	dstm_distance_destroy(&dist);
+}
+END_TEST
+
+START_TEST(test_mesh_square)
+{
+	/* 4x4 square grid */
+	dstm_distance_t *dist = NULL;
+	int rc = dstm_distance_create_mesh(&dist, 16);
+	ck_assert_int_eq(rc, DSTM_SUCCESS);
+
+	ck_assert(is_symmetric(dist));
+	ck_assert(diagonal_is_zero(dist));
+
+	/* corners: 0=(0,0) and 15=(3,3), dist=6 */
+	ck_assert_int_eq(dstm_distance_get(dist, 0, 15), 6);
+	/* adjacent */
+	ck_assert_int_eq(dstm_distance_get(dist, 5, 6), 1);
+	ck_assert_int_eq(dstm_distance_get(dist, 5, 9), 1);
+
+	dstm_distance_destroy(&dist);
+}
+END_TEST
+
+/*******************************************************************************
+ * Torus Topology Tests
+ ******************************************************************************/
+
+START_TEST(test_torus_null_pointer)
+{
+	int rc = dstm_distance_create_torus(NULL, 9);
+	ck_assert_int_eq(rc, -DSTM_EINVAL);
+	ck_assert_int_eq(dstm_errno, DSTM_EINVAL);
+}
+END_TEST
+
+START_TEST(test_torus_invalid_size_too_small)
+{
+	dstm_distance_t *dist = NULL;
+	int rc = dstm_distance_create_torus(&dist, 3);
+	ck_assert_int_eq(rc, -DSTM_EINVAL);
+	ck_assert_ptr_null(dist);
+}
+END_TEST
+
+START_TEST(test_torus_invalid_size_too_large)
+{
+	dstm_distance_t *dist = NULL;
+	int rc = dstm_distance_create_torus(&dist, DSTM_DISTANCE_MAX_SIZE + 1);
+	ck_assert_int_eq(rc, -DSTM_EINVAL);
+	ck_assert_ptr_null(dist);
+}
+END_TEST
+
+START_TEST(test_torus_create_destroy)
+{
+	dstm_distance_t *dist = NULL;
+	int rc = dstm_distance_create_torus(&dist, 9);
+	ck_assert_int_eq(rc, DSTM_SUCCESS);
+	ck_assert_ptr_nonnull(dist);
+	ck_assert_ptr_nonnull(dist->distances);
+	ck_assert_uint_eq(dist->size, 9);
+
+	dstm_distance_destroy(&dist);
+	ck_assert_ptr_null(dist);
+}
+END_TEST
+
+START_TEST(test_torus_shorter_than_mesh)
+{
+	/* On a torus, wraparound paths make some distances shorter than mesh */
+	dstm_distance_t *mesh = NULL, *torus = NULL;
+	int rc;
+
+	rc = dstm_distance_create_mesh(&mesh, 16);
+	ck_assert_int_eq(rc, DSTM_SUCCESS);
+
+	rc = dstm_distance_create_torus(&torus, 16);
+	ck_assert_int_eq(rc, DSTM_SUCCESS);
+
+	ck_assert(is_symmetric(torus));
+	ck_assert(diagonal_is_zero(torus));
+	ck_assert(all_nonnegative(torus));
+
+	/* Corner-to-corner on 4x4: mesh=6, torus=2 (wrap 1 in each dim) */
+	ck_assert_int_eq(dstm_distance_get(mesh, 0, 15), 6);
+	ck_assert_int_eq(dstm_distance_get(torus, 0, 15), 2);
+
+	/* Direct neighbors unchanged */
+	ck_assert_int_eq(dstm_distance_get(torus, 0, 1), 1);
+	ck_assert_int_eq(dstm_distance_get(torus, 0, 4), 1);
+
+	/* Wraparound neighbors: node 0 and node 3 (right edge wraps, dist=1) */
+	ck_assert_int_eq(dstm_distance_get(torus, 0, 3), 1);
+	/* Wraparound: node 0 and node 12 (bottom edge wraps, dist=1) */
+	ck_assert_int_eq(dstm_distance_get(torus, 0, 12), 1);
+
+	dstm_distance_destroy(&mesh);
+	dstm_distance_destroy(&torus);
+}
+END_TEST
+
+/*******************************************************************************
+ * Tree Topology Tests
+ ******************************************************************************/
+
+START_TEST(test_tree_null_pointer)
+{
+	int rc = dstm_distance_create_tree(NULL, 7);
+	ck_assert_int_eq(rc, -DSTM_EINVAL);
+	ck_assert_int_eq(dstm_errno, DSTM_EINVAL);
+}
+END_TEST
+
+START_TEST(test_tree_invalid_size_zero)
+{
+	dstm_distance_t *dist = NULL;
+	int rc = dstm_distance_create_tree(&dist, 0);
+	ck_assert_int_eq(rc, -DSTM_EINVAL);
+	ck_assert_ptr_null(dist);
+}
+END_TEST
+
+START_TEST(test_tree_invalid_size_too_large)
+{
+	dstm_distance_t *dist = NULL;
+	int rc = dstm_distance_create_tree(&dist, DSTM_DISTANCE_MAX_SIZE + 1);
+	ck_assert_int_eq(rc, -DSTM_EINVAL);
+	ck_assert_ptr_null(dist);
+}
+END_TEST
+
+START_TEST(test_tree_create_destroy)
+{
+	dstm_distance_t *dist = NULL;
+	int rc = dstm_distance_create_tree(&dist, 7);
+	ck_assert_int_eq(rc, DSTM_SUCCESS);
+	ck_assert_ptr_nonnull(dist);
+	ck_assert_ptr_nonnull(dist->distances);
+	ck_assert_uint_eq(dist->size, 7);
+
+	dstm_distance_destroy(&dist);
+	ck_assert_ptr_null(dist);
+}
+END_TEST
+
+START_TEST(test_tree_properties)
+{
+	/* 7-node complete binary tree:
+	 *         0
+	 *        / \
+	 *       1   2
+	 *      / \ / \
+	 *     3 4 5  6
+	 */
+	dstm_distance_t *dist = NULL;
+	int rc = dstm_distance_create_tree(&dist, 7);
+	ck_assert_int_eq(rc, DSTM_SUCCESS);
+
+	ck_assert(is_symmetric(dist));
+	ck_assert(diagonal_is_zero(dist));
+	ck_assert(all_nonnegative(dist));
+
+	/* root to children: 1 hop */
+	ck_assert_int_eq(dstm_distance_get(dist, 0, 1), 1);
+	ck_assert_int_eq(dstm_distance_get(dist, 0, 2), 1);
+
+	/* root to leaves: 2 hops */
+	ck_assert_int_eq(dstm_distance_get(dist, 0, 3), 2);
+	ck_assert_int_eq(dstm_distance_get(dist, 0, 6), 2);
+
+	/* sibling leaves: 2 hops (up to parent, down to sibling) */
+	ck_assert_int_eq(dstm_distance_get(dist, 3, 4), 2);
+	ck_assert_int_eq(dstm_distance_get(dist, 5, 6), 2);
+
+	/* leaves in different subtrees: 4 hops (up 2, down 2) */
+	ck_assert_int_eq(dstm_distance_get(dist, 3, 5), 4);
+	ck_assert_int_eq(dstm_distance_get(dist, 4, 6), 4);
+
+	dstm_distance_destroy(&dist);
+}
+END_TEST
+
+START_TEST(test_tree_single_node)
+{
+	dstm_distance_t *dist = NULL;
+	int rc = dstm_distance_create_tree(&dist, 1);
+	ck_assert_int_eq(rc, DSTM_SUCCESS);
+	ck_assert_int_eq(dstm_distance_get(dist, 0, 0), 0);
+	dstm_distance_destroy(&dist);
+}
+END_TEST
+
+/*******************************************************************************
+ * Hypercube Topology Tests
+ ******************************************************************************/
+
+START_TEST(test_hypercube_null_pointer)
+{
+	int rc = dstm_distance_create_hypercube(NULL, 8);
+	ck_assert_int_eq(rc, -DSTM_EINVAL);
+	ck_assert_int_eq(dstm_errno, DSTM_EINVAL);
+}
+END_TEST
+
+START_TEST(test_hypercube_invalid_size_one)
+{
+	dstm_distance_t *dist = NULL;
+	int rc = dstm_distance_create_hypercube(&dist, 1);
+	ck_assert_int_eq(rc, -DSTM_EINVAL);
+	ck_assert_ptr_null(dist);
+}
+END_TEST
+
+START_TEST(test_hypercube_invalid_size_not_power_of_two)
+{
+	dstm_distance_t *dist = NULL;
+	int rc = dstm_distance_create_hypercube(&dist, 6);
+	ck_assert_int_eq(rc, -DSTM_EINVAL);
+	ck_assert_ptr_null(dist);
+	rc = dstm_distance_create_hypercube(&dist, 12);
+	ck_assert_int_eq(rc, -DSTM_EINVAL);
+	ck_assert_ptr_null(dist);
+}
+END_TEST
+
+START_TEST(test_hypercube_invalid_size_too_large)
+{
+	dstm_distance_t *dist = NULL;
+	int rc = dstm_distance_create_hypercube(&dist,
+	                                        DSTM_DISTANCE_MAX_SIZE + 1);
+	ck_assert_int_eq(rc, -DSTM_EINVAL);
+	ck_assert_ptr_null(dist);
+}
+END_TEST
+
+START_TEST(test_hypercube_create_destroy)
+{
+	dstm_distance_t *dist = NULL;
+	int rc = dstm_distance_create_hypercube(&dist, 8);
+	ck_assert_int_eq(rc, DSTM_SUCCESS);
+	ck_assert_ptr_nonnull(dist);
+	ck_assert_ptr_nonnull(dist->distances);
+	ck_assert_uint_eq(dist->size, 8);
+
+	dstm_distance_destroy(&dist);
+	ck_assert_ptr_null(dist);
+}
+END_TEST
+
+START_TEST(test_hypercube_properties)
+{
+	/* 3D hypercube: 8 nodes labeled 0..7 (binary 000..111) */
+	dstm_distance_t *dist = NULL;
+	int rc = dstm_distance_create_hypercube(&dist, 8);
+	ck_assert_int_eq(rc, DSTM_SUCCESS);
+
+	ck_assert(is_symmetric(dist));
+	ck_assert(diagonal_is_zero(dist));
+	ck_assert(all_nonnegative(dist));
+
+	/* neighbors differ by 1 bit */
+	ck_assert_int_eq(dstm_distance_get(dist, 0, 1), 1); /* 000 vs 001 */
+	ck_assert_int_eq(dstm_distance_get(dist, 0, 2), 1); /* 000 vs 010 */
+	ck_assert_int_eq(dstm_distance_get(dist, 0, 4), 1); /* 000 vs 100 */
+
+	/* 2 bit differences */
+	ck_assert_int_eq(dstm_distance_get(dist, 0, 3), 2); /* 000 vs 011 */
+	ck_assert_int_eq(dstm_distance_get(dist, 0, 5), 2); /* 000 vs 101 */
+	ck_assert_int_eq(dstm_distance_get(dist, 0, 6), 2); /* 000 vs 110 */
+
+	/* antipodal: 3 bits differ */
+	ck_assert_int_eq(dstm_distance_get(dist, 0, 7), 3); /* 000 vs 111 */
+	ck_assert_int_eq(dstm_distance_get(dist, 1, 6), 3); /* 001 vs 110 */
+
+	dstm_distance_destroy(&dist);
+}
+END_TEST
+
+START_TEST(test_hypercube_2d)
+{
+	/* 2D hypercube (square): 4 nodes */
+	dstm_distance_t *dist = NULL;
+	int rc = dstm_distance_create_hypercube(&dist, 4);
+	ck_assert_int_eq(rc, DSTM_SUCCESS);
+	ck_assert_uint_eq(dist->size, 4);
+
+	/* 00 vs 01: 1, 00 vs 10: 1, 00 vs 11: 2 */
+	ck_assert_int_eq(dstm_distance_get(dist, 0, 1), 1);
+	ck_assert_int_eq(dstm_distance_get(dist, 0, 2), 1);
+	ck_assert_int_eq(dstm_distance_get(dist, 0, 3), 2);
+
+	dstm_distance_destroy(&dist);
+}
+END_TEST
+
+/*******************************************************************************
+ * Dragonfly Topology Tests
+ ******************************************************************************/
+
+START_TEST(test_dragonfly_null_pointer)
+{
+	int rc = dstm_distance_create_dragonfly(NULL, 9);
+	ck_assert_int_eq(rc, -DSTM_EINVAL);
+	ck_assert_int_eq(dstm_errno, DSTM_EINVAL);
+}
+END_TEST
+
+START_TEST(test_dragonfly_invalid_size_too_small)
+{
+	dstm_distance_t *dist = NULL;
+	int rc = dstm_distance_create_dragonfly(&dist, 3);
+	ck_assert_int_eq(rc, -DSTM_EINVAL);
+	ck_assert_ptr_null(dist);
+}
+END_TEST
+
+START_TEST(test_dragonfly_invalid_size_too_large)
+{
+	dstm_distance_t *dist = NULL;
+	int rc = dstm_distance_create_dragonfly(&dist,
+	                                        DSTM_DISTANCE_MAX_SIZE + 1);
+	ck_assert_int_eq(rc, -DSTM_EINVAL);
+	ck_assert_ptr_null(dist);
+}
+END_TEST
+
+START_TEST(test_dragonfly_create_destroy)
+{
+	dstm_distance_t *dist = NULL;
+	int rc = dstm_distance_create_dragonfly(&dist, 9);
+	ck_assert_int_eq(rc, DSTM_SUCCESS);
+	ck_assert_ptr_nonnull(dist);
+	ck_assert_ptr_nonnull(dist->distances);
+	ck_assert_uint_eq(dist->size, 9);
+
+	dstm_distance_destroy(&dist);
+	ck_assert_ptr_null(dist);
+}
+END_TEST
+
+START_TEST(test_dragonfly_properties)
+{
+	/* 9 nodes: 3 groups of 3 */
+	dstm_distance_t *dist = NULL;
+	int rc = dstm_distance_create_dragonfly(&dist, 9);
+	ck_assert_int_eq(rc, DSTM_SUCCESS);
+
+	ck_assert(is_symmetric(dist));
+	ck_assert(diagonal_is_zero(dist));
+	ck_assert(all_nonnegative(dist));
+
+	/* Intra-group: nodes 0,1,2 are in group 0 -> 1 hop */
+	ck_assert_int_eq(dstm_distance_get(dist, 0, 1), 1);
+	ck_assert_int_eq(dstm_distance_get(dist, 0, 2), 1);
+	ck_assert_int_eq(dstm_distance_get(dist, 1, 2), 1);
+
+	/* Inter-group: group 0 to group 1 (nodes 3,4,5) -> 3 hops */
+	ck_assert_int_eq(dstm_distance_get(dist, 0, 3), 3);
+	ck_assert_int_eq(dstm_distance_get(dist, 0, 5), 3);
+
+	/* Inter-group: group 0 to group 2 (nodes 6,7,8) -> 3 hops */
+	ck_assert_int_eq(dstm_distance_get(dist, 0, 6), 3);
+	ck_assert_int_eq(dstm_distance_get(dist, 2, 8), 3);
+
+	dstm_distance_destroy(&dist);
+}
+END_TEST
+
+START_TEST(test_dragonfly_minimal)
+{
+	/* 4 nodes: 2 groups of 2 */
+	dstm_distance_t *dist = NULL;
+	int rc = dstm_distance_create_dragonfly(&dist, 4);
+	ck_assert_int_eq(rc, DSTM_SUCCESS);
+
+	/* Intra-group */
+	ck_assert_int_eq(dstm_distance_get(dist, 0, 1), 1);
+	ck_assert_int_eq(dstm_distance_get(dist, 2, 3), 1);
+
+	/* Inter-group */
+	ck_assert_int_eq(dstm_distance_get(dist, 0, 2), 3);
+	ck_assert_int_eq(dstm_distance_get(dist, 1, 3), 3);
+
+	dstm_distance_destroy(&dist);
+}
+END_TEST
+
+/*******************************************************************************
  * Test Suite Setup
  ******************************************************************************/
 
@@ -428,6 +886,7 @@ Suite *distances_suite(void)
 {
 	Suite *s;
 	TCase *tc_ring, *tc_complete, *tc_star, *tc_line;
+	TCase *tc_mesh, *tc_torus, *tc_tree, *tc_hypercube, *tc_dragonfly;
 
 	s = suite_create("distances");
 
@@ -472,6 +931,57 @@ Suite *distances_suite(void)
 	tcase_add_test(tc_line, test_line_single_node);
 	tcase_add_test(tc_line, test_line_two_nodes);
 	suite_add_tcase(s, tc_line);
+
+	/* Mesh tests */
+	tc_mesh = tcase_create("mesh");
+	tcase_add_test(tc_mesh, test_mesh_null_pointer);
+	tcase_add_test(tc_mesh, test_mesh_invalid_size_zero);
+	tcase_add_test(tc_mesh, test_mesh_invalid_size_too_large);
+	tcase_add_test(tc_mesh, test_mesh_create_destroy);
+	tcase_add_test(tc_mesh, test_mesh_properties);
+	tcase_add_test(tc_mesh, test_mesh_square);
+	suite_add_tcase(s, tc_mesh);
+
+	/* Torus tests */
+	tc_torus = tcase_create("torus");
+	tcase_add_test(tc_torus, test_torus_null_pointer);
+	tcase_add_test(tc_torus, test_torus_invalid_size_too_small);
+	tcase_add_test(tc_torus, test_torus_invalid_size_too_large);
+	tcase_add_test(tc_torus, test_torus_create_destroy);
+	tcase_add_test(tc_torus, test_torus_shorter_than_mesh);
+	suite_add_tcase(s, tc_torus);
+
+	/* Tree tests */
+	tc_tree = tcase_create("tree");
+	tcase_add_test(tc_tree, test_tree_null_pointer);
+	tcase_add_test(tc_tree, test_tree_invalid_size_zero);
+	tcase_add_test(tc_tree, test_tree_invalid_size_too_large);
+	tcase_add_test(tc_tree, test_tree_create_destroy);
+	tcase_add_test(tc_tree, test_tree_properties);
+	tcase_add_test(tc_tree, test_tree_single_node);
+	suite_add_tcase(s, tc_tree);
+
+	/* Hypercube tests */
+	tc_hypercube = tcase_create("hypercube");
+	tcase_add_test(tc_hypercube, test_hypercube_null_pointer);
+	tcase_add_test(tc_hypercube, test_hypercube_invalid_size_one);
+	tcase_add_test(tc_hypercube,
+	               test_hypercube_invalid_size_not_power_of_two);
+	tcase_add_test(tc_hypercube, test_hypercube_invalid_size_too_large);
+	tcase_add_test(tc_hypercube, test_hypercube_create_destroy);
+	tcase_add_test(tc_hypercube, test_hypercube_properties);
+	tcase_add_test(tc_hypercube, test_hypercube_2d);
+	suite_add_tcase(s, tc_hypercube);
+
+	/* Dragonfly tests */
+	tc_dragonfly = tcase_create("dragonfly");
+	tcase_add_test(tc_dragonfly, test_dragonfly_null_pointer);
+	tcase_add_test(tc_dragonfly, test_dragonfly_invalid_size_too_small);
+	tcase_add_test(tc_dragonfly, test_dragonfly_invalid_size_too_large);
+	tcase_add_test(tc_dragonfly, test_dragonfly_create_destroy);
+	tcase_add_test(tc_dragonfly, test_dragonfly_properties);
+	tcase_add_test(tc_dragonfly, test_dragonfly_minimal);
+	suite_add_tcase(s, tc_dragonfly);
 
 	return s;
 }

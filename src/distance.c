@@ -15,6 +15,7 @@
 #include <string.h>
 
 #include "dstm.h"
+
 #include "internal/distance.h"
 
 /*******************************************************************************
@@ -61,41 +62,6 @@ static void init_distance_matrix(int *distances, size_t size)
 /*******************************************************************************
  * Common Topologies
  ******************************************************************************/
-
-/**
- * Create a identity topology distance matrix
- *
- * Each node is connected to every other node at distance 1.
- */
-int dstm_distance_create_identity(dstm_distance_t **ret, size_t size)
-{
-	if (ret == NULL) {
-		return -DSTM_EINVAL;
-	}
-
-	if (size < 1 || size > DSTM_DISTANCE_MAX_SIZE) {
-		return -DSTM_EINVAL;
-	}
-
-	dstm_distance_t *dist = malloc(sizeof(*dist));
-	if (dist == NULL) {
-		return -DSTM_ENOMEM;
-	}
-
-	dist->distances = calloc(size * size, sizeof(int));
-	if (dist->distances == NULL) {
-		free(dist);
-		return -DSTM_ENOMEM;
-	}
-
-	dist->size = size;
-
-	for (size_t i = 0; i < size * size; i++)
-		dist->distances[i] = 1;
-
-	*ret = dist;
-	return DSTM_SUCCESS;
-}
 
 /**
  * Create ring/circular topology distance matrix.
@@ -358,6 +324,433 @@ int dstm_distance_create_line(dstm_distance_t **ret, size_t size)
 	return DSTM_SUCCESS;
 }
 
+/**
+ * Create 2D mesh/grid topology distance matrix.
+ *
+ * In a 2D mesh, nodes are arranged in a rectangular grid with each interior
+ * node connected to its 4 neighbors (up, down, left, right). Edge nodes have
+ * fewer connections. The distance is the Manhattan distance on the grid.
+ *
+ * Grid dimensions are automatically computed to be as square as possible.
+ * For example, 12 nodes creates a 3×4 grid, 16 nodes creates a 4×4 grid.
+ *
+ * Example for 12 nodes (3×4 grid):
+ *   0 -- 1 -- 2 -- 3
+ *   |    |    |    |
+ *   4 -- 5 -- 6 -- 7
+ *   |    |    |    |
+ *   8 -- 9 --10 --11
+ *
+ * Node indexing: node i is at position (i / cols, i % cols)
+ *
+ * Distance is Manhattan: |row_i - row_j| + |col_i - col_j|
+ *
+ * @param[out] ret: pointer to distance structure pointer (must be non-NULL)
+ * @param[in] size: number of nodes (must be >= 1)
+ * @return DSTM_SUCCESS on success, -DSTM_EINVAL for invalid parameters,
+ *         -DSTM_ENOMEM for allocation failures
+ */
+int dstm_distance_create_mesh(dstm_distance_t **ret, size_t size)
+{
+	if (ret == NULL) {
+		dstm_errno = DSTM_EINVAL;
+		return -DSTM_EINVAL;
+	}
+
+	if (size < 1 || size > DSTM_DISTANCE_MAX_SIZE) {
+		dstm_errno = DSTM_EINVAL;
+		return -DSTM_EINVAL;
+	}
+
+	dstm_distance_t *dist = malloc(sizeof(*dist));
+	if (dist == NULL) {
+		dstm_errno = DSTM_ENOMEM;
+		return -DSTM_ENOMEM;
+	}
+
+	dist->distances = calloc(size * size, sizeof(int));
+	if (dist->distances == NULL) {
+		free(dist);
+		dstm_errno = DSTM_ENOMEM;
+		return -DSTM_ENOMEM;
+	}
+
+	dist->size = size;
+
+	/* Compute grid dimensions (as square as possible) */
+	size_t cols = size;
+	for (size_t r = 1; r * r <= size; r++) {
+		if (size % r == 0)
+			cols = size / r;
+	}
+
+	/* Compute Manhattan distances */
+	for (size_t i = 0; i < size; i++) {
+		size_t row_i = i / cols;
+		size_t col_i = i % cols;
+		for (size_t j = 0; j < size; j++) {
+			size_t row_j = j / cols;
+			size_t col_j = j % cols;
+			int row_dist = (int)row_i - (int)row_j;
+			int col_dist = (int)col_i - (int)col_j;
+			dist->distances[i * size + j] =
+			        (row_dist < 0 ? -row_dist : row_dist) +
+			        (col_dist < 0 ? -col_dist : col_dist);
+		}
+	}
+
+	*ret = dist;
+	return DSTM_SUCCESS;
+}
+
+/**
+ * Create 2D torus topology distance matrix.
+ *
+ * In a 2D torus, nodes are arranged in a rectangular grid with wraparound
+ * edges, so each node has exactly 4 neighbors. This is like a mesh where
+ * the edges wrap around (periodic boundary conditions).
+ *
+ * Grid dimensions are automatically computed to be as square as possible.
+ * The distance is the shortest Manhattan distance considering wraparound.
+ *
+ * Example for 12 nodes (3×4 torus):
+ *   The grid wraps: leftmost column connects to rightmost,
+ *   top row connects to bottom row.
+ *
+ * Distance: min over both direct and wraparound paths
+ *
+ * @param[out] ret: pointer to distance structure pointer (must be non-NULL)
+ * @param[in] size: number of nodes (must be >= 4 for a valid torus)
+ * @return DSTM_SUCCESS on success, -DSTM_EINVAL for invalid parameters,
+ *         -DSTM_ENOMEM for allocation failures
+ */
+int dstm_distance_create_torus(dstm_distance_t **ret, size_t size)
+{
+	if (ret == NULL) {
+		dstm_errno = DSTM_EINVAL;
+		return -DSTM_EINVAL;
+	}
+
+	if (size < 4 || size > DSTM_DISTANCE_MAX_SIZE) {
+		dstm_errno = DSTM_EINVAL;
+		return -DSTM_EINVAL;
+	}
+
+	dstm_distance_t *dist = malloc(sizeof(*dist));
+	if (dist == NULL) {
+		dstm_errno = DSTM_ENOMEM;
+		return -DSTM_ENOMEM;
+	}
+
+	dist->distances = calloc(size * size, sizeof(int));
+	if (dist->distances == NULL) {
+		free(dist);
+		dstm_errno = DSTM_ENOMEM;
+		return -DSTM_ENOMEM;
+	}
+
+	dist->size = size;
+
+	/* Compute grid dimensions (as square as possible) */
+	size_t rows = 1, cols = size;
+	for (size_t r = 1; r * r <= size; r++) {
+		if (size % r == 0) {
+			rows = r;
+			cols = size / r;
+		}
+	}
+
+	/* Compute toroidal distances (with wraparound) */
+	for (size_t i = 0; i < size; i++) {
+		size_t row_i = i / cols;
+		size_t col_i = i % cols;
+		for (size_t j = 0; j < size; j++) {
+			size_t row_j = j / cols;
+			size_t col_j = j % cols;
+
+			/* Compute distance with wraparound */
+			int row_diff = (int)row_i - (int)row_j;
+			int col_diff = (int)col_i - (int)col_j;
+			if (row_diff < 0)
+				row_diff = -row_diff;
+			if (col_diff < 0)
+				col_diff = -col_diff;
+
+			/* Take shorter path (direct or wraparound) */
+			int row_dist = row_diff < (int)rows - row_diff ?
+			                       row_diff :
+			                       (int)rows - row_diff;
+			int col_dist = col_diff < (int)cols - col_diff ?
+			                       col_diff :
+			                       (int)cols - col_diff;
+
+			dist->distances[i * size + j] = row_dist + col_dist;
+		}
+	}
+
+	*ret = dist;
+	return DSTM_SUCCESS;
+}
+
+/**
+ * Create binary tree topology distance matrix.
+ *
+ * In a binary tree, nodes are arranged hierarchically with node 0 as root.
+ * Node i has children at indices (2*i + 1) and (2*i + 2), and parent at
+ * index (i-1)/2. Distance is the path length through the tree.
+ *
+ * Example for 7 nodes (complete binary tree):
+ *         0
+ *        / \
+ *       1   2
+ *      / \ / \
+ *     3 4 5 6
+ *
+ * Distance between nodes requires going up to lowest common ancestor (LCA),
+ * then down to the target.
+ *
+ * @param[out] ret: pointer to distance structure pointer (must be non-NULL)
+ * @param[in] size: number of nodes (must be >= 1)
+ * @return DSTM_SUCCESS on success, -DSTM_EINVAL for invalid parameters,
+ *         -DSTM_ENOMEM for allocation failures
+ */
+int dstm_distance_create_tree(dstm_distance_t **ret, size_t size)
+{
+	if (ret == NULL) {
+		dstm_errno = DSTM_EINVAL;
+		return -DSTM_EINVAL;
+	}
+
+	if (size < 1 || size > DSTM_DISTANCE_MAX_SIZE) {
+		dstm_errno = DSTM_EINVAL;
+		return -DSTM_EINVAL;
+	}
+
+	dstm_distance_t *dist = malloc(sizeof(*dist));
+	if (dist == NULL) {
+		dstm_errno = DSTM_ENOMEM;
+		return -DSTM_ENOMEM;
+	}
+
+	dist->distances = calloc(size * size, sizeof(int));
+	if (dist->distances == NULL) {
+		free(dist);
+		dstm_errno = DSTM_ENOMEM;
+		return -DSTM_ENOMEM;
+	}
+
+	dist->size = size;
+
+	/* Compute tree distances */
+	for (size_t i = 0; i < size; i++) {
+		for (size_t j = 0; j < size; j++) {
+			if (i == j) {
+				dist->distances[i * size + j] = 0;
+				continue;
+			}
+
+			/* Find path from i to j through tree */
+			/* Get ancestors of both nodes */
+			size_t path_i[64], path_j[64];
+			size_t len_i = 0, len_j = 0;
+			size_t node_i = i, node_j = j;
+
+			/* Build path from i to root */
+			while (node_i < size && len_i < 64) {
+				path_i[len_i++] = node_i;
+				if (node_i == 0)
+					break;
+				node_i = (node_i - 1) / 2;
+			}
+
+			/* Build path from j to root */
+			while (node_j < size && len_j < 64) {
+				path_j[len_j++] = node_j;
+				if (node_j == 0)
+					break;
+				node_j = (node_j - 1) / 2;
+			}
+
+			/* Find LCA (first common node) */
+			int distance = 0;
+			int found_lca = 0;
+			for (size_t pi = 0; pi < len_i; pi++) {
+				for (size_t pj = 0; pj < len_j; pj++) {
+					if (path_i[pi] == path_j[pj]) {
+						distance = (int)pi + (int)pj;
+						found_lca = 1;
+						break;
+					}
+				}
+				if (found_lca)
+					break;
+			}
+
+			dist->distances[i * size + j] = distance;
+		}
+	}
+
+	*ret = dist;
+	return DSTM_SUCCESS;
+}
+
+/**
+ * Create hypercube topology distance matrix.
+ *
+ * In a hypercube, size must be a power of 2 (2^d for d dimensions).
+ * Each node is connected to d neighbors (one per dimension).
+ * Distance is the Hamming distance between node indices.
+ *
+ * Example for 8 nodes (3D hypercube):
+ *   Nodes labeled 000, 001, 010, 011, 100, 101, 110, 111
+ *   Distance = number of bit positions that differ
+ *
+ * Properties:
+ *   - 8 nodes = 3D cube (each node has 3 neighbors)
+ *   - 16 nodes = 4D hypercube (each node has 4 neighbors)
+ *
+ * @param[out] ret: pointer to distance structure pointer (must be non-NULL)
+ * @param[in] size: number of nodes (must be power of 2, >= 2)
+ * @return DSTM_SUCCESS on success, -DSTM_EINVAL for invalid parameters,
+ *         -DSTM_ENOMEM for allocation failures
+ */
+int dstm_distance_create_hypercube(dstm_distance_t **ret, size_t size)
+{
+	if (ret == NULL) {
+		dstm_errno = DSTM_EINVAL;
+		return -DSTM_EINVAL;
+	}
+
+	/* Check if size is a power of 2 and within bounds */
+	if (size < 2 || size > DSTM_DISTANCE_MAX_SIZE) {
+		dstm_errno = DSTM_EINVAL;
+		return -DSTM_EINVAL;
+	}
+
+	/* Verify size is power of 2 */
+	if ((size & (size - 1)) != 0) {
+		dstm_errno = DSTM_EINVAL;
+		return -DSTM_EINVAL;
+	}
+
+	dstm_distance_t *dist = malloc(sizeof(*dist));
+	if (dist == NULL) {
+		dstm_errno = DSTM_ENOMEM;
+		return -DSTM_ENOMEM;
+	}
+
+	dist->distances = calloc(size * size, sizeof(int));
+	if (dist->distances == NULL) {
+		free(dist);
+		dstm_errno = DSTM_ENOMEM;
+		return -DSTM_ENOMEM;
+	}
+
+	dist->size = size;
+
+	/* Compute Hamming distances */
+	for (size_t i = 0; i < size; i++) {
+		for (size_t j = 0; j < size; j++) {
+			/* Distance = popcount(i XOR j) */
+			size_t xor_val = i ^ j;
+			int hamming_dist = 0;
+			while (xor_val) {
+				hamming_dist += xor_val & 1;
+				xor_val >>= 1;
+			}
+			dist->distances[i * size + j] = hamming_dist;
+		}
+	}
+
+	*ret = dist;
+	return DSTM_SUCCESS;
+}
+
+/**
+ * Create dragonfly topology distance matrix.
+ *
+ * Dragonfly is a hierarchical topology used in modern HPC systems.
+ * Nodes are organized into groups, with high-bandwidth local connections
+ * within groups and sparse global connections between groups.
+ *
+ * The size is automatically factored into groups. Each group is fully
+ * connected internally (complete graph), and groups are connected via
+ * a subset of global links.
+ *
+ * Distance properties:
+ *   - Within same group: 1 hop
+ *   - Between different groups: 2-3 hops (via global links)
+ *
+ * For simplicity, we use a minimal dragonfly where each group connects
+ * to all other groups through at least one global link.
+ *
+ * @param[out] ret: pointer to distance structure pointer (must be non-NULL)
+ * @param[in] size: number of nodes (must be >= 4)
+ * @return DSTM_SUCCESS on success, -DSTM_EINVAL for invalid parameters,
+ *         -DSTM_ENOMEM for allocation failures
+ */
+int dstm_distance_create_dragonfly(dstm_distance_t **ret, size_t size)
+{
+	if (ret == NULL) {
+		dstm_errno = DSTM_EINVAL;
+		return -DSTM_EINVAL;
+	}
+
+	if (size < 4 || size > DSTM_DISTANCE_MAX_SIZE) {
+		dstm_errno = DSTM_EINVAL;
+		return -DSTM_EINVAL;
+	}
+
+	dstm_distance_t *dist = malloc(sizeof(*dist));
+	if (dist == NULL) {
+		dstm_errno = DSTM_ENOMEM;
+		return -DSTM_ENOMEM;
+	}
+
+	dist->distances = calloc(size * size, sizeof(int));
+	if (dist->distances == NULL) {
+		free(dist);
+		dstm_errno = DSTM_ENOMEM;
+		return -DSTM_ENOMEM;
+	}
+
+	dist->size = size;
+
+	/* Determine number of groups (aim for sqrt(size) nodes per group) */
+	size_t group_size = 1;
+	for (size_t gs = 2; gs * gs <= size; gs++) {
+		if (size % gs == 0)
+			group_size = gs;
+	}
+
+	/* Compute dragonfly distances */
+	for (size_t i = 0; i < size; i++) {
+		size_t group_i = i / group_size;
+		for (size_t j = 0; j < size; j++) {
+			size_t group_j = j / group_size;
+
+			if (i == j) {
+				dist->distances[i * size + j] = 0;
+			} else if (group_i == group_j) {
+				/* Same group: 1 hop (intra-group complete
+				 * graph) */
+				dist->distances[i * size + j] = 1;
+			} else {
+				/* Different groups: 3 hops
+				 * (local -> global link -> remote global link
+				 * -> remote node) In a real dragonfly this can
+				 * be 2 hops if nodes have direct global links,
+				 * but 3 is worst case
+				 */
+				dist->distances[i * size + j] = 3;
+			}
+		}
+	}
+
+	*ret = dist;
+	return DSTM_SUCCESS;
+}
+
 /*******************************************************************************
  * Cleanup
  ******************************************************************************/
@@ -391,7 +784,8 @@ void dstm_distance_destroy(dstm_distance_t **dist)
 
 int dstm_distance_create_copy(dstm_distance_t **dst, dstm_distance_t *src)
 {
-	if (dst == NULL || src == NULL || src->size == 0 || src->distances == NULL)
+	if (dst == NULL || src == NULL || src->size == 0 ||
+	    src->distances == NULL)
 		return -DSTM_EINVAL;
 
 	size_t size = src->size;
@@ -408,7 +802,8 @@ int dstm_distance_create_copy(dstm_distance_t **dst, dstm_distance_t *src)
 
 	dist->size = size;
 
-	memcpy(dist->distances, src->distances, dist->size * dist->size * sizeof(int));
+	memcpy(dist->distances, src->distances,
+	       dist->size * dist->size * sizeof(int));
 	*dst = dist;
 	return DSTM_SUCCESS;
 }
