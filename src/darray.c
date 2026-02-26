@@ -48,8 +48,16 @@ static int darray_find_rank(dstm_darray_t *darray, size_t global_index)
 	return lo;
 }
 
-int dstm_darray_create(dstm_darray_t **ret, size_t element_size, size_t local_elements)
+int dstm_darray_create(dstm_darray_t **ret,
+                       size_t element_size,
+                       size_t local_elements)
 {
+	if (ret == NULL || element_size == 0 || local_elements == 0) {
+		if (ret != NULL)
+			*ret = NULL;
+		return -DSTM_EINVAL;
+	}
+
 	int err = 0;
 	int world_size = dstm_global_context.world_size;
 	MPI_Comm comm = dstm_global_context.comm;
@@ -58,7 +66,7 @@ int dstm_darray_create(dstm_darray_t **ret, size_t element_size, size_t local_el
 	if (darray == NULL)
 		return -DSTM_ENOMEM;
 
-	darray->rank_elements = calloc(world_size,  sizeof(size_t));
+	darray->rank_elements = calloc(world_size, sizeof(size_t));
 	if (darray->rank_elements == NULL) {
 		err = -DSTM_ENOMEM;
 		goto err;
@@ -85,8 +93,8 @@ int dstm_darray_create(dstm_darray_t **ret, size_t element_size, size_t local_el
 	darray->local_elements = local_elements;
 
 	err = MPI_Allgather(&local_elements, 1, MPI_UNSIGNED_LONG_LONG,
-	                   darray->rank_elements, 1, MPI_UNSIGNED_LONG_LONG,
-	                   comm);
+	                    darray->rank_elements, 1, MPI_UNSIGNED_LONG_LONG,
+	                    comm);
 	if (err != MPI_SUCCESS) {
 		err = -DSTM_FAILURE;
 		goto err_mpi;
@@ -118,8 +126,9 @@ err:
 	return err;
 }
 
-int dstm_darray_create_equal(dstm_darray_t **ret, size_t element_size,
-                                        size_t total_elements)
+int dstm_darray_create_equal(dstm_darray_t **ret,
+                             size_t element_size,
+                             size_t total_elements)
 {
 	int world_size = dstm_global_context.world_size;
 	int rank = dstm_global_context.rank;
@@ -178,7 +187,7 @@ int dstm_darray_get(dstm_darray_t *darray,
 	src.offset = local_offset * darray->element_size;
 
 	return dstm_get(rank, src.region, time, delta, dst, src,
-	                  darray->element_size);
+	                darray->element_size);
 }
 
 int dstm_darray_put(dstm_darray_t *darray,
@@ -196,5 +205,5 @@ int dstm_darray_put(dstm_darray_t *darray,
 	dst.offset = local_offset * darray->element_size;
 
 	return dstm_put(rank, dst.region, time, delta, dst, src,
-	                  darray->element_size);
+	                darray->element_size);
 }
