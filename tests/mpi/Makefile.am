@@ -20,7 +20,8 @@ VALGRIND_SUPPRESSIONS_FILES = $(top_srcdir)/.valgrind.supp
 
 COMPILED_TESTS = \
 		darray \
-		distances
+		distances \
+		msg
 
 check_PROGRAMS = $(COMPILED_TESTS)
 

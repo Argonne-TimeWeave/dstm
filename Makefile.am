@@ -97,6 +97,7 @@ VALGRIND_SUPPRESSIONS_FILES = $(top_srcdir)/.valgrind.supp
 
 COMPILED_TESTS = \
 		tests/core \
+		tests/msg \
 		tests/region \
 		tests/distances
 

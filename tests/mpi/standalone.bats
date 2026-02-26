@@ -14,3 +14,7 @@ bats_require_minimum_version 1.5.0
 @test "mpirun -n 8 distances" {
 	run -0 --separate-stderr $LOG_COMPILER $LOG_FLAGS mpirun -n 8 $ABS_TOP_BUILDDIR/tests/mpi/distances
 }
+
+@test "mpirun -n 2 msg" {
+	run -0 --separate-stderr $LOG_COMPILER $LOG_FLAGS mpirun -n 2 $ABS_TOP_BUILDDIR/tests/mpi/msg
+}
