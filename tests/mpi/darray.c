@@ -14,7 +14,7 @@
 
 int main(int argc, char *argv[])
 {
-	dstm_distance_t dist;
+	dstm_distance_t *dist;
 	MPI_Init(&argc, &argv);
 	dstm_init(&argc, &argv);
 	
@@ -25,19 +25,7 @@ int main(int argc, char *argv[])
 	MPI_Comm_size(MPI_COMM_WORLD, &world_size);
 	MPI_Comm_rank(MPI_COMM_WORLD, &rank);
 
-	/* example only for 4 ranks:
-	 *               0
-	 *      1               2
-	 *                          4
-	 *
-	 * */
-	assert(world_size == 4);
-	int distances[16] = { 0, 1, 1, 0, \
-		              1, 0, 0, 0, \
-			      1, 0, 0, 1, \
-			      0, 0, 1, 0};
-	dist.distances = (int *)&distances[0];
-	dist.size = 4;
+	dstm_distance_create_ring(&dist, world_size);
 	dstm_start(dist);
 
 	/* memory allocation:

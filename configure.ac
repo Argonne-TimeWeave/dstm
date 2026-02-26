@@ -30,8 +30,12 @@ AM_INIT_AUTOMAKE([-Wall -Werror foreign subdir-objects 1.12])
 ####################
 AC_LANG([C])
 AC_USE_SYSTEM_EXTENSIONS
-AC_PROG_CC
-AC_PROG_CC_C99
+
+# need an mpi compiler
+AX_PROG_CC_MPI(,,[
+	       AC_MSG_ERROR(MPI compiler required for this project)
+])
+
 AC_PROG_CPP
 AC_TYPE_SIZE_T
 AC_TYPE_INTPTR_T
@@ -116,12 +120,6 @@ CHECK:
 
 CFLAGS:  $CHECK_CFLAGS
 LDFLAGS: $CHECK_LIBS
-
-AML:
-=======
-
-CFLAGS:  $AML_CFLAGS
-LDFLAGS: $AML_LIBS
 
 PYTHON BINDINGS:
 ======

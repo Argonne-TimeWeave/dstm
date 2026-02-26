@@ -120,25 +120,113 @@ int dstm_log_setlevel(int level);
 	} while (0)
 
 /*******************************************************************************
- * Basic API
+ * Distances
  ******************************************************************************/
 
+/**
+ * Maximum supported size for distance matrices.
+ * This limit prevents excessive memory allocation.
+ */
+#define DSTM_DISTANCE_MAX_SIZE 65536
+
 /* distance between ranks, expressed as a 1D array of length size *size; */
-struct dstm_distance_s {
-	int *distances;
-	size_t size;
-};
+struct dstm_distance_s;
 typedef struct dstm_distance_s dstm_distance_t;
 
-extern dstm_distance_t DSTM_DISTANCE_IDENTITY;
+int dstm_distance_create_copy(dstm_distance_t **dst, dstm_distance_t *src);
+int dstm_distance_get(dstm_distance_t *dst, int i, int j);
+size_t dstm_distance_size(dstm_distance_t *dst);
 
-int dstm_distance_deepcopy(dstm_distance_t dst, dstm_distance_t src);
-int dstm_distance_get(dstm_distance_t dst, int i, int j);
+/**
+ * Create identity distance matrix.
+ *
+ * Each node is connected to every other node at distance 1.
+ *
+ * @param[out] ret: pointer to distance structure pointer (must be non-NULL)
+ * @param[in] size: number of nodes (must be >= 1)
+ * @return DSTM_SUCCESS on success, -DSTM_EINVAL for invalid parameters,
+ *         -DSTM_ENOMEM for allocation failures
+ */
+int dstm_distance_create_identity(dstm_distance_t **ret, size_t size);
+
+/**
+ * Create ring topology distance matrix.
+ *
+ * In a ring topology, each node is connected to exactly two neighbors
+ * in a circular pattern. The distance between any two nodes is the
+ * minimum number of hops around the ring.
+ *
+ * @param[out] ret: pointer to distance structure pointer (must be non-NULL)
+ * @param[in] size: number of nodes (must be >= 3 for a valid ring)
+ * @return DSTM_SUCCESS on success, -DSTM_EINVAL for invalid parameters,
+ *         -DSTM_ENOMEM for allocation failures
+ */
+int dstm_distance_create_ring(dstm_distance_t **ret, size_t size);
+
+/**
+ * Create fully connected (complete graph) topology distance matrix.
+ *
+ * In a complete graph, every node has a direct connection to every other
+ * node. All non-diagonal distances are 1, representing the lowest-latency
+ * topology.
+ *
+ * @param[out] ret: pointer to distance structure pointer (must be non-NULL)
+ * @param[in] size: number of nodes (must be >= 1)
+ * @return DSTM_SUCCESS on success, -DSTM_EINVAL for invalid parameters,
+ *         -DSTM_ENOMEM for allocation failures
+ */
+int dstm_distance_create_complete(dstm_distance_t **ret, size_t size);
+
+/**
+ * Create star topology distance matrix.
+ *
+ * In a star topology, node 0 is the central hub connected to all other
+ * nodes. Non-central nodes communicate through the center (2 hops).
+ *
+ * @param[out] ret: pointer to distance structure pointer (must be non-NULL)
+ * @param[in] size: number of nodes (must be >= 2 for a valid star)
+ * @return DSTM_SUCCESS on success, -DSTM_EINVAL for invalid parameters,
+ *         -DSTM_ENOMEM for allocation failures
+ */
+int dstm_distance_create_star(dstm_distance_t **ret, size_t size);
+
+/**
+ * Create line/chain topology distance matrix.
+ *
+ * In a line topology, nodes are connected in a linear sequence.
+ * Each node (except endpoints) has exactly two neighbors.
+ * Distance is the absolute difference of node indices.
+ *
+ * @param[out] ret: pointer to distance structure pointer (must be non-NULL)
+ * @param[in] size: number of nodes (must be >= 1)
+ * @return DSTM_SUCCESS on success, -DSTM_EINVAL for invalid parameters,
+ *         -DSTM_ENOMEM for allocation failures
+ */
+int dstm_distance_create_line(dstm_distance_t **ret, size_t size);
+
+/**
+ * Destroy a distance matrix and free all associated resources.
+ *
+ * This function safely deallocates a distance matrix created by any of
+ * the dstm_distance_create_* functions. Safe to call with NULL pointer.
+ * After this call, *dist will be set to NULL.
+ *
+ * @param[in,out] dist: pointer to distance structure pointer
+ */
+void dstm_distance_destroy(dstm_distance_t **dist);
+
+/*******************************************************************************
+ * DSTM START/FINISH
+ ******************************************************************************/
 
 /* basic configuration of dstm:
  */
-int dstm_start(dstm_distance_t dist);
+int dstm_start(dstm_distance_t *dist);
 int dstm_fini();
+
+/*******************************************************************************
+ * DSTM MEMORY MANAGEMENT
+ ******************************************************************************/
 
 /* a memory region: core object that get updated by the simulation using the
  * DSTM model.
@@ -158,11 +246,13 @@ typedef int64_t dstm_time_t;
 struct dstm_darray_s;
 typedef struct dstm_darray_s dstm_darray_t;
 
-int dstm_darray_create(dstm_darray_t **ret, size_t element_size, size_t local_elements);
-int dstm_darray_create_equal(dstm_darray_t **ret, size_t element_size,
-                                        size_t total_elements);
+int dstm_darray_create(dstm_darray_t **ret,
+                       size_t element_size,
+                       size_t local_elements);
+int dstm_darray_create_equal(dstm_darray_t **ret,
+                             size_t element_size,
+                             size_t total_elements);
 void dstm_darray_destroy(dstm_darray_t **darray);
-
 
 void *dstm_darray_get_local_ptr(dstm_darray_t *darray);
 size_t dstm_darray_local_count(dstm_darray_t *darray);
@@ -194,6 +284,10 @@ int dstm_ptr_isnull(dstm_ptr_t ptr);
 
 int dstm_get_local_region_id(void);
 dstm_region_t *dstm_get_local_region(void);
+
+/*******************************************************************************
+ * DSTM BASIC OPERATIONS
+ ******************************************************************************/
 
 int dstm_put(int rank,
              int region_id,

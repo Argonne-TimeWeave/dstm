@@ -45,6 +45,7 @@ include_dstm_HEADERS = \
 
 noinst_include_internaldir = $(includedir)/internal
 noinst_include_internal_HEADERS = \
+				  include/internal/distance.h \
 				  include/internal/globals.h \
 				  include/internal/msg.h \
 				  include/internal/region.h \
@@ -57,13 +58,14 @@ noinst_include_internal_HEADERS = \
 lib_LTLIBRARIES = libdstm.la
 
 libdstm_la_SOURCES = \
-		    src/log.c \
+		    src/darray.c \
+		    src/distance.c \
+		    src/dstm.c \
 		    src/error.c \
-		    src/region.c \
+		    src/log.c \
 		    src/ops.c \
 		    src/msg.c \
-		    src/dstm.c \
-		    src/darray.c
+		    src/region.c
 
 libdstm_la_LIBADD = $(LTLIBOBJS)
 
@@ -95,7 +97,8 @@ VALGRIND_SUPPRESSIONS_FILES = $(top_srcdir)/.valgrind.supp
 
 COMPILED_TESTS = \
 		tests/core \
-		tests/region
+		tests/region \
+		tests/distances
 
 # unit tests
 UNIT_TESTS = \

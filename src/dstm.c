@@ -30,7 +30,7 @@ int dstm_errno = 0;
  * Should be in a user controlled struct, but a singleton will do for now.
  ******************************************************************************/
 
-dstm_context_t dstm_global_context = { 0, 0 , 0, NULL, { NULL, 0}};
+dstm_context_t dstm_global_context = { 0, 0 , 0, NULL, NULL};
 
 /*******************************************************************************
  * Utils
@@ -49,35 +49,14 @@ dstm_region_t *dstm_get_local_region(void)
  * Init functions
  ******************************************************************************/
 
-dstm_distance_t DSTM_DISTANCE_IDENTITY = { NULL, 0};
-
-int dstm_distance_deepcopy(dstm_distance_t dst, dstm_distance_t src)
-{
-	if (src.size == 0 || src.distances == NULL)
-		return -DSTM_EINVAL;
-
-	dst.distances = calloc(dst.size * dst.size, sizeof(int));
-	if (dst.distances == NULL)
-		return -DSTM_ENOMEM;
-
-	memcpy(dst.distances, src.distances, dst.size * dst.size * sizeof(int));
-	return DSTM_SUCCESS;
-}
-
-int dstm_distance_get(dstm_distance_t dst, int i, int j)
-{
-	return dst.distances[dst.size * i + j];
-}
-
-int dstm_start(dstm_distance_t dist)
+int dstm_start(dstm_distance_t *dist)
 {
 	int err;
 
-	/* sanity check, the matrix needs to be size * size */
-	if (dist.size != (size_t )dstm_global_context.world_size)
+	if (dstm_distance_size(dist) != (size_t )dstm_global_context.world_size)
 		return -DSTM_EINVAL;
-	
-	err = dstm_distance_deepcopy(dstm_global_context.distances, dist);
+
+	err = dstm_distance_create_copy(&dstm_global_context.distances, dist);
 	if (err)
 		return err;
 
@@ -110,12 +89,6 @@ int dstm_init(int *argc, char **argv[])
 	MPI_Comm_rank(MPI_COMM_WORLD, &rank);
 	MPI_Comm_split(MPI_COMM_WORLD, 0, rank, &dstm_global_context.comm);
 
-	DSTM_DISTANCE_IDENTITY.distances = calloc(world_size * world_size,
-					 sizeof(int));
-	DSTM_DISTANCE_IDENTITY.size = world_size;
-	for (int i = 0; i < world_size; i++)
-		DSTM_DISTANCE_IDENTITY.distances[i * world_size + i] = 1;
-
 	dstm_global_context.world_size = world_size;
 	dstm_global_context.rank = rank;
 
@@ -127,7 +100,6 @@ int dstm_init(int *argc, char **argv[])
 int dstm_finalize(void)
 {
 	dstm_msg_finalize();
-	if (DSTM_DISTANCE_IDENTITY.distances != NULL)
-		free(DSTM_DISTANCE_IDENTITY.distances);
+	dstm_distance_destroy(&dstm_global_context.distances);
 	return 0;
 }

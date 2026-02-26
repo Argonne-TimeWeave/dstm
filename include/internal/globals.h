@@ -26,7 +26,7 @@ struct dstm_context_s {
 	int world_size;
 	int rank;
 	dstm_region_t *region;
-	dstm_distance_t distances;
+	dstm_distance_t *distances;
 };
 typedef struct dstm_context_s dstm_context_t;
 
