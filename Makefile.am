@@ -108,3 +108,12 @@ UNIT_TESTS = \
 check_PROGRAMS += $(COMPILED_TESTS)
 TESTS += $(UNIT_TESTS)
 
+###############################################################################
+# Utility // Dev tools
+###############################################################################
+
+.PHONY: compiledb
+
+compiledb:
+	make clean
+	bear -- make -j1 all check
