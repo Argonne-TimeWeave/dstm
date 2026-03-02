@@ -221,6 +221,68 @@ static void test_create_equal_total_zero(void)
 }
 
 /*******************************************************************************
+ * put/get invalid argument tests
+ ******************************************************************************/
+
+/* dstm_darray_put with a NULL src pointer must return -DSTM_EINVAL. */
+static void test_put_null_src(void)
+{
+	dstm_darray_t *a = NULL;
+	int rc = dstm_darray_create(&a, sizeof(int), 10);
+	assert(rc == 0);
+
+	size_t idx = dstm_darray_global_offset(a);
+	rc = dstm_darray_put(a, idx, NULL, 0, 0);
+	assert(rc == -DSTM_EINVAL);
+
+	dstm_darray_destroy(&a);
+}
+
+/* dstm_darray_put with a negative delta must return -DSTM_EINVAL. */
+static void test_put_negative_delta(void)
+{
+	dstm_darray_t *a = NULL;
+	int rc = dstm_darray_create(&a, sizeof(int), 10);
+	assert(rc == 0);
+
+	int val = 42;
+	size_t idx = dstm_darray_global_offset(a);
+	rc = dstm_darray_put(a, idx, &val, 0, -1);
+	assert(rc == -DSTM_EINVAL);
+
+	dstm_darray_destroy(&a);
+}
+
+/* dstm_darray_get with a NULL dst pointer must return -DSTM_EINVAL. */
+static void test_get_null_dst(void)
+{
+	dstm_darray_t *a = NULL;
+	int rc = dstm_darray_create(&a, sizeof(int), 10);
+	assert(rc == 0);
+
+	size_t idx = dstm_darray_global_offset(a);
+	rc = dstm_darray_get(a, idx, NULL, 0, 0);
+	assert(rc == -DSTM_EINVAL);
+
+	dstm_darray_destroy(&a);
+}
+
+/* dstm_darray_get with a positive delta must return -DSTM_EINVAL. */
+static void test_get_positive_delta(void)
+{
+	dstm_darray_t *a = NULL;
+	int rc = dstm_darray_create(&a, sizeof(int), 10);
+	assert(rc == 0);
+
+	int val = 0;
+	size_t idx = dstm_darray_global_offset(a);
+	rc = dstm_darray_get(a, idx, &val, 0, 1);
+	assert(rc == -DSTM_EINVAL);
+
+	dstm_darray_destroy(&a);
+}
+
+/*******************************************************************************
  * main
  ******************************************************************************/
 
@@ -255,6 +317,12 @@ int main(int argc, char *argv[])
 	test_create_equal_uneven();
 	test_create_equal_total_matches();
 	test_create_equal_total_zero();
+
+	/* put/get invalid args */
+	test_put_null_src();
+	test_put_negative_delta();
+	test_get_null_dst();
+	test_get_positive_delta();
 
 	dstm_fini();
 	dstm_finalize();
