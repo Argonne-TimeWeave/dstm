@@ -261,6 +261,11 @@ int dstm_darray_put(dstm_darray_t *darray,
                     void *src,
                     dstm_time_t time,
                     dstm_time_t delta);
+int dstm_darray_allgatherv(dstm_darray_t *darray,
+                           void *src,
+                           void *dst,
+                           dstm_time_t time,
+                           const dstm_time_t *deltas);
 
 /* opaque type for pointers into regions */
 #define DSTM_REGIONID_INVALID -1

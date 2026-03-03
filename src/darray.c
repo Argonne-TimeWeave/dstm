@@ -207,3 +207,51 @@ int dstm_darray_put(dstm_darray_t *darray,
 	return dstm_put(rank, dst.region, time, delta, dst, src,
 	                darray->element_size);
 }
+
+int dstm_darray_allgatherv(dstm_darray_t *darray,
+                           void *src,
+                           void *dst,
+                           dstm_time_t time,
+                           const dstm_time_t *deltas)
+{
+	if (darray == NULL || src == NULL || dst == NULL || deltas == NULL)
+		return -DSTM_EINVAL;
+
+	int self = dstm_global_context.rank;
+	int world_size = dstm_global_context.world_size;
+
+	/* Validate deltas: local rank must have delta >= 0 (put constraint),
+	 * all remote ranks must have delta <= 0 (get constraint). */
+	if (deltas[self] < 0)
+		return -DSTM_EINVAL;
+	for (int r = 0; r < world_size; r++) {
+		if (r != self && deltas[r] > 0)
+			return -DSTM_EINVAL;
+	}
+
+	/* Local put: write src into this rank's own darray partition. */
+	int rc = dstm_put(self, self, time, deltas[self], darray->local_ptr,
+	                  src,
+	                  darray->rank_elements[self] * darray->element_size);
+	if (rc != DSTM_SUCCESS)
+		return rc;
+
+	/* Remote gets: read each other rank's full slice into dst. */
+	for (int r = 0; r < world_size; r++) {
+		if (r == self)
+			continue;
+
+		void *out = (char *)dst +
+		            darray->rank_offsets[r] * darray->element_size;
+		dstm_ptr_t remote;
+		remote.region = r;
+		remote.offset = 0;
+		size_t size = darray->rank_elements[r] * darray->element_size;
+
+		rc = dstm_get(r, r, time, deltas[r], out, remote, size);
+		if (rc != DSTM_SUCCESS)
+			return rc;
+	}
+
+	return DSTM_SUCCESS;
+}
