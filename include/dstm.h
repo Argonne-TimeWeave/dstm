@@ -94,6 +94,7 @@ int dstm_log_init(FILE *f, const char *nm);
  */
 void dstm_log_printf(int level,
                      const char *file,
+		     const char *func,
                      unsigned int line,
                      const char *format,
                      ...);
@@ -101,21 +102,21 @@ void dstm_log_printf(int level,
 int dstm_log_setlevel(int level);
 
 #define dstm_log_error(...)                                                    \
-	dstm_log_printf(DSTM_LOG_ERROR, __FILE__, __LINE__, __VA_ARGS__)
+	dstm_log_printf(DSTM_LOG_ERROR, __FILE__, __func__, __LINE__, __VA_ARGS__)
 #define dstm_log_warning(...)                                                  \
-	dstm_log_printf(DSTM_LOG_WARNING, __FILE__, __LINE__, __VA_ARGS__)
+	dstm_log_printf(DSTM_LOG_WARNING, __FILE__, __func__, __LINE__, __VA_ARGS__)
 #define dstm_log_normal(...)                                                   \
-	dstm_log_printf(DSTM_LOG_NORMAL, __FILE__, __LINE__, __VA_ARGS__)
+	dstm_log_printf(DSTM_LOG_NORMAL, __FILE__, __func__, __LINE__, __VA_ARGS__)
 #define dstm_log_info(...)                                                     \
-	dstm_log_printf(DSTM_LOG_INFO, __FILE__, __LINE__, __VA_ARGS__)
+	dstm_log_printf(DSTM_LOG_INFO, __FILE__, __func__, __LINE__, __VA_ARGS__)
 #define dstm_log_debug(...)                                                    \
-	dstm_log_printf(DSTM_LOG_DEBUG, __FILE__, __LINE__, __VA_ARGS__)
+	dstm_log_printf(DSTM_LOG_DEBUG, __FILE__, __func__, __LINE__, __VA_ARGS__)
 #define dstm_log_perror(...)                                                   \
 	do {                                                                   \
 		char *__dstm_errstr = strerror(errno);                         \
-		dstm_log_printf(DSTM_LOG_ERROR, __FILE__, __LINE__,            \
+		dstm_log_printf(DSTM_LOG_ERROR, __FILE__, __func__, __LINE__,            \
 		                __VA_ARGS__);                                  \
-		dstm_log_printf(DSTM_LOG_ERROR, __FILE__, __LINE__,            \
+		dstm_log_printf(DSTM_LOG_ERROR, __FILE__, __func__, __LINE__,            \
 		                "perror: %s\n", __dstm_errstr);                \
 	} while (0)
 

@@ -14,6 +14,7 @@
 #include <stdio.h>
 
 #include "dstm.h"
+#include "internal/globals.h"
 
 /*******************************************************************************
  * Logging functions
@@ -50,18 +51,20 @@ int dstm_log_setlevel(int level)
 }
 
 void dstm_log_printf(
-        int level, const char *file, unsigned int line, const char *format, ...)
+        int level, const char *file, const char *func, unsigned int line, const char *format, ...)
 {
 	va_list ap;
 	if (level > dstm_log_level)
 		return;
 
+	int rank = dstm_global_context.rank;
+	int ws = dstm_global_context.world_size;
 	if (dstm_log_level == DSTM_LOG_DEBUG)
-		fprintf(dstm_log_fd, "%s:\t%s:\t%s:\t%u:\t", dstm_log_namespace,
-		        dstm_log_level_string[level], file, line);
+		fprintf(dstm_log_fd, "%s:\t%s:%u:%u:\t%s:\t%s:\t%u:\t", dstm_log_namespace,
+		        dstm_log_level_string[level], rank, ws, file, func, line);
 	else
-		fprintf(dstm_log_fd, "%s:\t%s:\t", dstm_log_namespace,
-		        dstm_log_level_string[level]);
+		fprintf(dstm_log_fd, "%s:\t%s:%u/%u:\t", dstm_log_namespace,
+		        dstm_log_level_string[level], rank, ws);
 	va_start(ap, format);
 	vfprintf(dstm_log_fd, format, ap);
 	va_end(ap);
