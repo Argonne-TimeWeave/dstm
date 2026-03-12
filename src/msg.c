@@ -296,13 +296,19 @@ int dstm_msg_irecv(dstm_msg_t *msg)
  * Receiving Unknown Messages
  ******************************************************************************/
 
-int dstm_msg_recvany(dstm_msg_t *msg)
+int dstm_msg_iprobe(MPI_Status *status)
+{
+	int flag = 0;
+
+	MPI_Iprobe(MPI_ANY_SOURCE, MPI_ANY_TAG, dstm_global_context.comm,
+	          &flag, status);
+	return flag;
+}
+
+int dstm_msg_recvany(MPI_Status status, dstm_msg_t *msg)
 {
 	int source, tag;
-	MPI_Status status;
 
-	MPI_Probe(MPI_ANY_SOURCE, MPI_ANY_TAG, dstm_global_context.comm,
-	          &status);
 	source = status.MPI_SOURCE;
 	tag = status.MPI_TAG;
 

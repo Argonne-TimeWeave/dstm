@@ -60,21 +60,25 @@ test_allgatherv_stencil(int rank, int world_size, dstm_distance_t *dist)
 			max_dist = d;
 	}
 
-	/* Run 3 timesteps beginning at max_dist, ensuring every get target
-	 * time (t - distance) has already been written by a prior put. */
+	/* Build deltas: local put goes one step into the future;
+	 * remote gets reach back by the topological distance. */
+	deltas[rank] = 1;
+	for (int r = 0; r < world_size; r++) {
+		if (r != rank)
+			deltas[r] = -dstm_distance_get(dist, rank, r);
+	}
+
+	/* Push out updates for max_dist steps without any synchronization */
+	for (int t = 0; t < max_dist; t++) {
+		int val = rank + t;
+		rc = dstm_darray_put(arr, rank, &val, t, 1);
+	}
+	
+	/* Do a allgatherv for a few steps, to check that everything is ok */
 	for (int t = max_dist; t < max_dist + 3; t++) {
-		/* This rank's contribution at step t. */
-		int local_val = rank + t;
+		int val = rank + t;
 
-		/* Build deltas: local put goes one step into the future;
-		 * remote gets reach back by the topological distance. */
-		deltas[rank] = 1;
-		for (int r = 0; r < world_size; r++) {
-			if (r != rank)
-				deltas[r] = -dstm_distance_get(dist, rank, r);
-		}
-
-		rc = dstm_darray_allgatherv(arr, &local_val, dst_buf,
+		rc = dstm_darray_allgatherv(arr, &val, dst_buf,
 		                            (dstm_time_t)t, deltas);
 		assert(rc == DSTM_SUCCESS);
 
@@ -105,6 +109,7 @@ int main(int argc, char *argv[])
 {
 	MPI_Init(&argc, &argv);
 	dstm_init(&argc, &argv);
+	dstm_log_setlevel(DSTM_LOG_DEBUG);
 
 	int rank, world_size;
 	MPI_Comm_rank(MPI_COMM_WORLD, &rank);

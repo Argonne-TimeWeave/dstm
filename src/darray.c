@@ -198,6 +198,8 @@ int dstm_darray_get(dstm_darray_t *darray,
                     dstm_time_t time,
                     dstm_time_t delta)
 {
+	dstm_log_debug("%p, %u, %p, %" PRIu64 ", %" PRId64 "\n",
+		       darray, global_index, dst, time, delta);
 	int rank = darray_find_rank(darray, global_index);
 	int local_offset =
 	        (int)(global_index - (size_t)darray->rank_offsets[rank]);
@@ -214,6 +216,8 @@ int dstm_darray_put(dstm_darray_t *darray,
                     dstm_time_t time,
                     dstm_time_t delta)
 {
+	dstm_log_debug("%p, %u, %p, %" PRIu64 ", %" PRId64 "\n",
+		       darray, global_index, src, time, delta);
 	int rank = darray_find_rank(darray, global_index);
 	int local_offset =
 	        (int)(global_index - (size_t)darray->rank_offsets[rank]);

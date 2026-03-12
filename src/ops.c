@@ -137,12 +137,16 @@ int dstm_request_progress_local_put(dstm_request_t *req, dstm_time_t step)
 	 * - when step == req->time + delta, apply the request to the local
 	 *   memory.
 	 */
+	dstm_log_debug("%d, %" PRIu64 ", %" PRIu64 " %" PRIu64 "\n", req->status,
+		       req->time, req->delta, step);
 	assert(req->status == DSTM_REQUEST_STATUS_INIT);
 	if (req->time + req->delta == step) {
+		dstm_log_debug("applying\n");
 		dstm_region_t *rg = dstm_get_local_region();
 		void *dptr = dstm_region_ptr_tovoid(rg, req->dst);
 		void *sptr = dstm_region_ptr_tovoid(rg, req->src);
 		memcpy(dptr, sptr, req->size);
+		rg->time = step;
 		req->status = DSTM_REQUEST_STATUS_DONE;
 	}
 	return 0;
@@ -192,8 +196,11 @@ int dstm_request_progress_in_get(dstm_request_t *req, dstm_time_t step)
 	 * -     : filled out get, sent data back
 	 *       : send completed
 	 */
+	dstm_log_debug("%d, %" PRIu64 ", %" PRId64 " %" PRIu64 "\n", req->status,
+		       req->time, req->delta, step);
 	if (req->status == DSTM_REQUEST_STATUS_INIT) {
 		if (req->time + req->delta == step) {
+			dstm_log_debug("sending out reply\n");
 			dstm_region_t *rg = dstm_get_local_region();
 			void *sptr = dstm_region_ptr_tovoid(rg, req->src);
 			dstm_msg_fill_hdr(&req->msg, DSTM_MSG_TYPE_GET_REP,
@@ -274,11 +281,15 @@ dstm_time_t dstm_max_time_progress(int rank,
 	 *
 	 * TODO: this is static once past init, so pre-compute and store it
 	 */
+	dstm_log_debug("maxtime request: %d, %" PRIu64" %" PRIu64 "\n", rank,
+		       currenttime, maxtime_requested);
 	dstm_time_t min = maxtime_requested;
 	for (int i = 0; i < dstm_global_context.world_size; i++) {
 		int dist = dstm_distance_get(dstm_global_context.distances,
 		                             rank, i);
 
+		dstm_log_debug("min: %" PRIu64", %d -> %d: %d\n", min, rank, i,
+			       dist);
 		/* skip non neighbors */
 		if (dist <= 0)
 			continue;
@@ -301,7 +312,10 @@ int dstm_put(int rank,
              void *src,
              size_t size)
 {
-	dstm_ptr_t dptr, sptr;
+	dstm_log_info("put: %d, %d, %" PRIu64 ", %" PRId64 ", %d:%d, %p, %d\n",
+		      rank, region_id, time, delta, dst.region, dst.offset, src,
+		      size);
+	dstm_ptr_t sptr;
 
 	assert(rank == region_id);
 	assert(rank == dst.region);
@@ -345,109 +359,6 @@ int dstm_put(int rank,
 		req->status = DSTM_REQUEST_STATUS_ISEND;
 	}
 	DL_INSERT_INORDER(requests, req, dstm_request_cmp_departure);
-
-	/* synchronization part:
-	 * figuring out if we can make progress on some requests.
-	 *
-	 * In order to force progress, we consider that if the current put is at
-	 * a timestep later than the current region, then we need to update that
-	 * region and flush all the requests that would be at an earlier time.
-	 *
-	 * TODO: this entire loop is quite convoluted, there's a better version
-	 * of that that only goes through events that actually matter, by
-	 * alternating between handling all pending messages and the list of
-	 * requests that can be processed in the allowed interval.
-	 */
-	int done = 1;
-	if (time > dstm_global_context.region->time)
-		done = 0;
-
-	while (!done) {
-		dstm_request_t *nr;
-		dstm_msg_t m;
-		/* block until we receive one incoming message */
-		dstm_msg_recvany(&m);
-
-		/* Update neighbor's highest received timestamp */
-		dstm_region_set_ninfo(dstm_global_context.region,
-		                      m.header.src_rank, m.header.time);
-
-		switch (m.header.type) {
-		case DSTM_MSG_TYPE_PUT:
-			/* request for a put, enqueue the request as an
-			 * incoming put
-			 */
-
-			dptr = (dstm_ptr_t){ m.u.put.region, m.u.put.dst };
-			sptr = (dstm_ptr_t){ DSTM_REGIONID_LOCAL, (intptr_t)m.data };
-			dstm_request_create(&nr, DSTM_REQUEST_TYPE_IN_PUT,
-			                    m.header.time, m.header.delta,
-			                    m.header.dst_rank, dptr, sptr,
-			                    m.u.put.size);
-			nr->msg = m;
-			DL_INSERT_INORDER(requests, nr,
-			                  dstm_request_cmp_departure);
-			break;
-		case DSTM_MSG_TYPE_GET_REQ:
-			/* request for a get, enqueue as an incoming
-			 * get
-			 */
-			dptr = (dstm_ptr_t){ DSTM_REGIONID_LOCAL, (intptr_t)m.data };
-			sptr = (dstm_ptr_t){ m.u.get.region, m.u.get.ptr };
-			dstm_request_create(&nr, DSTM_REQUEST_TYPE_IN_GET,
-			                    m.header.time, m.header.delta,
-			                    m.header.src_rank, dptr,
-			                    sptr, m.u.get.size);
-			nr->msg = m;
-			DL_INSERT_INORDER(requests, nr,
-			                  dstm_request_cmp_departure);
-			break;
-		case DSTM_MSG_TYPE_GET_REP:
-			/* response for a get, not supposed to arrive
-			 * here?
-			 * TODO figure out how existing irecvs and  mpi_probe
-			 * interact
-			 */
-		default:
-			assert(0);
-		}
-
-		/* there's a chance that we cannot progress by as much as the
-		 * new timestamp: if the neighbors are not as far along as
-		 * expected. So compute the largest delta we can progress
-		 * on based on current neighbor data before engaging in request
-		 * progress. */
-		dstm_time_t maxtime = dstm_max_time_progress(
-		        dstm_global_context.rank,
-		        dstm_global_context.region->time, time);
-		assert(maxtime <= time);
-
-		/* loop over all requests, see what can be progressed, one
-		 * timestep at a time. We have to go through each timestep to
-		 * make sure that we progress requests in the right order.
-		 */
-		for (dstm_time_t nextt = dstm_global_context.region->time;
-		     nextt <= maxtime; nextt++) {
-
-			dstm_request_t *it, *tmp;
-			DL_FOREACH_SAFE(requests, it, tmp)
-			{
-				/* don't go further than new time */
-				if (it->time >= maxtime)
-					break;
-
-				dstm_request_progress(it, nextt);
-				if (dstm_request_isdone(it)) {
-					DL_DELETE(requests, it);
-					if (it == req) {
-						/* we're done, post process */
-						done = 1;
-					}
-					dstm_request_destroy(&it);
-				}
-			}
-		}
-	}
 	// by the time we return, the request is at least registered.
 	return 0;
 }
@@ -460,6 +371,9 @@ int dstm_get(int rank,
              dstm_ptr_t src,
              size_t size)
 {
+	dstm_log_info("get: %d, %d, %" PRIu64 ", %" PRId64 ", %p, %d:%d, %d\n",
+		      rank, region_id, time, delta, dst, src.region, src.offset,
+		      size);
 	dstm_ptr_t dptr, sptr;
 
 	assert(rank == region_id);
@@ -540,54 +454,65 @@ int dstm_get(int rank,
 	 */
 	int done = 0;
 	while (!done) {
+		dstm_log_info("progress loop: req time: %d, region time: %d\n",
+			      time, dstm_global_context.region->time);
 		dstm_request_t *nr;
 		dstm_msg_t m;
-		/* block until we receive one incoming message */
-		dstm_msg_recvany(&m);
+		MPI_Status status;
+	
+		/* test if we have any message to deal with */
+		int ret = dstm_msg_iprobe(&status);
+		
+		if (ret) {
+			dstm_log_debug("incoming message: %d,%d\n", 
+				       status.MPI_SOURCE, status.MPI_TAG);
+			/* block until we receive the incoming message */
+			dstm_msg_recvany(status, &m);
 
-		/* Update neighbor's highest received timestamp */
-		dstm_region_set_ninfo(dstm_global_context.region,
-		                      m.header.src_rank, m.header.time);
+			/* Update neighbor's highest received timestamp */
+			dstm_region_set_ninfo(dstm_global_context.region,
+					      m.header.src_rank, m.header.time);
 
-		switch (m.header.type) {
-		case DSTM_MSG_TYPE_PUT:
-			/* request for a put, enqueue the request as an
-			 * incoming put
-			 */
-			dptr = (dstm_ptr_t){ m.u.put.region, m.u.put.dst };
-			sptr = (dstm_ptr_t){ DSTM_REGIONID_LOCAL, (intptr_t)m.data };
-			dstm_request_create(&nr, DSTM_REQUEST_TYPE_IN_PUT,
-			                    m.header.time, m.header.delta,
-			                    m.header.dst_rank, dptr,
-			                    sptr, m.u.put.size);
-			nr->msg = m;
-			DL_INSERT_INORDER(requests, nr,
-			                  dstm_request_cmp_departure);
-			break;
-		case DSTM_MSG_TYPE_GET_REQ:
-			/* request for a get, enqueue as an incoming
-			 * get
-			 */
-			dptr = (dstm_ptr_t){ DSTM_REGIONID_LOCAL, (intptr_t)m.data };
-			sptr = (dstm_ptr_t){ m.u.get.region, m.u.get.ptr };
-			dstm_request_create(&nr, DSTM_REQUEST_TYPE_IN_GET,
-			                    m.header.time, m.header.delta,
-			                    m.header.src_rank, dptr,
-			                    sptr, m.u.get.size);
-			nr->msg = m;
-			DL_INSERT_INORDER(requests, nr,
-			                  dstm_request_cmp_departure);
-			break;
-		case DSTM_MSG_TYPE_GET_REP:
-			/* response for a get, not supposed to arrive
-			 * here?
-			 * TODO figure out how existing irecvs and  mpi_probe
-			 * interact
-			 */
-		default:
-			assert(0);
+			dstm_log_debug("message received with type %d\n", m.header.type);
+			switch (m.header.type) {
+			case DSTM_MSG_TYPE_PUT:
+				/* request for a put, enqueue the request as an
+				 * incoming put
+				 */
+				dptr = (dstm_ptr_t){ m.u.put.region, m.u.put.dst };
+				sptr = (dstm_ptr_t){ DSTM_REGIONID_LOCAL, (intptr_t)m.data };
+				dstm_request_create(&nr, DSTM_REQUEST_TYPE_IN_PUT,
+						    m.header.time, m.header.delta,
+						    m.header.dst_rank, dptr,
+						    sptr, m.u.put.size);
+				nr->msg = m;
+				DL_INSERT_INORDER(requests, nr,
+						  dstm_request_cmp_departure);
+				break;
+			case DSTM_MSG_TYPE_GET_REQ:
+				/* request for a get, enqueue as an incoming
+				 * get
+				 */
+				dptr = (dstm_ptr_t){ DSTM_REGIONID_LOCAL, (intptr_t)m.data };
+				sptr = (dstm_ptr_t){ m.u.get.region, m.u.get.ptr };
+				dstm_request_create(&nr, DSTM_REQUEST_TYPE_IN_GET,
+						    m.header.time, m.header.delta,
+						    m.header.src_rank, dptr,
+						    sptr, m.u.get.size);
+				nr->msg = m;
+				DL_INSERT_INORDER(requests, nr,
+						  dstm_request_cmp_departure);
+				break;
+			case DSTM_MSG_TYPE_GET_REP:
+				/* response for a get, not supposed to arrive
+				 * here?
+				 * TODO figure out how existing irecvs and  mpi_probe
+				 * interact
+				 */
+			default:
+				assert(0);
+			}
 		}
-
 		/* there's a chance that we cannot progress by as much as the
 		 * new timestamp: if the neighbors are not as far along as
 		 * expected. So compute the largest delta we can progress
@@ -596,14 +521,18 @@ int dstm_get(int rank,
 		dstm_time_t maxtime = dstm_max_time_progress(
 		        dstm_global_context.rank,
 		        dstm_global_context.region->time, time);
+		dstm_log_debug("can progress up to %" PRIu64 "\n", maxtime);
 		assert(maxtime <= time);
 
 		/* loop over all requests, see what can be progressed */
 		dstm_request_t *it, *tmp;
 		DL_FOREACH_SAFE(requests, it, tmp)
 		{
+			dstm_log_debug("trying to progress req: %d, %"
+				       PRIu64 ", %" PRId64"\n", it->type, it->time,
+				       it->delta);
 			/* don't go further than new time */
-			if (it->time >= maxtime)
+			if (it->time > maxtime)
 				break;
 			dstm_request_progress(it, maxtime);
 			if (dstm_request_isdone(it)) {

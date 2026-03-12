@@ -104,7 +104,13 @@ static void test_put_roundtrip(int rank)
 		dstm_msg_t msg;
 		memset(&msg, 0, sizeof(msg));
 
-		int rc = dstm_msg_recvany(&msg);
+		MPI_Status status;
+		int rc = 0;
+		do {
+			rc = dstm_msg_iprobe(&status);
+		}
+		while(!rc);
+		rc = dstm_msg_recvany(status, &msg);
 		assert(rc == 0);
 
 		/* Verify header */
@@ -222,8 +228,14 @@ static void test_get_roundtrip(int rank)
 		/* --- Phase A: receive the GET_REQ --- */
 		dstm_msg_t req;
 		memset(&req, 0, sizeof(req));
+		MPI_Status status;
 
-		int rc = dstm_msg_recvany(&req);
+		int rc = 0;
+		do {
+			rc = dstm_msg_iprobe(&status);
+		}
+		while(!rc);
+		rc = dstm_msg_recvany(status, &req);
 		assert(rc == 0);
 
 		assert(req.header.type == DSTM_MSG_TYPE_GET_REQ);

@@ -83,8 +83,9 @@ int dstm_msg_fill_getrep(dstm_msg_t *msg, void *dst, size_t size);
 int dstm_msg_send(dstm_msg_t *msg);
 int dstm_msg_isend(dstm_msg_t *msg);
 
+int dstm_msg_iprobe(MPI_Status *status);
 int dstm_msg_irecv(dstm_msg_t *msg);
-int dstm_msg_recvany(dstm_msg_t *msg);
+int dstm_msg_recvany(MPI_Status status, dstm_msg_t *msg);
 
 int dstm_msg_test(dstm_msg_t msg);
 
