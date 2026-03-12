@@ -300,8 +300,8 @@ int dstm_msg_iprobe(MPI_Status *status)
 {
 	int flag = 0;
 
-	MPI_Iprobe(MPI_ANY_SOURCE, MPI_ANY_TAG, dstm_global_context.comm,
-	          &flag, status);
+	MPI_Iprobe(MPI_ANY_SOURCE, MPI_ANY_TAG, dstm_global_context.comm, &flag,
+	           status);
 	return flag;
 }
 

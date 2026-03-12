@@ -108,8 +108,7 @@ static void test_put_roundtrip(int rank)
 		int rc = 0;
 		do {
 			rc = dstm_msg_iprobe(&status);
-		}
-		while(!rc);
+		} while (!rc);
 		rc = dstm_msg_recvany(status, &msg);
 		assert(rc == 0);
 
@@ -233,8 +232,7 @@ static void test_get_roundtrip(int rank)
 		int rc = 0;
 		do {
 			rc = dstm_msg_iprobe(&status);
-		}
-		while(!rc);
+		} while (!rc);
 		rc = dstm_msg_recvany(status, &req);
 		assert(rc == 0);
 

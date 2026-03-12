@@ -73,13 +73,13 @@ test_allgatherv_stencil(int rank, int world_size, dstm_distance_t *dist)
 		int val = rank + t;
 		rc = dstm_darray_put(arr, rank, &val, t, 1);
 	}
-	
+
 	/* Do a allgatherv for a few steps, to check that everything is ok */
 	for (int t = max_dist; t < max_dist + 3; t++) {
 		int val = rank + t;
 
-		rc = dstm_darray_allgatherv(arr, &val, dst_buf,
-		                            (dstm_time_t)t, deltas);
+		rc = dstm_darray_allgatherv(arr, &val, dst_buf, (dstm_time_t)t,
+		                            deltas);
 		assert(rc == DSTM_SUCCESS);
 
 		/* Verify: each remote slot holds what rank r put at the
