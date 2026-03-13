@@ -106,11 +106,18 @@ int dstm_region_create_with_buffer(dstm_region_t **region,
                                    size_t size);
 void dstm_region_destroy(dstm_region_t **region);
 
+/*******************************************************************************
+ * Methods
+ ******************************************************************************/
+
 int dstm_region_set_ninfo(dstm_region_t *region, int rank, dstm_time_t time);
 int dstm_region_get_ntime(dstm_region_t *region, int rank, dstm_time_t *time);
 
 dstm_ptr_t dstm_region_malloc(dstm_region_t *r, size_t size);
 void dstm_region_free(dstm_region_t *r, dstm_ptr_t ptr);
+
+void dstm_ptr_fprintf(FILE *f, dstm_ptr_t p);
+void dstm_region_fprintf(FILE *f, dstm_region_t *r);
 
 #ifdef __cplusplus
 }

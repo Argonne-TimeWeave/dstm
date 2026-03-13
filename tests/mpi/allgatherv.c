@@ -69,27 +69,30 @@ test_allgatherv_stencil(int rank, int world_size, dstm_distance_t *dist)
 	}
 
 	/* Push out updates for max_dist steps without any synchronization */
-	for (int t = 0; t < max_dist; t++) {
+	for (int t = 0; t < max_dist * 2; t++) {
 		int val = rank + t;
 		rc = dstm_darray_put(arr, rank, &val, t, 1);
 	}
 
 	/* Do a allgatherv for a few steps, to check that everything is ok */
-	for (int t = max_dist; t < max_dist + 3; t++) {
+	for (int t = max_dist * 2; t < max_dist * 2 + 3; t++) {
 		int val = rank + t;
 
 		rc = dstm_darray_allgatherv(arr, &val, dst_buf, (dstm_time_t)t,
 		                            deltas);
 		assert(rc == DSTM_SUCCESS);
 
-		/* Verify: each remote slot holds what rank r put at the
-		 * effective read time (t - distance(rank, r)), i.e.
+		/* Verify: each remote slot holds what rank r had at time t,
+		 * which is r+t-1 since we do put at time t + delta of 1
+		 * r + t - 1 - distance(rank, r)
 		 * r + (t - distance(rank, r)). */
 		for (int r = 0; r < world_size; r++) {
 			if (r == rank)
 				continue;
 			int dist_r = dstm_distance_get(dist, rank, r);
-			int expected = r + (t - dist_r);
+			int expected = r + (t - 1 - dist_r);
+			fprintf(stderr, "%d: (%d, %d) %d == %d\n", t, r, dist_r,
+			        dst_buf[r], expected);
 			assert(dst_buf[r] == expected);
 		}
 

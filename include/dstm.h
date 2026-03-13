@@ -284,6 +284,9 @@ int dstm_ptr_isnull(dstm_ptr_t ptr);
 int dstm_get_local_region_id(void);
 dstm_region_t *dstm_get_local_region(void);
 
+void dstm_log_printptr(int level, dstm_ptr_t p);
+void dstm_log_printregion(int level, dstm_region_t *r);
+
 /*******************************************************************************
  * DSTM BASIC OPERATIONS
  ******************************************************************************/

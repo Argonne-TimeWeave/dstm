@@ -32,6 +32,9 @@ typedef struct dstm_context_s dstm_context_t;
 
 extern dstm_context_t dstm_global_context;
 
+extern int dstm_log_level;
+extern FILE *dstm_log_fd;
+
 #ifdef __cplusplus
 }
 #endif

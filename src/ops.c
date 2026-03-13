@@ -52,6 +52,9 @@ typedef struct dstm_request_s dstm_request_t;
 
 dstm_request_t *requests = NULL;
 
+void dstm_log_printrequest(int level, dstm_request_t *req);
+void dstm_request_fprintf(FILE *f, dstm_request_t *req);
+
 /* sort by r->time + r->delta */
 int dstm_request_cmp_arrival(dstm_request_t *a, dstm_request_t *b)
 {
@@ -71,6 +74,7 @@ int dstm_request_cmp_departure(dstm_request_t *a, dstm_request_t *b)
 
 	return a->delta - b->delta;
 }
+
 /*******************************************************************************
  * Basic request management
  ******************************************************************************/
@@ -113,6 +117,124 @@ int dstm_request_destroy(dstm_request_t **r)
 }
 
 /*******************************************************************************
+ * Versioning logic: single copy edition.
+ *
+ * Two states for a region:
+ * - writable:
+ * - readable
+ ******************************************************************************/
+
+#define DSTM_REGION_STATUS_WRITABLE 0
+#define DSTM_REGION_STATUS_READABLE 1
+
+static int dstm_local_region_status = DSTM_REGION_STATUS_WRITABLE;
+
+int dstm_region_status_update(dstm_time_t time)
+{
+	(void)time;
+	if (dstm_local_region_status == DSTM_REGION_STATUS_WRITABLE) {
+		/* we're in the process of accepting writes, check if we should
+		 * stay in that state or start accepting reads
+		 */
+
+		/* do we have pending puts? */
+		dstm_request_t *it, *tmp;
+		DL_FOREACH_SAFE(requests, it, tmp)
+		{
+			/* skip any put not related to current region time */
+			if (it->time + it->delta >
+			    dstm_global_context.region->time)
+				continue;
+
+			if (it->type == DSTM_REQUEST_TYPE_LOCAL_PUT &&
+			    it->status != DSTM_REQUEST_STATUS_DONE)
+				return 0;
+
+			if (it->type == DSTM_REQUEST_TYPE_IN_PUT &&
+			    it->status != DSTM_REQUEST_STATUS_DONE)
+				return 0;
+		}
+
+		/* could we receive more puts?
+		 * i.e. are my neighbors all after currenttime - distance
+		 */
+		for (int i = 0; i < dstm_global_context.world_size; i++) {
+			int dist =
+			        dstm_distance_get(dstm_global_context.distances,
+			                          dstm_global_context.rank, i);
+
+			dstm_time_t nt;
+			dstm_region_get_ntime(dstm_global_context.region, i,
+			                      &nt);
+
+			/* skip non neighbors */
+			if (dist <= 0)
+				continue;
+
+			if (nt + dist <= dstm_global_context.region->time)
+				return 0;
+		}
+		dstm_log_debug("region readable, time: %" PRIu64 "\n",
+		               dstm_global_context.region->time);
+
+		/* switching to read, not changing time */
+		dstm_local_region_status = DSTM_REGION_STATUS_READABLE;
+		return 0;
+	} else {
+		/* we're in the progress of accepting reads, check if we should
+		 * stay in that state or start accepting writes
+		 */
+
+		/* do we have pending gets */
+		dstm_request_t *it, *tmp;
+		DL_FOREACH_SAFE(requests, it, tmp)
+		{
+			/* skip any get not related to current region time */
+			if (it->time + it->delta >
+			    dstm_global_context.region->time)
+				continue;
+
+			if (it->type == DSTM_REQUEST_TYPE_LOCAL_GET &&
+			    it->status != DSTM_REQUEST_STATUS_DONE)
+				return 0;
+
+			if (it->type == DSTM_REQUEST_TYPE_IN_GET &&
+			    it->status != DSTM_REQUEST_STATUS_DONE)
+				return 0;
+		}
+
+		/* could we receive more gets?
+		 * i.e. are my neighbors closer than currenttime - distance
+		 */
+		for (int i = 0; i < dstm_global_context.world_size; i++) {
+			int dist =
+			        dstm_distance_get(dstm_global_context.distances,
+			                          dstm_global_context.rank, i);
+
+			dstm_time_t nt;
+			dstm_region_get_ntime(dstm_global_context.region, i,
+			                      &nt);
+
+			/* skip non neighbors */
+			if (dist <= 0)
+				continue;
+
+			if (nt - dist <= dstm_global_context.region->time)
+				return 0;
+		}
+
+		/* switching to write, should only happen when moving in time.
+		 * */
+		assert(dstm_global_context.region->time < time);
+		dstm_global_context.region->time++;
+		dstm_log_debug("region writable, time: %" PRIu64 "\n",
+		               dstm_global_context.region->time);
+		dstm_local_region_status = DSTM_REGION_STATUS_WRITABLE;
+		return 0;
+	}
+}
+
+/*******************************************************************************
  * Request Mechanics
  ******************************************************************************/
 
@@ -123,45 +245,23 @@ int dstm_request_isdone(dstm_request_t *req)
 
 typedef struct dstm_request_progress_s {
 	int type;
-	int (*progress)(dstm_request_t *req, dstm_time_t step);
+	int (*progress)(dstm_request_t *req);
 } dstm_request_progress_t;
 
-int dstm_request_progress_local_put(dstm_request_t *req, dstm_time_t step)
+int dstm_request_progress_local_put(dstm_request_t *req)
 {
 	/* logic of a local put:
 	 * - starts in INIT state, enqueued as a request to put data associated
 	 *   with the request buffer into the local region memory.
 	 *
+	 * Can be completed if current region is available.
 	 * - when step == req->time + delta, apply the request to the local
 	 *   memory.
 	 */
-	dstm_log_debug("%d, %" PRIu64 ", %" PRIu64 " %" PRIu64 "\n",
-	               req->status, req->time, req->delta, step);
+	dstm_region_t *rg = dstm_get_local_region();
 	assert(req->status == DSTM_REQUEST_STATUS_INIT);
-	if (req->time + req->delta == step) {
-		dstm_log_debug("applying\n");
-		dstm_region_t *rg = dstm_get_local_region();
-		void *dptr = dstm_region_ptr_tovoid(rg, req->dst);
-		void *sptr = dstm_region_ptr_tovoid(rg, req->src);
-		memcpy(dptr, sptr, req->size);
-		rg->time = step;
-		req->status = DSTM_REQUEST_STATUS_DONE;
-	}
-	return 0;
-}
-
-int dstm_request_progress_local_get(dstm_request_t *req, dstm_time_t step)
-{
-	/* logic of a local put:
-	 * - starts in INIT state, enqueued as a request to put data associated
-	 *   with the request buffer into the local region memory.
-	 *
-	 * - when step == req->time + delta, apply the request to the local
-	 *   memory.
-	 */
-	assert(req->status == DSTM_REQUEST_STATUS_INIT);
-	if (req->time + req->delta == step) {
-		dstm_region_t *rg = dstm_get_local_region();
+	if (req->time + req->delta == rg->time &&
+	    dstm_local_region_status == DSTM_REGION_STATUS_WRITABLE) {
 		void *dptr = dstm_region_ptr_tovoid(rg, req->dst);
 		void *sptr = dstm_region_ptr_tovoid(rg, req->src);
 		memcpy(dptr, sptr, req->size);
@@ -170,15 +270,37 @@ int dstm_request_progress_local_get(dstm_request_t *req, dstm_time_t step)
 	return 0;
 }
 
-int dstm_request_progress_in_put(dstm_request_t *req, dstm_time_t step)
+int dstm_request_progress_local_get(dstm_request_t *req)
+{
+	/* logic of a local put:
+	 * - starts in INIT state, enqueued as a request to put data associated
+	 *   with the request buffer into the local region memory.
+	 *
+	 * - when step == req->time + delta, apply the request to the local
+	 *   memory.
+	 */
+	dstm_region_t *rg = dstm_get_local_region();
+	assert(req->status == DSTM_REQUEST_STATUS_INIT);
+	if (req->time + req->delta == rg->time &&
+	    dstm_local_region_status == DSTM_REGION_STATUS_READABLE) {
+		void *dptr = dstm_region_ptr_tovoid(rg, req->dst);
+		void *sptr = dstm_region_ptr_tovoid(rg, req->src);
+		memcpy(dptr, sptr, req->size);
+		req->status = DSTM_REQUEST_STATUS_DONE;
+	}
+	return 0;
+}
+
+int dstm_request_progress_in_put(dstm_request_t *req)
 {
 	/* logic:
 	 * - init: input request received from external rank
 	 * - done: applied put
 	 */
+	dstm_region_t *rg = dstm_get_local_region();
 	assert(req->status == DSTM_REQUEST_STATUS_INIT);
-	if (req->time + req->delta == step) {
-		dstm_region_t *rg = dstm_get_local_region();
+	if (req->time + req->delta == rg->time &&
+	    dstm_local_region_status == DSTM_REGION_STATUS_WRITABLE) {
 		void *dptr = dstm_region_ptr_tovoid(rg, req->dst);
 		void *sptr = dstm_region_ptr_tovoid(rg, req->src);
 		memcpy(dptr, sptr, req->size);
@@ -187,20 +309,21 @@ int dstm_request_progress_in_put(dstm_request_t *req, dstm_time_t step)
 	return 0;
 }
 
-int dstm_request_progress_in_get(dstm_request_t *req, dstm_time_t step)
+int dstm_request_progress_in_get(dstm_request_t *req)
 {
 	/* logic:
 	 * - init: input request received from external rank
 	 * -     : filled out get, sent data back
 	 *       : send completed
 	 */
-	dstm_log_debug("%d, %" PRIu64 ", %" PRId64 " %" PRIu64 "\n",
-	               req->status, req->time, req->delta, step);
+	dstm_region_t *rg = dstm_get_local_region();
 	if (req->status == DSTM_REQUEST_STATUS_INIT) {
-		if (req->time + req->delta == step) {
-			dstm_log_debug("sending out reply\n");
-			dstm_region_t *rg = dstm_get_local_region();
+		if (req->time + req->delta == rg->time &&
+		    dstm_local_region_status == DSTM_REGION_STATUS_READABLE) {
 			void *sptr = dstm_region_ptr_tovoid(rg, req->src);
+			dstm_log_debug("getrep: %u %u %p %u %u\n",
+			               req->src.region, req->src.offset, sptr,
+			               req->size, rg->size);
 			dstm_msg_fill_hdr(&req->msg, DSTM_MSG_TYPE_GET_REP,
 			                  req->time, req->delta,
 			                  dstm_global_context.rank, req->rank);
@@ -218,13 +341,12 @@ int dstm_request_progress_in_get(dstm_request_t *req, dstm_time_t step)
 	return 0;
 }
 
-int dstm_request_progress_out_put(dstm_request_t *req, dstm_time_t step)
+int dstm_request_progress_out_put(dstm_request_t *req)
 {
 	/* logic:
 	 * - isend: data sent out, isend posted
 	 * - done: send completed.
 	 */
-	(void)step;
 	assert(req->status == DSTM_REQUEST_STATUS_ISEND);
 	if (dstm_msg_test(req->msg)) {
 		req->status = DSTM_REQUEST_STATUS_DONE;
@@ -232,17 +354,17 @@ int dstm_request_progress_out_put(dstm_request_t *req, dstm_time_t step)
 	return 0;
 }
 
-int dstm_request_progress_out_get(dstm_request_t *req, dstm_time_t step)
+int dstm_request_progress_out_get(dstm_request_t *req)
 {
 	/* logic:
 	 * - irecv: request sent, recv posted, waiting for completion
 	 * - done: recv completed, get filled out
 	 */
-	(void)step;
+	dstm_region_t *rg = dstm_get_local_region();
 	assert(req->status == DSTM_REQUEST_STATUS_IRECV);
 	if (dstm_msg_test(req->msg)) {
-		dstm_region_t *rg = dstm_get_local_region();
 		void *dptr = dstm_region_ptr_tovoid(rg, req->dst);
+		dstm_log_debug("applying: %p %zu\n", dptr, req->size);
 		memcpy(dptr, (void *)req->msg.data, req->size);
 		req->status = DSTM_REQUEST_STATUS_DONE;
 	}
@@ -258,44 +380,15 @@ dstm_request_progress_t progress_sm[DSTM_REQUEST_TYPE_MAX] = {
         {DSTM_REQUEST_TYPE_OUT_GET, dstm_request_progress_out_get},
 };
 
-int dstm_request_progress(dstm_request_t *req, dstm_time_t step)
+int dstm_request_progress(dstm_request_t *req)
 {
 	assert(req != NULL);
 	assert(progress_sm[req->type].progress != NULL);
-	return progress_sm[req->type].progress(req, step);
-}
-
-dstm_time_t dstm_max_time_progress(int rank,
-                                   dstm_time_t currenttime,
-                                   dstm_time_t maxtime_requested)
-{
-	assert(currenttime <= maxtime_requested);
-	/* compute across neighbors the maximum time delta that can be
-	 * progressed without drifting too much:
-	 *
-	 * each neighbor can be at most at a fixed distance from us, we compute
-	 * the largest value smaller than that distance, i.e. the min of all
-	 * distances.
-	 *
-	 * TODO: this is static once past init, so pre-compute and store it
-	 */
-	dstm_log_debug("maxtime request: %d, %" PRIu64 " %" PRIu64 "\n", rank,
-	               currenttime, maxtime_requested);
-	dstm_time_t min = maxtime_requested;
-	for (int i = 0; i < dstm_global_context.world_size; i++) {
-		int dist = dstm_distance_get(dstm_global_context.distances,
-		                             rank, i);
-
-		dstm_log_debug("min: %" PRIu64 ", %d -> %d: %d\n", min, rank, i,
-		               dist);
-		/* skip non neighbors */
-		if (dist <= 0)
-			continue;
-
-		if (currenttime + dist <= min)
-			min = currenttime + dist;
-	}
-	return min;
+	dstm_log_debug("request:");
+	dstm_log_printrequest(DSTM_LOG_DEBUG, req);
+	dstm_log_debug("region:");
+	dstm_log_printregion(DSTM_LOG_DEBUG, dstm_get_local_region());
+	return progress_sm[req->type].progress(req);
 }
 
 /* Progress loop: recv messages and try to make progress on any request.
@@ -327,9 +420,8 @@ int dstm_do_progress(dstm_time_t time)
 		/* Update neighbor's highest received timestamp */
 		dstm_region_set_ninfo(dstm_global_context.region,
 		                      m.header.src_rank, m.header.time);
-
-		dstm_log_debug("message received with type %d\n",
-		               m.header.type);
+		dstm_log_debug("received: ");
+		dstm_log_printmsg(DSTM_LOG_DEBUG, &m);
 		switch (m.header.type) {
 		case DSTM_MSG_TYPE_PUT:
 			/* request for a put, enqueue the request as an
@@ -397,14 +489,15 @@ int dstm_do_progress(dstm_time_t time)
 	 * since it requires discarding old copies, and that can only be done
 	 * once all gets are done and no more can arrive.
 	 *
-	 * For now we implement the unlimited version.
+	 * For now we implement the single copy version.
 	 */
 
+	dstm_region_status_update(time);
 	/* loop over all requests, see what can be progressed */
 	dstm_request_t *it, *tmp;
 	DL_FOREACH_SAFE(requests, it, tmp)
 	{
-		dstm_request_progress(it, time);
+		dstm_request_progress(it);
 		if (dstm_request_isdone(it)) {
 			DL_DELETE(requests, it);
 		}
@@ -548,7 +641,7 @@ int dstm_get(int rank,
 		 */
 
 		dstm_msg_fill_hdr(&req->msg, DSTM_MSG_TYPE_GET_REQ, time, delta,
-		                  rank, dstm_global_context.rank);
+		                  dstm_global_context.rank, rank);
 		dstm_msg_fill_getreq(&req->msg, src, size);
 		dstm_msg_send(&req->msg);
 
@@ -572,4 +665,59 @@ int dstm_get(int rank,
 	}
 	dstm_request_destroy(&req);
 	return 0;
+}
+
+/*******************************************************************************
+ * Logging helpers
+ ******************************************************************************/
+
+void dstm_log_printrequest(int level, dstm_request_t *request)
+{
+	if (level > dstm_log_level)
+		return;
+	if (request == NULL) {
+		fprintf(dstm_log_fd, "NULL\n");
+		return;
+	}
+	dstm_request_fprintf(dstm_log_fd, request);
+}
+
+typedef struct dstm_request_type_table_s {
+	int type;
+	const char *s;
+} dstm_request_type_table_t;
+
+static const dstm_request_type_table_t dstm_request_type_table[] = {
+        {DSTM_REQUEST_TYPE_LOCAL_PUT, "LOCAL_PUT"},
+        {DSTM_REQUEST_TYPE_LOCAL_GET, "LOCAL_GET"},
+        {DSTM_REQUEST_TYPE_IN_PUT, "IN_PUT"},
+        {DSTM_REQUEST_TYPE_IN_GET, "IN_GET"},
+        {DSTM_REQUEST_TYPE_OUT_PUT, "OUT_GET"},
+        {DSTM_REQUEST_TYPE_OUT_GET, "OUT_GET"},
+        {0, NULL},
+};
+
+const char *dstm_request_type_t2s(int type,
+                                  const dstm_request_type_table_t *table)
+{
+	if (type < 0)
+		return "UNKNOWN";
+	for (int i = 0; table[i].s != NULL; i++)
+		if (table[i].type == type)
+			return table[i].s;
+	return "UNKNOWN";
+}
+
+void dstm_request_fprintf(FILE *f, dstm_request_t *req)
+{
+	assert(f != NULL);
+	assert(req != NULL);
+	fprintf(f,
+	        "{ type: %s, status: %d, time: %" PRIu64 ", delta: %" PRId64
+	        ", rank: %d, size: %zu\n",
+	        dstm_request_type_t2s(req->type, dstm_request_type_table),
+	        req->status, req->time, req->delta, req->rank, req->size);
+	dstm_ptr_fprintf(f, req->dst);
+	dstm_ptr_fprintf(f, req->src);
+	dstm_msg_fprintf(f, &req->msg);
 }

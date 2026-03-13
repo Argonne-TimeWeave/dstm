@@ -89,6 +89,9 @@ int dstm_msg_recvany(MPI_Status status, dstm_msg_t *msg);
 
 int dstm_msg_test(dstm_msg_t msg);
 
+void dstm_log_printmsg(int level, dstm_msg_t *msg);
+void dstm_msg_fprintf(FILE *f, dstm_msg_t *msg);
+
 #ifdef __cplusplus
 }
 #endif

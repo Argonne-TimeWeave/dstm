@@ -22,7 +22,7 @@
 
 int dstm_log_level = DSTM_LOG_NORMAL;
 int dstm_log_initialized = 0;
-static FILE *dstm_log_fd = NULL;
+FILE *dstm_log_fd = NULL;
 static const char *dstm_log_namespace;
 
 static const char *dstm_log_level_string[] = {

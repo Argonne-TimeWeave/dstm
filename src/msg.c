@@ -357,5 +357,48 @@ int dstm_msg_test(dstm_msg_t msg)
 	MPI_Status status;
 	int flag = 0;
 	MPI_Test(&msg.request, &flag, &status);
+	dstm_log_debug("%d\n", flag);
 	return flag;
+}
+
+/*******************************************************************************
+ * Logging helpers
+ ******************************************************************************/
+
+void dstm_log_printmsg(int level, dstm_msg_t *msg)
+{
+	if (level > dstm_log_level)
+		return;
+	if (msg == NULL) {
+		fprintf(dstm_log_fd, "NULL\n");
+		return;
+	}
+	dstm_msg_fprintf(dstm_log_fd, msg);
+}
+
+void dstm_msg_fprintf(FILE *f, dstm_msg_t *msg)
+{
+	assert(f != NULL);
+	assert(msg != NULL);
+	fprintf(f,
+	        "{ header: { type: %d, dst_rank: %u, src_rank: %u, time: %" PRIu64
+	        ", delta: %" PRId64 "}, data: %p, packbuf: %p, ",
+	        msg->header.type, msg->header.dst_rank, msg->header.src_rank,
+	        msg->header.time, msg->header.delta, msg->data, msg->packbuf);
+	switch (msg->header.type) {
+	case DSTM_MSG_TYPE_PUT:
+		fprintf(f, "put: { region: %d, dst: %zu, size: %zu}}\n",
+		        msg->u.put.region, msg->u.put.dst, msg->u.get.size);
+		break;
+	case DSTM_MSG_TYPE_GET_REQ:
+		fprintf(f, "getreq: { region: %d, ptr: %zu, size: %zu}}\n",
+		        msg->u.get.region, msg->u.get.ptr, msg->u.get.size);
+		break;
+	case DSTM_MSG_TYPE_GET_REP:
+		fprintf(f, "getrep: { region: %d, ptr: %zu, size: %zu}}\n",
+		        msg->u.get.region, msg->u.get.ptr, msg->u.get.size);
+		break;
+	default:
+		assert(0);
+	}
 }

@@ -538,3 +538,48 @@ void dstm_region_free(dstm_region_t *r, dstm_ptr_t p)
 	/* Add to free list at final order */
 	dstm_region_add_to_free_list(r, merged_ptr, order);
 }
+
+/*******************************************************************************
+ * Logging helpers
+ ******************************************************************************/
+
+void dstm_log_printptr(int level, dstm_ptr_t ptr)
+{
+	if (level > dstm_log_level)
+		return;
+	if (dstm_ptr_isnull(ptr)) {
+		fprintf(dstm_log_fd, "NULL\n");
+		return;
+	}
+	dstm_ptr_fprintf(dstm_log_fd, ptr);
+}
+
+void dstm_log_printregion(int level, dstm_region_t *region)
+{
+	if (level > dstm_log_level)
+		return;
+	if (region == NULL) {
+		fprintf(dstm_log_fd, "NULL\n");
+		return;
+	}
+	dstm_region_fprintf(dstm_log_fd, region);
+}
+
+void dstm_ptr_fprintf(FILE *f, dstm_ptr_t p)
+{
+	assert(f != NULL);
+	if (p.region == DSTM_REGIONID_LOCAL)
+		fprintf(f, "{ region: LOCAL, offset: %p}\n", (void *)p.offset);
+	else if (p.region == DSTM_REGIONID_INVALID)
+		fprintf(f, "{ region: INVALID, offset: %zu}\n", p.offset);
+	else
+		fprintf(f, "{ region: %d, offset: %zu}\n", p.region, p.offset);
+}
+
+void dstm_region_fprintf(FILE *f, dstm_region_t *r)
+{
+	assert(f != NULL);
+	assert(r != NULL);
+	fprintf(f, "{ buffer: %p, size: %zu, time: %" PRIu64 "}\n", r->buffer,
+	        r->size, r->time);
+}
