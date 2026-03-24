@@ -37,27 +37,21 @@ struct dstm_msg_hdr_s {
 };
 typedef struct dstm_msg_hdr_s dstm_msg_hdr_t;
 
-struct dstm_msg_put_s {
-	int region;
-	intptr_t dst;
+struct dstm_msg_putget_s {
+	dstm_ptr_t ptr;
 	size_t size;
 };
-typedef struct dstm_msg_put_s dstm_msg_put_t;
-
-struct dstm_msg_get_s {
-	int region;
-	intptr_t ptr;
-	size_t size;
-};
-typedef struct dstm_msg_get_s dstm_msg_get_t;
+typedef struct dstm_msg_putget_s dstm_msg_putget_t;
 
 struct dstm_msg_s {
 	/* required for asynchronous requests */
 	MPI_Request request;
 	dstm_msg_hdr_t header;
+	/* we'll need other type for some other operations, might as
+	 * well start using a union.
+	 */
 	union {
-		dstm_msg_put_t put;
-		dstm_msg_get_t get;
+		dstm_msg_putget_t putget;
 	} u;
 	/* data buffer, if needed */
 	void *data;
@@ -78,13 +72,13 @@ int dstm_msg_fill_hdr(dstm_msg_t *msg, int type, dstm_time_t time, dstm_time_t
 
 int dstm_msg_fill_put(dstm_msg_t *msg, dstm_ptr_t dst, void *src, size_t size);
 int dstm_msg_fill_getreq(dstm_msg_t *msg, dstm_ptr_t src, size_t size);
-int dstm_msg_fill_getrep(dstm_msg_t *msg, void *dst, size_t size);
+int dstm_msg_fill_getrep(dstm_msg_t *msg, void *src, size_t size);
 
-int dstm_msg_send(dstm_msg_t *msg);
-int dstm_msg_isend(dstm_msg_t *msg);
+int dstm_msg_send(dstm_msg_t *msg, int tag);
+int dstm_msg_isend(dstm_msg_t *msg, int tag);
 
 int dstm_msg_iprobe(MPI_Status *status);
-int dstm_msg_irecv(dstm_msg_t *msg);
+int dstm_msg_irecv(dstm_msg_t *msg, int tag);
 int dstm_msg_recvany(MPI_Status status, dstm_msg_t *msg);
 
 int dstm_msg_test(dstm_msg_t msg);

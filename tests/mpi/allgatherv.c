@@ -46,6 +46,9 @@ test_allgatherv_stencil(int rank, int world_size, dstm_distance_t *dist)
 	/* Output buffer: one int slot per rank. */
 	int *dst_buf = malloc((size_t)world_size * sizeof(int));
 	assert(dst_buf != NULL);
+	/* init it at a specific value to help debugging */
+	for(int i = 0; i < world_size; i++)
+		dst_buf[i] = 0xff00 + rank;
 
 	/* Per-rank deltas array: deltas[self] >= 0 (put), rest <= 0 (get). */
 	dstm_time_t *deltas = malloc((size_t)world_size * sizeof(dstm_time_t));
@@ -85,13 +88,14 @@ test_allgatherv_stencil(int rank, int world_size, dstm_distance_t *dist)
 		/* Verify: each remote slot holds what rank r had at time t,
 		 * which is r+t-1 since we do put at time t + delta of 1
 		 * r + t - 1 - distance(rank, r)
-		 * r + (t - distance(rank, r)). */
+		 */
 		for (int r = 0; r < world_size; r++) {
 			if (r == rank)
 				continue;
 			int dist_r = dstm_distance_get(dist, rank, r);
 			int expected = r + (t - 1 - dist_r);
-			fprintf(stderr, "%d: (%d, %d) %d == %d\n", t, r, dist_r,
+			fprintf(stderr, "%d: (%d, %d) %p -> %d == %d\n", t, r, dist_r,
+				&dst_buf[r],
 			        dst_buf[r], expected);
 			assert(dst_buf[r] == expected);
 		}

@@ -101,9 +101,9 @@ START_TEST(test_fill_put_fields)
 	dstm_ptr_t dst = {.region = 3, .offset = 128};
 	int rc = dstm_msg_fill_put(&m, dst, buf, sizeof(buf));
 	ck_assert_int_eq(rc, DSTM_SUCCESS);
-	ck_assert_int_eq(m.u.put.region, 3);
-	ck_assert_int_eq(m.u.put.dst, 128);
-	ck_assert_uint_eq(m.u.put.size, sizeof(buf));
+	ck_assert_int_eq(m.u.putget.ptr.region, 3);
+	ck_assert_int_eq(m.u.putget.ptr.offset, 128);
+	ck_assert_uint_eq(m.u.putget.size, sizeof(buf));
 	ck_assert_ptr_eq(m.data, buf);
 }
 END_TEST
