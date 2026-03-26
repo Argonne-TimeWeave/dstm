@@ -87,10 +87,15 @@ START_TEST(test_fill_hdr_invalid_type_negative)
 END_TEST
 
 /*******************************************************************************
- * dstm_msg_fill_put tests
+ * dstm_msg_fill_payload tests
+ *
+ * fill_payload is the single fill function for PUT, GET_REQ and GET_REP.
+ * It stores the putget body (ptr + size) and sets msg->data to the provided
+ * src pointer without copying; the request's buf field is the owner.
  ******************************************************************************/
 
-START_TEST(test_fill_put_fields)
+/* PUT case: ptr and src both set; data must alias src exactly. */
+START_TEST(test_fill_payload_put)
 {
 	dstm_msg_t m;
 	memset(&m, 0, sizeof(m));
@@ -99,64 +104,36 @@ START_TEST(test_fill_put_fields)
 	memset(buf, 0xBB, sizeof(buf));
 
 	dstm_ptr_t dst = {.region = 3, .offset = 128};
-	int rc = dstm_msg_fill_put(&m, dst, buf, sizeof(buf));
+	int rc = dstm_msg_fill_payload(&m, dst, buf, sizeof(buf));
 	ck_assert_int_eq(rc, DSTM_SUCCESS);
 	ck_assert_int_eq(m.u.putget.ptr.region, 3);
 	ck_assert_int_eq(m.u.putget.ptr.offset, 128);
 	ck_assert_uint_eq(m.u.putget.size, sizeof(buf));
+	/* data is a non-owning alias into the caller-supplied buffer */
 	ck_assert_ptr_eq(m.data, buf);
 }
 END_TEST
 
-/* NULL source pointer must be rejected with DSTM_EINVAL. */
-START_TEST(test_fill_put_null_src)
-{
-	dstm_msg_t m;
-	memset(&m, 0, sizeof(m));
-	dstm_ptr_t dst = {.region = 0, .offset = 0};
-	int rc = dstm_msg_fill_put(&m, dst, NULL, 64);
-	ck_assert_int_eq(rc, -DSTM_EINVAL);
-	ck_assert_int_eq(dstm_errno, DSTM_EINVAL);
-}
-END_TEST
-
-/*******************************************************************************
- * dstm_msg_fill_getreq tests
- ******************************************************************************/
-
-START_TEST(test_fill_getreq_fields)
+/* GET_REQ case: src == NULL (no payload); data must be NULL. */
+START_TEST(test_fill_payload_getreq)
 {
 	dstm_msg_t m;
 	memset(&m, 0xFF, sizeof(m)); /* start from garbage to confirm NULL */
 
 	dstm_ptr_t src = {.region = 5, .offset = 256};
-	int rc = dstm_msg_fill_getreq(&m, src, 32);
+	int rc = dstm_msg_fill_payload(&m, src, NULL, 32);
 	ck_assert_int_eq(rc, DSTM_SUCCESS);
-	ck_assert_int_eq(m.u.get.region, 5);
-	ck_assert_int_eq(m.u.get.ptr, 256);
-	ck_assert_uint_eq(m.u.get.size, 32);
-	/* data must be NULL for a GET request (no payload outbound) */
+	ck_assert_int_eq(m.u.putget.ptr.region, 5);
+	ck_assert_int_eq(m.u.putget.ptr.offset, 256);
+	ck_assert_uint_eq(m.u.putget.size, 32);
+	/* no payload for a GET request */
 	ck_assert_ptr_null(m.data);
 }
 END_TEST
 
-/* A null dstm_ptr_t (region == DSTM_REGIONID_INVALID) must be rejected. */
-START_TEST(test_fill_getreq_null_ptr)
-{
-	dstm_msg_t m;
-	memset(&m, 0, sizeof(m));
-	dstm_ptr_t null_ptr = {.region = DSTM_REGIONID_INVALID, .offset = 0};
-	int rc = dstm_msg_fill_getreq(&m, null_ptr, 32);
-	ck_assert_int_eq(rc, -DSTM_EINVAL);
-	ck_assert_int_eq(dstm_errno, DSTM_EINVAL);
-}
-END_TEST
-
-/*******************************************************************************
- * dstm_msg_fill_getrep tests
- ******************************************************************************/
-
-START_TEST(test_fill_getrep_fields)
+/* GET_REP case: ptr is not meaningful (pass zero); src points to the reply
+ * buffer; data must alias src exactly. */
+START_TEST(test_fill_payload_getrep)
 {
 	dstm_msg_t m;
 	memset(&m, 0, sizeof(m));
@@ -164,14 +141,11 @@ START_TEST(test_fill_getrep_fields)
 	char buf[128];
 	memset(buf, 0xCC, sizeof(buf));
 
-	int rc = dstm_msg_fill_getrep(&m, buf, sizeof(buf));
+	dstm_ptr_t null_ptr = {DSTM_REGIONID_INVALID, 0};
+	int rc = dstm_msg_fill_payload(&m, null_ptr, buf, sizeof(buf));
 	ck_assert_int_eq(rc, DSTM_SUCCESS);
-	/* region must be DSTM_REGIONID_LOCAL for a local reply buffer */
-	ck_assert_int_eq(m.u.get.region, DSTM_REGIONID_LOCAL);
-	/* ptr is the raw address cast to intptr_t */
-	ck_assert(m.u.get.ptr == (intptr_t)buf);
-	ck_assert_uint_eq(m.u.get.size, sizeof(buf));
-	/* data points to the same buffer */
+	ck_assert_uint_eq(m.u.putget.size, sizeof(buf));
+	/* data is a non-owning alias into the reply buffer */
 	ck_assert_ptr_eq(m.data, buf);
 }
 END_TEST
@@ -184,18 +158,19 @@ Suite *msg_suite(void)
 {
 	Suite *s = suite_create("msg");
 
-	TCase *tc_fill = tcase_create("fill");
-	tcase_add_test(tc_fill, test_fill_hdr_put);
-	tcase_add_test(tc_fill, test_fill_hdr_getreq);
-	tcase_add_test(tc_fill, test_fill_hdr_getrep);
-	tcase_add_test(tc_fill, test_fill_hdr_invalid_type_max);
-	tcase_add_test(tc_fill, test_fill_hdr_invalid_type_negative);
-	tcase_add_test(tc_fill, test_fill_put_fields);
-	tcase_add_test(tc_fill, test_fill_put_null_src);
-	tcase_add_test(tc_fill, test_fill_getreq_fields);
-	tcase_add_test(tc_fill, test_fill_getreq_null_ptr);
-	tcase_add_test(tc_fill, test_fill_getrep_fields);
-	suite_add_tcase(s, tc_fill);
+	TCase *tc_fill_hdr = tcase_create("fill_hdr");
+	tcase_add_test(tc_fill_hdr, test_fill_hdr_put);
+	tcase_add_test(tc_fill_hdr, test_fill_hdr_getreq);
+	tcase_add_test(tc_fill_hdr, test_fill_hdr_getrep);
+	tcase_add_test(tc_fill_hdr, test_fill_hdr_invalid_type_max);
+	tcase_add_test(tc_fill_hdr, test_fill_hdr_invalid_type_negative);
+	suite_add_tcase(s, tc_fill_hdr);
+
+	TCase *tc_fill_payload = tcase_create("fill_payload");
+	tcase_add_test(tc_fill_payload, test_fill_payload_put);
+	tcase_add_test(tc_fill_payload, test_fill_payload_getreq);
+	tcase_add_test(tc_fill_payload, test_fill_payload_getrep);
+	suite_add_tcase(s, tc_fill_payload);
 
 	return s;
 }

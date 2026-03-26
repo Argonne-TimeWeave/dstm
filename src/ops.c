@@ -10,47 +10,17 @@
 
 #include "config.h"
 
+#include <limits.h>
 #include <mpi.h>
 #include <stdlib.h>
-#include <limits.h>
 
 #include "dstm.h"
 
 #include "internal/globals.h"
 #include "internal/msg.h"
 #include "internal/region.h"
+#include "internal/request.h"
 #include "internal/utlist.h"
-
-/* we need to make the distinction between local, incoming, or outgoing request
- */
-#define DSTM_REQUEST_TYPE_LOCAL_PUT 0
-#define DSTM_REQUEST_TYPE_LOCAL_GET 1
-#define DSTM_REQUEST_TYPE_IN_PUT 2
-#define DSTM_REQUEST_TYPE_IN_GET 3
-#define DSTM_REQUEST_TYPE_OUT_PUT 4
-#define DSTM_REQUEST_TYPE_OUT_GET 5
-#define DSTM_REQUEST_TYPE_MAX 6
-
-#define DSTM_REQUEST_STATUS_INIT 0
-#define DSTM_REQUEST_STATUS_ISEND 1
-#define DSTM_REQUEST_STATUS_IRECV 2
-#define DSTM_REQUEST_STATUS_DONE 3
-#define DSTM_REQUEST_STATUS_MAX 4
-
-struct dstm_request_s {
-	int type;
-	int tag;
-	int status;
-	dstm_time_t time;
-	dstm_time_t delta;
-	int rank;
-	dstm_ptr_t dst;
-	dstm_ptr_t src;
-	size_t size;
-	dstm_msg_t msg;
-	struct dstm_request_s *prev, *next;
-};
-typedef struct dstm_request_s dstm_request_t;
 
 dstm_request_t *requests = NULL;
 
@@ -87,15 +57,14 @@ int dstm_request_new_tag(void)
 {
 	int ret = -1;
 	int tag_range = dstm_global_context.world_size * 1000;
-	ret =  tag_range * dstm_global_context.rank +
-		dstm_request_tag_count;
+	ret = tag_range * dstm_global_context.rank + dstm_request_tag_count;
 	dstm_request_tag_count++;
 	return ret;
 }
 
 int dstm_request_create(dstm_request_t **r,
                         int type,
-			int tag,
+                        int tag,
                         dstm_time_t time,
                         dstm_time_t delta,
                         int rank,
@@ -119,6 +88,7 @@ int dstm_request_create(dstm_request_t **r,
 	req->dst = dst;
 	req->src = src;
 	req->size = size;
+	req->buf = NULL;
 	*r = req;
 	return 0;
 }
@@ -127,6 +97,10 @@ int dstm_request_destroy(dstm_request_t **r)
 {
 	if (r == NULL || *r == NULL)
 		return 0;
+	/* free the owned payload buffer, if any */
+	free((*r)->buf);
+	/* free any MPI pack buffer that is still outstanding */
+	free((*r)->msg.packbuf);
 	free(*r);
 	*r = NULL;
 	return 0;
@@ -244,7 +218,7 @@ int dstm_region_status_update(dstm_time_t time)
 		if (dstm_global_context.region->time < time) {
 			dstm_global_context.region->time++;
 			dstm_log_debug("region writable, time: %" PRIu64 "\n",
-				       dstm_global_context.region->time);
+			               dstm_global_context.region->time);
 			dstm_local_region_status = DSTM_REGION_STATUS_WRITABLE;
 		}
 		return 0;
@@ -268,21 +242,17 @@ typedef struct dstm_request_progress_s {
 int dstm_request_progress_local_put(dstm_request_t *req)
 {
 	/* logic of a local put:
-	 * - starts in INIT state, enqueued as a request to put data associated
-	 *   with the request buffer into the local region memory.
+	 * - starts in INIT state, with payload buffered in req->buf.
 	 *
-	 * Can be completed if current region is available.
-	 * - when step == req->time + delta, apply the request to the local
-	 *   memory.
+	 * Can be completed when the region is writable at the target time.
 	 */
 	dstm_region_t *rg = dstm_get_local_region();
 	assert(req->status == DSTM_REQUEST_STATUS_INIT);
 	if (req->time + req->delta == rg->time &&
 	    dstm_local_region_status == DSTM_REGION_STATUS_WRITABLE) {
 		void *dptr = dstm_region_ptr_tovoid(rg, req->dst);
-		void *sptr = dstm_region_ptr_tovoid(rg, req->src);
-		dstm_log_debug("applying: %u\n", *(int*)sptr);
-		memcpy(dptr, sptr, req->size);
+		dstm_log_debug("applying: %u\n", *(int *)req->buf);
+		memcpy(dptr, req->buf, req->size);
 		req->status = DSTM_REQUEST_STATUS_DONE;
 	}
 	return 0;
@@ -290,12 +260,11 @@ int dstm_request_progress_local_put(dstm_request_t *req)
 
 int dstm_request_progress_local_get(dstm_request_t *req)
 {
-	/* logic of a local put:
-	 * - starts in INIT state, enqueued as a request to put data associated
-	 *   with the request buffer into the local region memory.
+	/* logic of a local get:
+	 * - starts in INIT state, enqueued as a request to copy data from the
+	 *   local region into the caller's buffer (req->dst, REGIONID_LOCAL).
 	 *
-	 * - when step == req->time + delta, apply the request to the local
-	 *   memory.
+	 * - when step == req->time + delta, apply the request.
 	 */
 	dstm_region_t *rg = dstm_get_local_region();
 	assert(req->status == DSTM_REQUEST_STATUS_INIT);
@@ -312,16 +281,15 @@ int dstm_request_progress_local_get(dstm_request_t *req)
 int dstm_request_progress_in_put(dstm_request_t *req)
 {
 	/* logic:
-	 * - init: input request received from external rank
-	 * - done: applied put
+	 * - init: payload already buffered in req->buf (copied on receipt).
+	 * - done: payload applied to local region.
 	 */
 	dstm_region_t *rg = dstm_get_local_region();
 	assert(req->status == DSTM_REQUEST_STATUS_INIT);
 	if (req->time + req->delta == rg->time &&
 	    dstm_local_region_status == DSTM_REGION_STATUS_WRITABLE) {
 		void *dptr = dstm_region_ptr_tovoid(rg, req->dst);
-		void *sptr = dstm_region_ptr_tovoid(rg, req->src);
-		memcpy(dptr, sptr, req->size);
+		memcpy(dptr, req->buf, req->size);
 		req->status = DSTM_REQUEST_STATUS_DONE;
 	}
 	return 0;
@@ -330,9 +298,9 @@ int dstm_request_progress_in_put(dstm_request_t *req)
 int dstm_request_progress_in_get(dstm_request_t *req)
 {
 	/* logic:
-	 * - init: input request received from external rank
-	 * -     : filled out get, sent data back
-	 *       : send completed
+	 * - init: GET_REQ received, waiting for the region to become readable.
+	 * - isend: reply buffered in req->buf and MPI_Isend posted.
+	 * - done: send completed.
 	 */
 	dstm_region_t *rg = dstm_get_local_region();
 	if (req->status == DSTM_REQUEST_STATUS_INIT) {
@@ -341,19 +309,30 @@ int dstm_request_progress_in_get(dstm_request_t *req)
 			void *sptr = dstm_region_ptr_tovoid(rg, req->src);
 			dstm_log_debug("getrep: %u %u %p %u %u %u\n",
 			               req->src.region, req->src.offset, sptr,
-				       *(int*)sptr,
-			               req->size, rg->size);
+			               *(int *)sptr, req->size, rg->size);
+
+			/* Free the packbuf from the original received GET_REQ
+			 * before reusing the message for the reply. */
+			free(req->msg.packbuf);
+			req->msg.packbuf = NULL;
+
+			/* Buffer the reply payload in req->buf. */
+			req->buf = malloc(req->size);
+			assert(req->buf != NULL);
+			memcpy(req->buf, sptr, req->size);
+
+			dstm_ptr_t null_ptr = {DSTM_REGIONID_INVALID, 0};
 			dstm_msg_fill_hdr(&req->msg, DSTM_MSG_TYPE_GET_REP,
 			                  req->time, req->delta,
 			                  dstm_global_context.rank, req->rank);
-			dstm_msg_fill_getrep(&req->msg,
-					     sptr,
-			                     req->size);
+			dstm_msg_fill_payload(&req->msg, null_ptr, req->buf,
+			                      req->size);
 			dstm_msg_isend(&req->msg, req->tag);
 			req->status = DSTM_REQUEST_STATUS_ISEND;
 		}
 	} else if (req->status == DSTM_REQUEST_STATUS_ISEND) {
 		if (dstm_msg_test(req->msg)) {
+			/* packbuf freed by dstm_request_destroy */
 			req->status = DSTM_REQUEST_STATUS_DONE;
 		}
 	}
@@ -363,8 +342,8 @@ int dstm_request_progress_in_get(dstm_request_t *req)
 int dstm_request_progress_out_put(dstm_request_t *req)
 {
 	/* logic:
-	 * - isend: data sent out, isend posted
-	 * - done: send completed.
+	 * - isend: data sent out, isend posted.
+	 * - done: send completed; packbuf freed by dstm_request_destroy.
 	 */
 	assert(req->status == DSTM_REQUEST_STATUS_ISEND);
 	if (dstm_msg_test(req->msg)) {
@@ -376,14 +355,15 @@ int dstm_request_progress_out_put(dstm_request_t *req)
 int dstm_request_progress_out_get(dstm_request_t *req)
 {
 	/* logic:
-	 * - irecv: request sent, recv posted, waiting for completion
-	 * - done: recv completed, get filled out
+	 * - irecv: GET_REQ sent, reply received and buffered in req->buf.
+	 * - done: payload copied to caller's destination.
 	 */
 	dstm_region_t *rg = dstm_get_local_region();
 	if (req->status == DSTM_REQUEST_STATUS_IRECV) {
 		void *dptr = dstm_region_ptr_tovoid(rg, req->dst);
-		dstm_log_debug("applying: %p %u %zu\n", dptr, *(int*)req->msg.data,req->size);
-		memcpy(dptr, (void *)req->msg.data, req->size);
+		dstm_log_debug("applying: %p %u %zu\n", dptr, *(int *)req->buf,
+		               req->size);
+		memcpy(dptr, req->buf, req->size);
 		req->status = DSTM_REQUEST_STATUS_DONE;
 	}
 	return 0;
@@ -442,52 +422,58 @@ int dstm_do_progress(dstm_time_t time)
 		dstm_log_printmsg(DSTM_LOG_DEBUG, &m);
 		switch (m.header.type) {
 		case DSTM_MSG_TYPE_PUT:
-			/* request for a put, enqueue the request as an
-			 * incoming put
+			/* Incoming PUT: copy the payload into a request-owned
+			 * buffer so we can free the MPI packbuf immediately.
 			 */
 			dptr = (dstm_ptr_t){m.u.putget.ptr.region,
-				m.u.putget.ptr.offset};
-			sptr = (dstm_ptr_t){DSTM_REGIONID_LOCAL,
-			                    (intptr_t)m.data};
+			                    m.u.putget.ptr.offset};
 			dstm_request_create(&nr, DSTM_REQUEST_TYPE_IN_PUT,
-			                    status.MPI_TAG,
-					    m.header.time, m.header.delta,
-			                    m.header.dst_rank, dptr, sptr,
+			                    status.MPI_TAG, m.header.time,
+			                    m.header.delta, m.header.dst_rank,
+			                    dptr, (dstm_ptr_t){0, 0},
 			                    m.u.putget.size);
-			nr->msg = m;
+			nr->buf = malloc(m.u.putget.size);
+			assert(nr->buf != NULL);
+			memcpy(nr->buf, m.data, m.u.putget.size);
+			free(m.packbuf);
 			DL_INSERT_INORDER(requests, nr,
 			                  dstm_request_cmp_departure);
 			break;
 		case DSTM_MSG_TYPE_GET_REQ:
-			/* request for a get, enqueue as an incoming
-			 * get
+			/* Incoming GET request: store enough info to send the
+			 * reply later (when the region is readable).  The
+			 * received packbuf is kept in nr->msg until the reply
+			 * is built, at which point it is freed.
 			 */
-			dptr = (dstm_ptr_t){DSTM_REGIONID_LOCAL,
-			                    (intptr_t)m.data};
-			sptr = (dstm_ptr_t){m.u.putget.ptr.region, 
-				m.u.putget.ptr.offset};
+			sptr = (dstm_ptr_t){m.u.putget.ptr.region,
+			                    m.u.putget.ptr.offset};
 			dstm_request_create(&nr, DSTM_REQUEST_TYPE_IN_GET,
-					    status.MPI_TAG,
-			                    m.header.time, m.header.delta,
-			                    m.header.src_rank, dptr, sptr,
+			                    status.MPI_TAG, m.header.time,
+			                    m.header.delta, m.header.src_rank,
+			                    (dstm_ptr_t){0, 0}, sptr,
 			                    m.u.putget.size);
 			nr->msg = m;
 			DL_INSERT_INORDER(requests, nr,
 			                  dstm_request_cmp_departure);
 			break;
-		case DSTM_MSG_TYPE_GET_REP:
-			/* answer on a get, find the matching request and
-			 * transition it to wait for progress
+		case DSTM_MSG_TYPE_GET_REP: {
+			/* Reply to an outgoing GET: find the matching request,
+			 * copy the data into req->buf, and free the packbuf.
 			 */
 			dstm_request_t *it = NULL;
-			DL_FOREACH(requests, it) {
+			DL_FOREACH(requests, it)
+			{
 				if (it->tag == status.MPI_TAG)
 					break;
 			}
 			assert(it != NULL);
-			it->msg = m;
+			it->buf = malloc(m.u.putget.size);
+			assert(it->buf != NULL);
+			memcpy(it->buf, m.data, m.u.putget.size);
+			free(m.packbuf);
 			it->status = DSTM_REQUEST_STATUS_IRECV;
 			break;
+		}
 		default:
 			assert(0);
 		}
@@ -529,6 +515,12 @@ int dstm_do_progress(dstm_time_t time)
 		dstm_request_progress(it);
 		if (dstm_request_isdone(it)) {
 			DL_DELETE(requests, it);
+			/* Caller-owned requests (e.g. the one held by
+			 * dstm_get) are removed from the list but not freed
+			 * here; the caller checks for DONE status via its own
+			 * pointer and calls dstm_request_destroy itself. */
+			if (!it->caller_owned)
+				dstm_request_destroy(&it);
 		}
 	}
 	return 0;
@@ -549,8 +541,7 @@ int dstm_put(int rank,
 	dstm_log_info("put: %d, %d, %" PRIu64 ", %" PRId64 ", %d:%d, %p, %d\n",
 	              rank, region_id, time, delta, dst.region, dst.offset, src,
 	              size);
-	dstm_log_debug("put value: %u\n", *(int*)src);
-	dstm_ptr_t sptr;
+	dstm_log_debug("put value: %u\n", *(int *)src);
 
 	assert(rank == region_id);
 	assert(rank == dst.region);
@@ -569,28 +560,28 @@ int dstm_put(int rank,
 	/* first, figure out if this is a local request or a remote one */
 	dstm_request_t *req;
 	if (rank == dstm_global_context.rank) {
-		/* local put:
-		 * we just enqueue it locally
-		 * */
-		sptr = (dstm_ptr_t){ DSTM_REGIONID_LOCAL, (intptr_t ) src };
-		dstm_request_create(&req, DSTM_REQUEST_TYPE_LOCAL_PUT, -1, time,
-		                    delta, rank, dst, sptr, size);
-	} else {
-		/* outgoing put
-		 * we enqueue it for tracking purposes, and push it out to the
-		 * appropriate rank.
+		/* Local put: buffer the payload in req->buf so the caller's
+		 * buffer can be reused or freed immediately.
 		 */
-		sptr = (dstm_ptr_t){ DSTM_REGIONID_LOCAL, (intptr_t ) src };
+		dstm_request_create(&req, DSTM_REQUEST_TYPE_LOCAL_PUT, -1, time,
+		                    delta, rank, dst, (dstm_ptr_t){0, 0}, size);
+		req->buf = malloc(size);
+		assert(req->buf != NULL);
+		memcpy(req->buf, src, size);
+	} else {
+		/* Outgoing put: buffer the payload so the caller's buffer can
+		 * be reused or freed immediately, then kick off the async send.
+		 */
 		int tag = dstm_request_new_tag();
 		dstm_request_create(&req, DSTM_REQUEST_TYPE_OUT_PUT, tag, time,
-		                    delta, rank, dst, sptr, size);
+		                    delta, rank, dst, (dstm_ptr_t){0, 0}, size);
+		req->buf = malloc(size);
+		assert(req->buf != NULL);
+		memcpy(req->buf, src, size);
 
-		/* send out the operation asynchronously, with an extra copy of
-		 * the source buffer
-		 */
 		dstm_msg_fill_hdr(&req->msg, DSTM_MSG_TYPE_PUT, time, delta,
 		                  rank, dstm_global_context.rank);
-		dstm_msg_fill_put(&req->msg, dst, src, size);
+		dstm_msg_fill_payload(&req->msg, dst, req->buf, size);
 		dstm_msg_isend(&req->msg, tag);
 		req->status = DSTM_REQUEST_STATUS_ISEND;
 	}
@@ -614,7 +605,7 @@ int dstm_get(int rank,
 
 	assert(rank == region_id);
 	assert(rank == src.region);
-	
+
 	if (dst == NULL)
 		return -DSTM_EINVAL;
 
@@ -632,18 +623,20 @@ int dstm_get(int rank,
 		/* local get:
 		 * we just enqueue it locally
 		 * */
-		dptr = (dstm_ptr_t){ DSTM_REGIONID_LOCAL, (intptr_t ) dst };
+		dptr = (dstm_ptr_t){DSTM_REGIONID_LOCAL, (intptr_t)dst};
 		dstm_request_create(&req, DSTM_REQUEST_TYPE_LOCAL_GET, -1, time,
 		                    delta, rank, dptr, src, size);
+		req->caller_owned = 1;
 	} else {
 		/* outgoing get
 		 * we enqueue it for tracking purposes, and push it out to the
 		 * appropriate rank.
 		 */
-		dptr = (dstm_ptr_t){ DSTM_REGIONID_LOCAL, (intptr_t ) dst };
+		dptr = (dstm_ptr_t){DSTM_REGIONID_LOCAL, (intptr_t)dst};
 		int tag = dstm_request_new_tag();
 		dstm_request_create(&req, DSTM_REQUEST_TYPE_OUT_GET, tag, time,
 		                    delta, rank, dptr, src, size);
+		req->caller_owned = 1;
 
 		/* this is the place where MPI RMA might make sense, if we could
 		 * use windows to make sure the MPI processes are in the right
@@ -667,7 +660,7 @@ int dstm_get(int rank,
 
 		dstm_msg_fill_hdr(&req->msg, DSTM_MSG_TYPE_GET_REQ, time, delta,
 		                  dstm_global_context.rank, rank);
-		dstm_msg_fill_getreq(&req->msg, src, size);
+		dstm_msg_fill_payload(&req->msg, src, NULL, size);
 		dstm_msg_send(&req->msg, tag);
 		req->status = DSTM_REQUEST_STATUS_ISEND;
 	}
@@ -712,7 +705,7 @@ static const dstm_request_type_table_t dstm_request_type_table[] = {
         {DSTM_REQUEST_TYPE_LOCAL_GET, "LOCAL_GET"},
         {DSTM_REQUEST_TYPE_IN_PUT, "IN_PUT"},
         {DSTM_REQUEST_TYPE_IN_GET, "IN_GET"},
-        {DSTM_REQUEST_TYPE_OUT_PUT, "OUT_GET"},
+        {DSTM_REQUEST_TYPE_OUT_PUT, "OUT_PUT"},
         {DSTM_REQUEST_TYPE_OUT_GET, "OUT_GET"},
         {0, NULL},
 };
@@ -733,11 +726,11 @@ void dstm_request_fprintf(FILE *f, dstm_request_t *req)
 	assert(f != NULL);
 	assert(req != NULL);
 	fprintf(f,
-	        "{ type: %s, tag: %d, status: %d, time: %" PRIu64 ", delta: %" PRId64
-	        ", rank: %d, size: %zu\n",
+	        "{ type: %s, tag: %d, status: %d, time: %" PRIu64
+	        ", delta: %" PRId64 ", rank: %d, size: %zu\n",
 	        dstm_request_type_t2s(req->type, dstm_request_type_table),
-		req->tag,
-	        req->status, req->time, req->delta, req->rank, req->size);
+	        req->tag, req->status, req->time, req->delta, req->rank,
+	        req->size);
 	dstm_ptr_fprintf(f, req->dst);
 	dstm_ptr_fprintf(f, req->src);
 	dstm_msg_fprintf(f, &req->msg);

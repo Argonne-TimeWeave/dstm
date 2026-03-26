@@ -67,12 +67,27 @@ typedef struct dstm_msg_s dstm_msg_t;
 int dstm_msg_init(void);
 int dstm_msg_finalize(void);
 
-int dstm_msg_fill_hdr(dstm_msg_t *msg, int type, dstm_time_t time, dstm_time_t
-		       delta, int dst_rank, int src_rank);
+int dstm_msg_fill_hdr(dstm_msg_t *msg,
+                      int type,
+                      dstm_time_t time,
+                      dstm_time_t delta,
+                      int dst_rank,
+                      int src_rank);
 
-int dstm_msg_fill_put(dstm_msg_t *msg, dstm_ptr_t dst, void *src, size_t size);
-int dstm_msg_fill_getreq(dstm_msg_t *msg, dstm_ptr_t src, size_t size);
-int dstm_msg_fill_getrep(dstm_msg_t *msg, void *src, size_t size);
+/* Fill the putget body and set a non-owning data pointer.
+ *
+ * ptr  - remote pointer stored in u.putget.ptr (pass a zero-initialised
+ *        dstm_ptr_t when not applicable, e.g. for GET_REP).
+ * src  - pointer to the payload bytes, or NULL when there is no payload
+ *        (e.g. GET_REQ).  The caller is responsible for keeping the buffer
+ *        alive until the message has been fully sent; ownership stays with
+ *        the enclosing dstm_request_t.buf.
+ * size - byte count stored in u.putget.size.
+ */
+int dstm_msg_fill_payload(dstm_msg_t *msg,
+                          dstm_ptr_t ptr,
+                          void *src,
+                          size_t size);
 
 int dstm_msg_send(dstm_msg_t *msg, int tag);
 int dstm_msg_isend(dstm_msg_t *msg, int tag);

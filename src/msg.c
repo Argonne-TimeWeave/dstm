@@ -47,9 +47,10 @@ int dstm_msg_init(void)
 	/* dstm_msg_putget_t: region(int), ptr(intptr_t), size(size_t) */
 	MPI_Datatype dstm_msg_putget_sig[3] = {MPI_INT, MPI_AINT, MPI_AINT};
 	int dstm_msg_putget_bl[3] = {1, 1, 1};
-	MPI_Aint dstm_msg_putget_disp[3] = {offsetof(dstm_msg_putget_t, ptr.region),
-	                                 offsetof(dstm_msg_putget_t, ptr.offset),
-	                                 offsetof(dstm_msg_putget_t, size)};
+	MPI_Aint dstm_msg_putget_disp[3] = {
+	        offsetof(dstm_msg_putget_t, ptr.region),
+	        offsetof(dstm_msg_putget_t, ptr.offset),
+	        offsetof(dstm_msg_putget_t, size)};
 	MPI_Type_create_struct(3, dstm_msg_putget_bl, dstm_msg_putget_disp,
 	                       dstm_msg_putget_sig, &dstm_msg_putget_dt);
 	MPI_Type_commit(&dstm_msg_putget_dt);
@@ -87,35 +88,13 @@ int dstm_msg_fill_hdr(dstm_msg_t *m,
 	return 0;
 }
 
-int dstm_msg_fill_put(dstm_msg_t *m, dstm_ptr_t dst, void *src, size_t size)
+int dstm_msg_fill_payload(dstm_msg_t *m, dstm_ptr_t ptr, void *src, size_t size)
 {
-	if (src == NULL) {
-		dstm_errno = DSTM_EINVAL;
-		return -DSTM_EINVAL;
-	}
-	m->u.putget.ptr = dst;
+	m->u.putget.ptr = ptr;
 	m->u.putget.size = size;
-
-	m->data = malloc(size);
-	assert(m->data != NULL);
-	memcpy(m->data, src, size);
-	return 0;
-}
-
-int dstm_msg_fill_getreq(dstm_msg_t *m, dstm_ptr_t src, size_t size)
-{
-	m->u.putget.ptr = src;
-	m->u.putget.size = size;
-
-	m->data = NULL;
-	return 0;
-}
-
-int dstm_msg_fill_getrep(dstm_msg_t *m, void *src, size_t size)
-{
-	m->data = malloc(size);
-	assert(m->data != NULL);
-	memcpy(m->data, src, size);
+	/* src may be NULL for messages that carry no payload (GET_REQ).
+	 * When non-NULL it is a non-owning pointer into the request's buf. */
+	m->data = src;
 	return 0;
 }
 
@@ -123,11 +102,18 @@ int dstm_msg_fill_getrep(dstm_msg_t *m, void *src, size_t size)
  * Sending Messages
  ******************************************************************************/
 
-int dstm_msg_isend_put(dstm_msg_t *msg, int tag)
+/* Pack header + putget body + payload bytes into msg->packbuf and post an
+ * async send.  Used for both PUT and GET_REP, which share the same wire
+ * format: [hdr][putget][data bytes].
+ *
+ * msg->packbuf is allocated here and must be freed by the caller once
+ * MPI_Test/MPI_Wait on msg->request reports completion.
+ */
+static int dstm_msg_isend_with_data(dstm_msg_t *msg, int tag)
 {
 	assert(msg != NULL);
+	assert(msg->data != NULL);
 
-	/* deal with copying the data and packing it into a buffer */
 	int hsz, psz, dsz;
 	MPI_Pack_size(1, dstm_msg_hdr_dt, dstm_global_context.comm, &hsz);
 	MPI_Pack_size(1, dstm_msg_putget_dt, dstm_global_context.comm, &psz);
@@ -142,42 +128,11 @@ int dstm_msg_isend_put(dstm_msg_t *msg, int tag)
 	int pos = 0;
 	MPI_Pack(&msg->header, 1, dstm_msg_hdr_dt, msg->packbuf, bufsz, &pos,
 	         dstm_global_context.comm);
-	MPI_Pack(&msg->u.putget, 1, dstm_msg_putget_dt, msg->packbuf, bufsz, &pos,
-	         dstm_global_context.comm);
+	MPI_Pack(&msg->u.putget, 1, dstm_msg_putget_dt, msg->packbuf, bufsz,
+	         &pos, dstm_global_context.comm);
 	MPI_Pack(msg->data, msg->u.putget.size, MPI_CHAR, msg->packbuf, bufsz,
 	         &pos, dstm_global_context.comm);
 
-	/* send the message */
-	MPI_Isend(msg->packbuf, pos, MPI_PACKED, msg->header.dst_rank, tag,
-	          dstm_global_context.comm, &msg->request);
-	return 0;
-}
-
-int dstm_msg_isend_getrep(dstm_msg_t *msg, int tag)
-{
-	assert(msg != NULL);
-
-	/* deal with copying the data and packing it into a buffer */
-	int hsz, gsz, dsz;
-	MPI_Pack_size(1, dstm_msg_hdr_dt, dstm_global_context.comm, &hsz);
-	MPI_Pack_size(1, dstm_msg_putget_dt, dstm_global_context.comm, &gsz);
-	MPI_Pack_size(msg->u.putget.size, MPI_CHAR, dstm_global_context.comm,
-	              &dsz);
-	size_t bufsz = hsz + gsz + dsz;
-
-	msg->packbuf = calloc(bufsz, sizeof(char));
-	if (msg->packbuf == NULL)
-		return -DSTM_ENOMEM;
-
-	int pos = 0;
-	MPI_Pack(&msg->header, 1, dstm_msg_hdr_dt, msg->packbuf, bufsz, &pos,
-	         dstm_global_context.comm);
-	MPI_Pack(&msg->u.putget, 1, dstm_msg_putget_dt, msg->packbuf, bufsz, &pos,
-	         dstm_global_context.comm);
-	MPI_Pack(msg->data, msg->u.putget.size, MPI_CHAR, msg->packbuf, bufsz,
-	         &pos, dstm_global_context.comm);
-
-	/* send the message */
 	MPI_Isend(msg->packbuf, pos, MPI_PACKED, msg->header.dst_rank, tag,
 	          dstm_global_context.comm, &msg->request);
 	return 0;
@@ -188,9 +143,8 @@ int dstm_msg_isend(dstm_msg_t *msg, int tag)
 	assert(msg != NULL);
 	switch (msg->header.type) {
 	case DSTM_MSG_TYPE_PUT:
-		return dstm_msg_isend_put(msg, tag);
 	case DSTM_MSG_TYPE_GET_REP:
-		return dstm_msg_isend_getrep(msg, tag);
+		return dstm_msg_isend_with_data(msg, tag);
 	default:
 		assert(0);
 	}
@@ -212,8 +166,8 @@ int dstm_msg_send_getreq(dstm_msg_t *msg, int tag)
 	int pos = 0;
 	MPI_Pack(&msg->header, 1, dstm_msg_hdr_dt, msg->packbuf, bufsz, &pos,
 	         dstm_global_context.comm);
-	MPI_Pack(&msg->u.putget, 1, dstm_msg_putget_dt, msg->packbuf, bufsz, &pos,
-	         dstm_global_context.comm);
+	MPI_Pack(&msg->u.putget, 1, dstm_msg_putget_dt, msg->packbuf, bufsz,
+	         &pos, dstm_global_context.comm);
 
 	/* send the message */
 	MPI_Send(msg->packbuf, pos, MPI_PACKED, msg->header.dst_rank, tag,
@@ -331,15 +285,18 @@ void dstm_msg_fprintf(FILE *f, dstm_msg_t *msg)
 	switch (msg->header.type) {
 	case DSTM_MSG_TYPE_PUT:
 		fprintf(f, "put: { region: %d, dst: %zu, size: %zu}}\n",
-		        msg->u.putget.ptr.region, msg->u.putget.ptr.offset, msg->u.putget.size);
+		        msg->u.putget.ptr.region, msg->u.putget.ptr.offset,
+		        msg->u.putget.size);
 		break;
 	case DSTM_MSG_TYPE_GET_REQ:
 		fprintf(f, "getreq: { region: %d, ptr: %zu, size: %zu}}\n",
-		        msg->u.putget.ptr.region, msg->u.putget.ptr.offset, msg->u.putget.size);
+		        msg->u.putget.ptr.region, msg->u.putget.ptr.offset,
+		        msg->u.putget.size);
 		break;
 	case DSTM_MSG_TYPE_GET_REP:
 		fprintf(f, "getrep: { region: %d, ptr: %zu, size: %zu}}\n",
-		        msg->u.putget.ptr.region, msg->u.putget.ptr.offset, msg->u.putget.size);
+		        msg->u.putget.ptr.region, msg->u.putget.ptr.offset,
+		        msg->u.putget.size);
 		break;
 	default:
 		assert(0);

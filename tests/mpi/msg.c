@@ -89,7 +89,10 @@ static void test_put_roundtrip(int rank)
 		rc = dstm_msg_fill_hdr(&msg, DSTM_MSG_TYPE_PUT, 10, 2, SENDER,
 		                       RECEIVER);
 		assert(rc == 0);
-		rc = dstm_msg_fill_put(&msg, dst, src, DATA_SZ);
+		/* fill_payload sets msg.data to src without copying; the
+		 * caller is responsible for keeping src alive until the send
+		 * completes. */
+		rc = dstm_msg_fill_payload(&msg, dst, src, DATA_SZ);
 		assert(rc == 0);
 		rc = dstm_msg_isend(&msg, 0);
 		assert(rc == 0);
