@@ -91,8 +91,18 @@ int dstm_request_isdone(dstm_request_t *req);
 
 int dstm_request_progress(dstm_request_t *req);
 
-void dstm_log_printrequest(int level, dstm_request_t *req);
-void dstm_request_fprintf(FILE *f, dstm_request_t *req);
+#define DSTM_REQUEST_SNPRINTF_SIZE 576
+int dstm_request_snprintf(char *buf, size_t n, dstm_request_t *req);
+
+#define dstm_log_request(level, label, req)                                    \
+	do {                                                                   \
+		if ((level) <= dstm_log_level) {                               \
+			char __buf[DSTM_REQUEST_SNPRINTF_SIZE];                \
+			dstm_request_snprintf(__buf, sizeof(__buf), (req));    \
+			dstm_log_printf((level), __FILE__, __func__, __LINE__, \
+			                "%s: %s\n", (label), __buf);           \
+		}                                                              \
+	} while (0)
 
 #ifdef __cplusplus
 }

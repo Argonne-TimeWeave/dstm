@@ -98,8 +98,18 @@ int dstm_msg_recvany(MPI_Status status, dstm_msg_t *msg);
 
 int dstm_msg_test(dstm_msg_t msg);
 
-void dstm_log_printmsg(int level, dstm_msg_t *msg);
-void dstm_msg_fprintf(FILE *f, dstm_msg_t *msg);
+#define DSTM_MSG_SNPRINTF_SIZE 320
+int dstm_msg_snprintf(char *buf, size_t n, dstm_msg_t *msg);
+
+#define dstm_log_msg(level, label, msg)                                        \
+	do {                                                                   \
+		if ((level) <= dstm_log_level) {                               \
+			char __buf[DSTM_MSG_SNPRINTF_SIZE];                    \
+			dstm_msg_snprintf(__buf, sizeof(__buf), (msg));        \
+			dstm_log_printf((level), __FILE__, __func__, __LINE__, \
+			                "%s: %s\n", (label), __buf);           \
+		}                                                              \
+	} while (0)
 
 #ifdef __cplusplus
 }

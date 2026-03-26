@@ -290,6 +290,7 @@ int main(int argc, char *argv[])
 {
 	MPI_Init(&argc, &argv);
 	dstm_init(&argc, &argv);
+	dstm_log_setlevel(DSTM_LOG_DEBUG);
 
 	MPI_Comm_size(MPI_COMM_WORLD, &world_size);
 	MPI_Comm_rank(MPI_COMM_WORLD, &rank);

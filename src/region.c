@@ -540,46 +540,38 @@ void dstm_region_free(dstm_region_t *r, dstm_ptr_t p)
 }
 
 /*******************************************************************************
- * Logging helpers
+ * Formatting helpers
  ******************************************************************************/
 
-void dstm_log_printptr(int level, dstm_ptr_t ptr)
+int dstm_ptr_snprintf(char *buf, size_t n, dstm_ptr_t p)
 {
-	if (level > dstm_log_level)
-		return;
-	if (dstm_ptr_isnull(ptr)) {
-		fprintf(dstm_log_fd, "NULL\n");
-		return;
-	}
-	dstm_ptr_fprintf(dstm_log_fd, ptr);
-}
-
-void dstm_log_printregion(int level, dstm_region_t *region)
-{
-	if (level > dstm_log_level)
-		return;
-	if (region == NULL) {
-		fprintf(dstm_log_fd, "NULL\n");
-		return;
-	}
-	dstm_region_fprintf(dstm_log_fd, region);
-}
-
-void dstm_ptr_fprintf(FILE *f, dstm_ptr_t p)
-{
-	assert(f != NULL);
+	assert(buf != NULL);
+	if (dstm_ptr_isnull(p))
+		return snprintf(buf, n, "NULL");
 	if (p.region == DSTM_REGIONID_LOCAL)
-		fprintf(f, "{ region: LOCAL, offset: %p}\n", (void *)p.offset);
-	else if (p.region == DSTM_REGIONID_INVALID)
-		fprintf(f, "{ region: INVALID, offset: %zu}\n", p.offset);
-	else
-		fprintf(f, "{ region: %d, offset: %zu}\n", p.region, p.offset);
+		return snprintf(buf, n, "{ region: LOCAL, offset: %p}",
+		                (void *)p.offset);
+	if (p.region == DSTM_REGIONID_INVALID)
+		return snprintf(buf, n, "{ region: INVALID, offset: %zu}",
+		                (size_t)p.offset);
+	return snprintf(buf, n, "{ region: %d, offset: %zu}", p.region,
+	                (size_t)p.offset);
 }
 
-void dstm_region_fprintf(FILE *f, dstm_region_t *r)
+int dstm_region_ninfo_snprintf(char *buf, size_t n, dstm_region_ninfo_t *ni)
 {
-	assert(f != NULL);
-	assert(r != NULL);
-	fprintf(f, "{ buffer: %p, size: %zu, time: %" PRIu64 "}\n", r->buffer,
-	        r->size, r->time);
+	assert(buf != NULL);
+	if (ni == NULL)
+		return snprintf(buf, n, "NULL");
+	return snprintf(buf, n, "{ rank: %d, time: %" PRId64 "}", ni->rank,
+	                ni->time);
+}
+
+int dstm_region_snprintf(char *buf, size_t n, dstm_region_t *r)
+{
+	assert(buf != NULL);
+	if (r == NULL)
+		return snprintf(buf, n, "NULL");
+	return snprintf(buf, n, "{ buffer: %p, size: %zu, time: %" PRId64 "}",
+	                r->buffer, r->size, r->time);
 }

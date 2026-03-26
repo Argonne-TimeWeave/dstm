@@ -254,51 +254,59 @@ int dstm_msg_test(dstm_msg_t msg)
 	MPI_Status status;
 	int flag = 0;
 	MPI_Test(&msg.request, &flag, &status);
-	dstm_log_debug("%d\n", flag);
+	dstm_log_debug("MPI_Test: %d\n", flag);
 	return flag;
 }
 
 /*******************************************************************************
- * Logging helpers
+ * Formatting helpers
  ******************************************************************************/
 
-void dstm_log_printmsg(int level, dstm_msg_t *msg)
+int dstm_msg_snprintf(char *buf, size_t n, dstm_msg_t *msg)
 {
-	if (level > dstm_log_level)
-		return;
-	if (msg == NULL) {
-		fprintf(dstm_log_fd, "NULL\n");
-		return;
-	}
-	dstm_msg_fprintf(dstm_log_fd, msg);
-}
+	assert(buf != NULL);
+	if (msg == NULL)
+		return snprintf(buf, n, "NULL");
 
-void dstm_msg_fprintf(FILE *f, dstm_msg_t *msg)
-{
-	assert(f != NULL);
-	assert(msg != NULL);
-	fprintf(f,
-	        "{ header: { type: %d, dst_rank: %u, src_rank: %u, time: %" PRIu64
+	int written = snprintf(
+	        buf, n,
+	        "{ header: { type: %d, dst_rank: %d, src_rank: %d, time: %" PRId64
 	        ", delta: %" PRId64 "}, data: %p, packbuf: %p, ",
 	        msg->header.type, msg->header.dst_rank, msg->header.src_rank,
 	        msg->header.time, msg->header.delta, msg->data, msg->packbuf);
+
+	/* Advance pointer and shrink remaining capacity for the suffix. */
+	char *p = buf + (written < (int)n ? written : (int)n - 1);
+	size_t rem = written < (int)n ? n - (size_t)written : 1;
+
+	int suffix = 0;
+
 	switch (msg->header.type) {
 	case DSTM_MSG_TYPE_PUT:
-		fprintf(f, "put: { region: %d, dst: %zu, size: %zu}}\n",
-		        msg->u.putget.ptr.region, msg->u.putget.ptr.offset,
-		        msg->u.putget.size);
+		suffix = snprintf(p, rem,
+		                  "put: { region: %d, dst: %zu, size: %zu}}",
+		                  msg->u.putget.ptr.region,
+		                  (size_t)msg->u.putget.ptr.offset,
+		                  msg->u.putget.size);
 		break;
 	case DSTM_MSG_TYPE_GET_REQ:
-		fprintf(f, "getreq: { region: %d, ptr: %zu, size: %zu}}\n",
-		        msg->u.putget.ptr.region, msg->u.putget.ptr.offset,
-		        msg->u.putget.size);
+		suffix = snprintf(p, rem,
+		                  "getreq: { region: %d, ptr: %zu, size: %zu}}",
+		                  msg->u.putget.ptr.region,
+		                  (size_t)msg->u.putget.ptr.offset,
+		                  msg->u.putget.size);
 		break;
 	case DSTM_MSG_TYPE_GET_REP:
-		fprintf(f, "getrep: { region: %d, ptr: %zu, size: %zu}}\n",
-		        msg->u.putget.ptr.region, msg->u.putget.ptr.offset,
-		        msg->u.putget.size);
+		suffix = snprintf(p, rem,
+		                  "getrep: { region: %d, ptr: %zu, size: %zu}}",
+		                  msg->u.putget.ptr.region,
+		                  (size_t)msg->u.putget.ptr.offset,
+		                  msg->u.putget.size);
 		break;
 	default:
-		assert(0);
+		suffix = snprintf(p, rem, "unknown}}");
+		break;
 	}
+
+	return written + suffix;
 }

@@ -24,9 +24,6 @@
 
 dstm_request_t *requests = NULL;
 
-void dstm_log_printrequest(int level, dstm_request_t *req);
-void dstm_request_fprintf(FILE *f, dstm_request_t *req);
-
 /* sort by r->time + r->delta */
 int dstm_request_cmp_arrival(dstm_request_t *a, dstm_request_t *b)
 {
@@ -97,6 +94,7 @@ int dstm_request_destroy(dstm_request_t **r)
 {
 	if (r == NULL || *r == NULL)
 		return 0;
+	dstm_log_request(DSTM_LOG_DEBUG, "destroy", *r);
 	/* free the owned payload buffer, if any */
 	free((*r)->buf);
 	/* free any MPI pack buffer that is still outstanding */
@@ -128,8 +126,8 @@ int dstm_region_status_update(dstm_time_t time)
 		 */
 
 		/* do we have pending puts? */
-		dstm_request_t *it, *tmp;
-		DL_FOREACH_SAFE(requests, it, tmp)
+		dstm_request_t *it;
+		DL_FOREACH(requests, it)
 		{
 			/* skip any put not related to current region time */
 			if (it->time + it->delta >
@@ -164,8 +162,8 @@ int dstm_region_status_update(dstm_time_t time)
 			if (nt + dist <= dstm_global_context.region->time)
 				return 0;
 		}
-		dstm_log_debug("region readable, time: %" PRIu64 "\n",
-		               dstm_global_context.region->time);
+		dstm_log_info("region readable, time: %" PRId64 "\n",
+		              dstm_global_context.region->time);
 
 		/* switching to read, not changing time */
 		dstm_local_region_status = DSTM_REGION_STATUS_READABLE;
@@ -176,8 +174,8 @@ int dstm_region_status_update(dstm_time_t time)
 		 */
 
 		/* do we have pending gets */
-		dstm_request_t *it, *tmp;
-		DL_FOREACH_SAFE(requests, it, tmp)
+		dstm_request_t *it;
+		DL_FOREACH(requests, it)
 		{
 			/* skip any get not related to current region time */
 			if (it->time + it->delta >
@@ -217,8 +215,8 @@ int dstm_region_status_update(dstm_time_t time)
 		 * */
 		if (dstm_global_context.region->time < time) {
 			dstm_global_context.region->time++;
-			dstm_log_debug("region writable, time: %" PRIu64 "\n",
-			               dstm_global_context.region->time);
+			dstm_log_info("region writable, time: %" PRId64 "\n",
+			              dstm_global_context.region->time);
 			dstm_local_region_status = DSTM_REGION_STATUS_WRITABLE;
 		}
 		return 0;
@@ -251,7 +249,6 @@ int dstm_request_progress_local_put(dstm_request_t *req)
 	if (req->time + req->delta == rg->time &&
 	    dstm_local_region_status == DSTM_REGION_STATUS_WRITABLE) {
 		void *dptr = dstm_region_ptr_tovoid(rg, req->dst);
-		dstm_log_debug("applying: %u\n", *(int *)req->buf);
 		memcpy(dptr, req->buf, req->size);
 		req->status = DSTM_REQUEST_STATUS_DONE;
 	}
@@ -307,9 +304,6 @@ int dstm_request_progress_in_get(dstm_request_t *req)
 		if (req->time + req->delta == rg->time &&
 		    dstm_local_region_status == DSTM_REGION_STATUS_READABLE) {
 			void *sptr = dstm_region_ptr_tovoid(rg, req->src);
-			dstm_log_debug("getrep: %u %u %p %u %u %u\n",
-			               req->src.region, req->src.offset, sptr,
-			               *(int *)sptr, req->size, rg->size);
 
 			/* Free the packbuf from the original received GET_REQ
 			 * before reusing the message for the reply. */
@@ -361,8 +355,7 @@ int dstm_request_progress_out_get(dstm_request_t *req)
 	dstm_region_t *rg = dstm_get_local_region();
 	if (req->status == DSTM_REQUEST_STATUS_IRECV) {
 		void *dptr = dstm_region_ptr_tovoid(rg, req->dst);
-		dstm_log_debug("applying: %p %u %zu\n", dptr, *(int *)req->buf,
-		               req->size);
+		dstm_log_debug("applying: %p %zu\n", dptr, req->size);
 		memcpy(dptr, req->buf, req->size);
 		req->status = DSTM_REQUEST_STATUS_DONE;
 	}
@@ -382,10 +375,8 @@ int dstm_request_progress(dstm_request_t *req)
 {
 	assert(req != NULL);
 	assert(progress_sm[req->type].progress != NULL);
-	dstm_log_debug("request:");
-	dstm_log_printrequest(DSTM_LOG_DEBUG, req);
-	dstm_log_debug("region:");
-	dstm_log_printregion(DSTM_LOG_DEBUG, dstm_get_local_region());
+	dstm_log_request(DSTM_LOG_DEBUG, "request", req);
+	dstm_log_region(DSTM_LOG_DEBUG, "region", dstm_get_local_region());
 	return progress_sm[req->type].progress(req);
 }
 
@@ -399,8 +390,9 @@ int dstm_request_progress(dstm_request_t *req)
  */
 int dstm_do_progress(dstm_time_t time)
 {
-	dstm_log_info("progress loop:  reqtime: %d, region time: %d\n", time,
-	              dstm_global_context.region->time);
+	dstm_log_debug("progress loop: reqtime: %" PRId64
+	               ", region time: %" PRId64 "\n",
+	               time, dstm_global_context.region->time);
 	dstm_request_t *nr;
 	dstm_ptr_t dptr, sptr;
 	dstm_msg_t m;
@@ -418,8 +410,7 @@ int dstm_do_progress(dstm_time_t time)
 		/* Update neighbor's highest received timestamp */
 		dstm_region_set_ninfo(dstm_global_context.region,
 		                      m.header.src_rank, m.header.time);
-		dstm_log_debug("received: ");
-		dstm_log_printmsg(DSTM_LOG_DEBUG, &m);
+		dstm_log_msg(DSTM_LOG_DEBUG, "received", &m);
 		switch (m.header.type) {
 		case DSTM_MSG_TYPE_PUT:
 			/* Incoming PUT: copy the payload into a request-owned
@@ -436,6 +427,7 @@ int dstm_do_progress(dstm_time_t time)
 			assert(nr->buf != NULL);
 			memcpy(nr->buf, m.data, m.u.putget.size);
 			free(m.packbuf);
+			m.packbuf = NULL;
 			DL_INSERT_INORDER(requests, nr,
 			                  dstm_request_cmp_departure);
 			break;
@@ -471,6 +463,7 @@ int dstm_do_progress(dstm_time_t time)
 			assert(it->buf != NULL);
 			memcpy(it->buf, m.data, m.u.putget.size);
 			free(m.packbuf);
+			m.packbuf = NULL;
 			it->status = DSTM_REQUEST_STATUS_IRECV;
 			break;
 		}
@@ -538,10 +531,10 @@ int dstm_put(int rank,
              void *src,
              size_t size)
 {
-	dstm_log_info("put: %d, %d, %" PRIu64 ", %" PRId64 ", %d:%d, %p, %d\n",
+	dstm_log_info("put: %d, %d, %" PRId64 ", %" PRId64
+	              ", %d:%td, %p, %zu\n",
 	              rank, region_id, time, delta, dst.region, dst.offset, src,
 	              size);
-	dstm_log_debug("put value: %u\n", *(int *)src);
 
 	assert(rank == region_id);
 	assert(rank == dst.region);
@@ -598,7 +591,8 @@ int dstm_get(int rank,
              dstm_ptr_t src,
              size_t size)
 {
-	dstm_log_info("get: %d, %d, %" PRIu64 ", %" PRId64 ", %p, %d:%d, %d\n",
+	dstm_log_info("get: %d, %d, %" PRId64 ", %" PRId64
+	              ", %p, %d:%td, %zu\n",
 	              rank, region_id, time, delta, dst, src.region, src.offset,
 	              size);
 	dstm_ptr_t dptr;
@@ -681,19 +675,8 @@ int dstm_get(int rank,
 }
 
 /*******************************************************************************
- * Logging helpers
+ * Formatting helpers
  ******************************************************************************/
-
-void dstm_log_printrequest(int level, dstm_request_t *request)
-{
-	if (level > dstm_log_level)
-		return;
-	if (request == NULL) {
-		fprintf(dstm_log_fd, "NULL\n");
-		return;
-	}
-	dstm_request_fprintf(dstm_log_fd, request);
-}
 
 typedef struct dstm_request_type_table_s {
 	int type;
@@ -710,8 +693,8 @@ static const dstm_request_type_table_t dstm_request_type_table[] = {
         {0, NULL},
 };
 
-const char *dstm_request_type_t2s(int type,
-                                  const dstm_request_type_table_t *table)
+static const char *dstm_request_type_t2s(int type,
+                                         const dstm_request_type_table_t *table)
 {
 	if (type < 0)
 		return "UNKNOWN";
@@ -721,17 +704,53 @@ const char *dstm_request_type_t2s(int type,
 	return "UNKNOWN";
 }
 
-void dstm_request_fprintf(FILE *f, dstm_request_t *req)
+int dstm_request_snprintf(char *buf, size_t n, dstm_request_t *req)
 {
-	assert(f != NULL);
-	assert(req != NULL);
-	fprintf(f,
-	        "{ type: %s, tag: %d, status: %d, time: %" PRIu64
-	        ", delta: %" PRId64 ", rank: %d, size: %zu\n",
-	        dstm_request_type_t2s(req->type, dstm_request_type_table),
-	        req->tag, req->status, req->time, req->delta, req->rank,
-	        req->size);
-	dstm_ptr_fprintf(f, req->dst);
-	dstm_ptr_fprintf(f, req->src);
-	dstm_msg_fprintf(f, &req->msg);
+	assert(buf != NULL);
+	if (req == NULL)
+		return snprintf(buf, n, "NULL");
+
+	/* Header line */
+	int total = snprintf(buf, n,
+	                     "{ type: %s, tag: %d, status: %d, time: %" PRIu64
+	                     ", delta: %" PRId64 ", rank: %d, size: %zu, dst: ",
+	                     dstm_request_type_t2s(req->type,
+	                                           dstm_request_type_table),
+	                     req->tag, req->status, req->time, req->delta,
+	                     req->rank, req->size);
+
+#define ADVANCE(written)                                                       \
+	do {                                                                   \
+		int _w = (written);                                            \
+		buf += (_w < (int)n ? _w : (int)n - 1);                        \
+		n = (_w < (int)n ? n - (size_t)_w : 1);                        \
+		total += _w;                                                   \
+	} while (0)
+
+	ADVANCE(total);
+
+	/* dst pointer */
+	int w = dstm_ptr_snprintf(buf, n, req->dst);
+	ADVANCE(w);
+
+	w = snprintf(buf, n, ", src: ");
+	ADVANCE(w);
+
+	/* src pointer */
+	w = dstm_ptr_snprintf(buf, n, req->src);
+	ADVANCE(w);
+
+	w = snprintf(buf, n, ", msg: ");
+	ADVANCE(w);
+
+	/* embedded message */
+	w = dstm_msg_snprintf(buf, n, &req->msg);
+	ADVANCE(w);
+
+	w = snprintf(buf, n, "}");
+	total += w;
+
+#undef ADVANCE
+
+	return total;
 }

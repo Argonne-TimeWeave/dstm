@@ -94,8 +94,8 @@ int dstm_darray_create(dstm_darray_t **ret,
 		err = -DSTM_ENOMEM;
 		goto err_ptrs;
 	}
-	dstm_log_debug("%u:%u local region of size %zu\n", local_ptr.region,
-		       local_ptr.offset, local_size);
+	dstm_log_debug("local alloc: region: %d, offset: %td, size: %zu\n",
+	               local_ptr.region, local_ptr.offset, local_size);
 	/* gather on all ranks the size of each local part */
 	darray->element_size = element_size;
 	darray->local_elements = local_elements;
@@ -109,8 +109,7 @@ int dstm_darray_create(dstm_darray_t **ret,
 	}
 
 	err = MPI_Allgather(&local_ptr, 2, MPI_UNSIGNED_LONG_LONG,
-	                    darray->rank_ptrs, 2, MPI_UNSIGNED_LONG_LONG,
-	                    comm);
+	                    darray->rank_ptrs, 2, MPI_UNSIGNED_LONG_LONG, comm);
 	if (err != MPI_SUCCESS) {
 		err = -DSTM_FAILURE;
 		goto err_mpi;
@@ -199,14 +198,15 @@ int dstm_darray_get(dstm_darray_t *darray,
                     dstm_time_t time,
                     dstm_time_t delta)
 {
-	dstm_log_debug("%p, %u, %p, %" PRIu64 ", %" PRId64 "\n", darray,
-	               global_index, dst, time, delta);
+	dstm_log_debug("darray: %p, index: %zu, dst: %p, time: %" PRId64
+	               ", delta: %" PRId64 "\n",
+	               darray, global_index, dst, time, delta);
 	int rank = darray_find_rank(darray, global_index);
 	int local_offset =
 	        (int)(global_index - (size_t)darray->rank_offsets[rank]);
 	dstm_ptr_t src = darray->rank_ptrs[rank];
-	dstm_log_debug("%u, %u, %u:%u\n", rank, local_offset, 
-		       src.region, src.offset);
+	dstm_log_debug("rank: %d, local_offset: %d, src: %d:%td\n", rank,
+	               local_offset, src.region, src.offset);
 	src.offset += local_offset * darray->element_size;
 
 	return dstm_get(rank, src.region, time, delta, dst, src,
@@ -219,8 +219,9 @@ int dstm_darray_put(dstm_darray_t *darray,
                     dstm_time_t time,
                     dstm_time_t delta)
 {
-	dstm_log_debug("%p, %u, %p, %" PRIu64 ", %" PRId64 "\n", darray,
-	               global_index, src, time, delta);
+	dstm_log_debug("darray: %p, index: %zu, src: %p, time: %" PRId64
+	               ", delta: %" PRId64 "\n",
+	               darray, global_index, src, time, delta);
 	int rank = darray_find_rank(darray, global_index);
 	int local_offset =
 	        (int)(global_index - (size_t)darray->rank_offsets[rank]);
@@ -237,7 +238,8 @@ int dstm_darray_allgatherv(dstm_darray_t *darray,
                            dstm_time_t time,
                            const dstm_time_t *deltas)
 {
-	dstm_log_debug("%p, %p, %p, %" PRIu64 "\n", darray, src, dst, time);
+	dstm_log_debug("darray: %p, src: %p, dst: %p, time: %" PRId64 "\n",
+	               darray, src, dst, time);
 	if (darray == NULL || src == NULL || dst == NULL || deltas == NULL)
 		return -DSTM_EINVAL;
 
@@ -270,11 +272,26 @@ int dstm_darray_allgatherv(dstm_darray_t *darray,
 		for (size_t i = 0; i < darray->rank_elements[r]; i++) {
 			size_t idx = darray->rank_offsets[r] + i;
 			void *out = (char *)dst + idx * darray->element_size;
-			int rc = dstm_darray_get(darray, idx, out, time, deltas[r]);
+			int rc = dstm_darray_get(darray, idx, out, time,
+			                         deltas[r]);
 			if (rc != DSTM_SUCCESS)
 				return rc;
 		}
 	}
 
 	return DSTM_SUCCESS;
+}
+
+/*******************************************************************************
+ * Formatting helpers
+ ******************************************************************************/
+
+int dstm_darray_snprintf(char *buf, size_t n, dstm_darray_t *a)
+{
+	if (a == NULL)
+		return snprintf(buf, n, "NULL");
+	return snprintf(buf, n,
+	                "{ element_size: %zu, total_elements: %zu,"
+	                " local_elements: %zu }",
+	                a->element_size, a->total_elements, a->local_elements);
 }

@@ -817,3 +817,44 @@ size_t dstm_distance_size(dstm_distance_t *dst)
 {
 	return dst->size;
 }
+
+/*******************************************************************************
+ * Formatting helpers
+ ******************************************************************************/
+
+int dstm_distance_snprintf(char *buf, size_t n, dstm_distance_t *d)
+{
+	if (d == NULL)
+		return snprintf(buf, n, "NULL");
+
+	int total = snprintf(buf, n, "{ size: %zu", d->size);
+
+#define ADVANCE(written)                                                       \
+	do {                                                                   \
+		int _w = (written);                                            \
+		buf += (_w < (int)n ? _w : (int)n - 1);                        \
+		n = (_w < (int)n ? n - (size_t)_w : 1);                        \
+		total += _w;                                                   \
+	} while (0)
+
+	ADVANCE(total);
+
+	/* Print the first row of the distance matrix as a representative
+	 * sample.  Printing the full N×N matrix would overflow any fixed-size
+	 * buffer for non-trivial process counts. */
+	if (d->distances != NULL && d->size > 0) {
+		int w = snprintf(buf, n, ", row[0]:");
+		ADVANCE(w);
+		for (size_t j = 0; j < d->size; j++) {
+			w = snprintf(buf, n, " %d", d->distances[j]);
+			ADVANCE(w);
+		}
+	}
+
+	int w = snprintf(buf, n, "}");
+	total += w;
+
+#undef ADVANCE
+
+	return total;
+}

@@ -116,8 +116,58 @@ int dstm_region_get_ntime(dstm_region_t *region, int rank, dstm_time_t *time);
 dstm_ptr_t dstm_region_malloc(dstm_region_t *r, size_t size);
 void dstm_region_free(dstm_region_t *r, dstm_ptr_t ptr);
 
-void dstm_ptr_fprintf(FILE *f, dstm_ptr_t p);
-void dstm_region_fprintf(FILE *f, dstm_region_t *r);
+/*******************************************************************************
+ * Formatting helpers
+ *
+ * Each *_snprintf function follows the standard snprintf contract: writes at
+ * most n bytes (including the NUL terminator) into buf, and returns the number
+ * of bytes that would have been written had n been large enough (not counting
+ * the NUL).  Use the accompanying SIZE macro to allocate a buffer that is
+ * always sufficient.
+ ******************************************************************************/
+
+#define DSTM_PTR_SNPRINTF_SIZE 64
+int dstm_ptr_snprintf(char *buf, size_t n, dstm_ptr_t p);
+
+#define DSTM_REGION_NINFO_SNPRINTF_SIZE 64
+int dstm_region_ninfo_snprintf(char *buf, size_t n, dstm_region_ninfo_t *ni);
+
+#define DSTM_REGION_SNPRINTF_SIZE 128
+int dstm_region_snprintf(char *buf, size_t n, dstm_region_t *r);
+
+/* Emit a log message at the given level with label: <formatted value>.
+ * The buffer is allocated on the stack and the level is checked before any
+ * formatting work is done. */
+#define dstm_log_ptr(level, label, ptr)                                        \
+	do {                                                                   \
+		if ((level) <= dstm_log_level) {                               \
+			char __buf[DSTM_PTR_SNPRINTF_SIZE];                    \
+			dstm_ptr_snprintf(__buf, sizeof(__buf), (ptr));        \
+			dstm_log_printf((level), __FILE__, __func__, __LINE__, \
+			                "%s: %s\n", (label), __buf);           \
+		}                                                              \
+	} while (0)
+
+#define dstm_log_region_ninfo(level, label, ni)                                \
+	do {                                                                   \
+		if ((level) <= dstm_log_level) {                               \
+			char __buf[DSTM_REGION_NINFO_SNPRINTF_SIZE];           \
+			dstm_region_ninfo_snprintf(__buf, sizeof(__buf),       \
+			                           (ni));                      \
+			dstm_log_printf((level), __FILE__, __func__, __LINE__, \
+			                "%s: %s\n", (label), __buf);           \
+		}                                                              \
+	} while (0)
+
+#define dstm_log_region(level, label, r)                                       \
+	do {                                                                   \
+		if ((level) <= dstm_log_level) {                               \
+			char __buf[DSTM_REGION_SNPRINTF_SIZE];                 \
+			dstm_region_snprintf(__buf, sizeof(__buf), (r));       \
+			dstm_log_printf((level), __FILE__, __func__, __LINE__, \
+			                "%s: %s\n", (label), __buf);           \
+		}                                                              \
+	} while (0)
 
 #ifdef __cplusplus
 }
