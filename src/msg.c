@@ -174,6 +174,7 @@ int dstm_msg_send_getreq(dstm_msg_t *msg, int tag)
 	         dstm_global_context.comm);
 
 	free(msg->packbuf);
+	msg->packbuf = NULL;
 	return 0;
 }
 
