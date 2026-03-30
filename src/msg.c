@@ -78,6 +78,16 @@ int dstm_msg_finalize(void)
 }
 
 /*******************************************************************************
+ * Message cleanup
+ ******************************************************************************/
+
+void dstm_msg_free_packbuf(dstm_msg_t *msg)
+{
+	free(msg->packbuf);
+	msg->packbuf = NULL;
+}
+
+/*******************************************************************************
  * Message creation/filling
  ******************************************************************************/
 
@@ -191,8 +201,7 @@ int dstm_msg_send_getreq(dstm_msg_t *msg, int tag)
 	MPI_Send(msg->packbuf, pos, MPI_PACKED, msg->header.dst_rank, tag,
 	         dstm_global_context.comm);
 
-	free(msg->packbuf);
-	msg->packbuf = NULL;
+	dstm_msg_free_packbuf(msg);
 	return 0;
 }
 
@@ -216,8 +225,7 @@ static int dstm_msg_send_heartbeat(dstm_msg_t *msg, int tag)
 	MPI_Send(msg->packbuf, pos, MPI_PACKED, msg->header.dst_rank, tag,
 	         dstm_global_context.comm);
 
-	free(msg->packbuf);
-	msg->packbuf = NULL;
+	dstm_msg_free_packbuf(msg);
 	return 0;
 }
 

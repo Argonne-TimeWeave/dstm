@@ -104,6 +104,9 @@ int dstm_msg_fill_payload(dstm_msg_t *msg,
                           void *src,
                           size_t size);
 
+/* Free msg->packbuf and reset the pointer to NULL. */
+void dstm_msg_free_packbuf(dstm_msg_t *msg);
+
 int dstm_msg_send(dstm_msg_t *msg, int tag);
 int dstm_msg_isend(dstm_msg_t *msg, int tag);
 

@@ -116,15 +116,15 @@ int dstm_region_send_heartbeat_to_all(dstm_time_t time, int status)
 {
 	for (int i = 0; i < dstm_global_context.world_size; i++) {
 		int dist = dstm_distance_get(dstm_global_context.distances,
-			                          dstm_global_context.rank, i);
+		                             dstm_global_context.rank, i);
 		if (dist <= 0)
 			continue;
 
 		dstm_msg_t m;
-		dstm_msg_fill_hdr(&m, DSTM_MSG_TYPE_HEARTBEAT,
-				  i, time, 0, dstm_global_context.rank);
+		dstm_msg_fill_hdr(&m, DSTM_MSG_TYPE_HEARTBEAT, i, time, 0,
+		                  dstm_global_context.rank);
 		dstm_msg_fill_heartbeat(&m, status);
-		
+
 		int tag = dstm_request_new_tag();
 		dstm_msg_send(&m, tag);
 	}
@@ -190,8 +190,9 @@ int dstm_region_status_update(dstm_time_t time)
 		/* switching to read, not changing time */
 		dstm_local_region_status = DSTM_REGION_STATUS_READABLE;
 
-		dstm_region_send_heartbeat_to_all(dstm_global_context.region->time,
-					   DSTM_REGION_STATUS_READABLE);
+		dstm_region_send_heartbeat_to_all(
+		        dstm_global_context.region->time,
+		        DSTM_REGION_STATUS_READABLE);
 		return 0;
 	} else {
 		/* we're in the progress of accepting reads, check if we should
@@ -249,9 +250,10 @@ int dstm_region_status_update(dstm_time_t time)
 			dstm_log_info("region writable, time: %" PRId64 "\n",
 			              dstm_global_context.region->time);
 			dstm_local_region_status = DSTM_REGION_STATUS_WRITABLE;
-		
-			dstm_region_send_heartbeat_to_all(dstm_global_context.region->time,
-					   DSTM_REGION_STATUS_READABLE);
+
+			dstm_region_send_heartbeat_to_all(
+			        dstm_global_context.region->time,
+			        DSTM_REGION_STATUS_READABLE);
 		}
 		return 0;
 	}
@@ -341,8 +343,7 @@ int dstm_request_progress_in_get(dstm_request_t *req)
 
 			/* Free the packbuf from the original received GET_REQ
 			 * before reusing the message for the reply. */
-			free(req->msg.packbuf);
-			req->msg.packbuf = NULL;
+			dstm_msg_free_packbuf(&req->msg);
 
 			/* Buffer the reply payload in req->buf. */
 			req->buf = malloc(req->size);
@@ -457,8 +458,7 @@ int dstm_do_progress(dstm_time_t time)
 			nr->buf = malloc(m.u.putget.size);
 			assert(nr->buf != NULL);
 			memcpy(nr->buf, m.data, m.u.putget.size);
-			free(m.packbuf);
-			m.packbuf = NULL;
+			dstm_msg_free_packbuf(&m);
 			DL_INSERT_INORDER(requests, nr,
 			                  dstm_request_cmp_departure);
 			break;
@@ -493,8 +493,7 @@ int dstm_do_progress(dstm_time_t time)
 			it->buf = malloc(m.u.putget.size);
 			assert(it->buf != NULL);
 			memcpy(it->buf, m.data, m.u.putget.size);
-			free(m.packbuf);
-			m.packbuf = NULL;
+			dstm_msg_free_packbuf(&m);
 			it->status = DSTM_REQUEST_STATUS_IRECV;
 			break;
 		}
@@ -502,8 +501,7 @@ int dstm_do_progress(dstm_time_t time)
 			dstm_region_set_ninfo(dstm_global_context.region,
 			                      m.header.src_rank, m.header.time,
 			                      m.u.heartbeat.status);
-			free(m.packbuf);
-			m.packbuf = NULL;
+			dstm_msg_free_packbuf(&m);
 			break;
 		default:
 			assert(0);
