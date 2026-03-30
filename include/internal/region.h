@@ -74,6 +74,8 @@ typedef struct dstm_region_block_header_s dstm_region_block_header_t;
 struct dstm_region_ninfo_s {
 	int rank;
 	dstm_time_t time;
+	int state; /* DSTM_REGION_STATUS_WRITABLE or DSTM_REGION_STATUS_READABLE
+	            */
 	UT_hash_handle hh;
 };
 typedef struct dstm_region_ninfo_s dstm_region_ninfo_t;
@@ -110,8 +112,12 @@ void dstm_region_destroy(dstm_region_t **region);
  * Methods
  ******************************************************************************/
 
-int dstm_region_set_ninfo(dstm_region_t *region, int rank, dstm_time_t time);
-int dstm_region_get_ntime(dstm_region_t *region, int rank, dstm_time_t *time);
+int dstm_region_set_ninfo(dstm_region_t *region,
+                          int rank,
+                          dstm_time_t time,
+                          int state);
+int dstm_region_get_ninfo(dstm_region_t *region, int rank, dstm_time_t *time,
+			  int *state);
 
 dstm_ptr_t dstm_region_malloc(dstm_region_t *r, size_t size);
 void dstm_region_free(dstm_region_t *r, dstm_ptr_t ptr);
@@ -129,7 +135,7 @@ void dstm_region_free(dstm_region_t *r, dstm_ptr_t ptr);
 #define DSTM_PTR_SNPRINTF_SIZE 64
 int dstm_ptr_snprintf(char *buf, size_t n, dstm_ptr_t p);
 
-#define DSTM_REGION_NINFO_SNPRINTF_SIZE 64
+#define DSTM_REGION_NINFO_SNPRINTF_SIZE 96
 int dstm_region_ninfo_snprintf(char *buf, size_t n, dstm_region_ninfo_t *ni);
 
 #define DSTM_REGION_SNPRINTF_SIZE 128

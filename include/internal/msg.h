@@ -23,10 +23,16 @@ extern "C" {
  * CONSTANTS
  ******************************************************************************/
 
+/* Region status values, shared between the messaging layer (heartbeat body)
+ * and the ops layer (local region state machine). */
+#define DSTM_REGION_STATUS_WRITABLE 0
+#define DSTM_REGION_STATUS_READABLE 1
+
 #define DSTM_MSG_TYPE_PUT 0
 #define DSTM_MSG_TYPE_GET_REQ 1
 #define DSTM_MSG_TYPE_GET_REP 2
-#define DSTM_MSG_TYPE_MAX 3
+#define DSTM_MSG_TYPE_HEARTBEAT 3
+#define DSTM_MSG_TYPE_MAX 4
 
 struct dstm_msg_hdr_s {
 	int type;
@@ -43,6 +49,12 @@ struct dstm_msg_putget_s {
 };
 typedef struct dstm_msg_putget_s dstm_msg_putget_t;
 
+struct dstm_msg_heartbeat_s {
+	int status; /* DSTM_REGION_STATUS_WRITABLE or
+	               DSTM_REGION_STATUS_READABLE */
+};
+typedef struct dstm_msg_heartbeat_s dstm_msg_heartbeat_t;
+
 struct dstm_msg_s {
 	/* required for asynchronous requests */
 	MPI_Request request;
@@ -52,6 +64,7 @@ struct dstm_msg_s {
 	 */
 	union {
 		dstm_msg_putget_t putget;
+		dstm_msg_heartbeat_t heartbeat;
 	} u;
 	/* data buffer, if needed */
 	void *data;
@@ -73,6 +86,8 @@ int dstm_msg_fill_hdr(dstm_msg_t *msg,
                       dstm_time_t delta,
                       int dst_rank,
                       int src_rank);
+
+int dstm_msg_fill_heartbeat(dstm_msg_t *msg, int status);
 
 /* Fill the putget body and set a non-owning data pointer.
  *

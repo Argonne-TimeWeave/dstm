@@ -17,6 +17,7 @@
 #include "dstm.h"
 
 #include "internal/globals.h"
+#include "internal/msg.h"
 #include "internal/region.h"
 
 /*******************************************************************************
@@ -426,14 +427,14 @@ void dstm_region_destroy(dstm_region_t **region)
  * Neighbor Info Functions
  ******************************************************************************/
 
-int dstm_region_set_ninfo(dstm_region_t *region, int rank, dstm_time_t time)
+int dstm_region_set_ninfo(dstm_region_t *region,
+                          int rank,
+                          dstm_time_t time,
+                          int state)
 {
 	if (region == NULL)
 		return -DSTM_EINVAL;
 
-	/* if the neighbor region is already known, only update if the time is
-	 * higher
-	 */
 	dstm_region_ninfo_t *ni;
 	HASH_FIND_INT(region->ninfos, &rank, ni);
 	if (ni == NULL) {
@@ -441,26 +442,37 @@ int dstm_region_set_ninfo(dstm_region_t *region, int rank, dstm_time_t time)
 		assert(ni != NULL);
 		ni->rank = rank;
 		ni->time = time;
+		ni->state = state;
 		HASH_ADD_INT(region->ninfos, rank, ni);
 	} else {
 		if (time > ni->time) {
+			/* new time: update both time and state */
 			ni->time = time;
+			ni->state = state;
+		} else if (time == ni->time && state > ni->state) {
+			/* same time, state advanced (WRITABLE -> READABLE) */
+			ni->state = state;
 		}
 	}
 	return DSTM_SUCCESS;
 }
 
-int dstm_region_get_ntime(dstm_region_t *region, int rank, dstm_time_t *time)
+int dstm_region_get_ninfo(dstm_region_t *region, int rank, dstm_time_t *time,
+			  int *state)
 {
 	if (region == NULL)
 		return -DSTM_EINVAL;
 
 	dstm_region_ninfo_t *ni;
 	HASH_FIND_INT(region->ninfos, &rank, ni);
-	if (ni == NULL)
+	if (ni == NULL) {
+		*time = 0;
+		*state = DSTM_REGION_STATUS_WRITABLE;
 		return -DSTM_EINVAL;
+	}
 
 	*time = ni->time;
+	*state = ni->state;
 	return DSTM_SUCCESS;
 }
 
@@ -563,8 +575,10 @@ int dstm_region_ninfo_snprintf(char *buf, size_t n, dstm_region_ninfo_t *ni)
 	assert(buf != NULL);
 	if (ni == NULL)
 		return snprintf(buf, n, "NULL");
-	return snprintf(buf, n, "{ rank: %d, time: %" PRId64 "}", ni->rank,
-	                ni->time);
+	return snprintf(buf, n, "{ rank: %d, time: %" PRId64 ", state: %s}",
+	                ni->rank, ni->time,
+	                ni->state == DSTM_REGION_STATUS_READABLE ? "readable" :
+	                                                           "writable");
 }
 
 int dstm_region_snprintf(char *buf, size_t n, dstm_region_t *r)

@@ -112,8 +112,24 @@ int dstm_request_destroy(dstm_request_t **r)
  * - readable
  ******************************************************************************/
 
-#define DSTM_REGION_STATUS_WRITABLE 0
-#define DSTM_REGION_STATUS_READABLE 1
+int dstm_region_send_heartbeat_to_all(dstm_time_t time, int status)
+{
+	for (int i = 0; i < dstm_global_context.world_size; i++) {
+		int dist = dstm_distance_get(dstm_global_context.distances,
+			                          dstm_global_context.rank, i);
+		if (dist <= 0)
+			continue;
+
+		dstm_msg_t m;
+		dstm_msg_fill_hdr(&m, DSTM_MSG_TYPE_HEARTBEAT,
+				  i, time, 0, dstm_global_context.rank);
+		dstm_msg_fill_heartbeat(&m, status);
+		
+		int tag = dstm_request_new_tag();
+		dstm_msg_send(&m, tag);
+	}
+	return 0;
+}
 
 static int dstm_local_region_status = DSTM_REGION_STATUS_WRITABLE;
 
@@ -145,6 +161,7 @@ int dstm_region_status_update(dstm_time_t time)
 
 		/* could we receive more puts?
 		 * i.e. are my neighbors all after currenttime - distance
+		 * or are they at least readable at currenttime - distance
 		 */
 		for (int i = 0; i < dstm_global_context.world_size; i++) {
 			int dist =
@@ -152,14 +169,19 @@ int dstm_region_status_update(dstm_time_t time)
 			                          dstm_global_context.rank, i);
 
 			dstm_time_t nt;
-			dstm_region_get_ntime(dstm_global_context.region, i,
-			                      &nt);
+			int s;
+			dstm_region_get_ninfo(dstm_global_context.region, i,
+			                      &nt, &s);
 
 			/* skip non neighbors */
 			if (dist <= 0)
 				continue;
 
-			if (nt + dist <= dstm_global_context.region->time)
+			if (nt + dist < dstm_global_context.region->time)
+				return 0;
+
+			if (nt + dist == dstm_global_context.region->time &&
+			    s == DSTM_REGION_STATUS_WRITABLE)
 				return 0;
 		}
 		dstm_log_info("region readable, time: %" PRId64 "\n",
@@ -167,6 +189,9 @@ int dstm_region_status_update(dstm_time_t time)
 
 		/* switching to read, not changing time */
 		dstm_local_region_status = DSTM_REGION_STATUS_READABLE;
+
+		dstm_region_send_heartbeat_to_all(dstm_global_context.region->time,
+					   DSTM_REGION_STATUS_READABLE);
 		return 0;
 	} else {
 		/* we're in the progress of accepting reads, check if we should
@@ -193,6 +218,7 @@ int dstm_region_status_update(dstm_time_t time)
 
 		/* could we receive more gets?
 		 * i.e. are my neighbors closer than currenttime - distance
+		 * or are they at least done with sending gets
 		 */
 		for (int i = 0; i < dstm_global_context.world_size; i++) {
 			int dist =
@@ -200,14 +226,19 @@ int dstm_region_status_update(dstm_time_t time)
 			                          dstm_global_context.rank, i);
 
 			dstm_time_t nt;
-			dstm_region_get_ntime(dstm_global_context.region, i,
-			                      &nt);
+			int s;
+			dstm_region_get_ninfo(dstm_global_context.region, i,
+			                      &nt, &s);
 
 			/* skip non neighbors */
 			if (dist <= 0)
 				continue;
 
-			if (nt - dist <= dstm_global_context.region->time)
+			if (nt - dist < dstm_global_context.region->time)
+				return 0;
+
+			if (nt - dist == dstm_global_context.region->time &&
+			    s == DSTM_REGION_STATUS_READABLE)
 				return 0;
 		}
 
@@ -218,6 +249,9 @@ int dstm_region_status_update(dstm_time_t time)
 			dstm_log_info("region writable, time: %" PRId64 "\n",
 			              dstm_global_context.region->time);
 			dstm_local_region_status = DSTM_REGION_STATUS_WRITABLE;
+		
+			dstm_region_send_heartbeat_to_all(dstm_global_context.region->time,
+					   DSTM_REGION_STATUS_READABLE);
 		}
 		return 0;
 	}
@@ -407,9 +441,6 @@ int dstm_do_progress(dstm_time_t time)
 		/* block until we receive the incoming message */
 		dstm_msg_recvany(status, &m);
 
-		/* Update neighbor's highest received timestamp */
-		dstm_region_set_ninfo(dstm_global_context.region,
-		                      m.header.src_rank, m.header.time);
 		dstm_log_msg(DSTM_LOG_DEBUG, "received", &m);
 		switch (m.header.type) {
 		case DSTM_MSG_TYPE_PUT:
@@ -467,6 +498,13 @@ int dstm_do_progress(dstm_time_t time)
 			it->status = DSTM_REQUEST_STATUS_IRECV;
 			break;
 		}
+		case DSTM_MSG_TYPE_HEARTBEAT:
+			dstm_region_set_ninfo(dstm_global_context.region,
+			                      m.header.src_rank, m.header.time,
+			                      m.u.heartbeat.status);
+			free(m.packbuf);
+			m.packbuf = NULL;
+			break;
 		default:
 			assert(0);
 		}
