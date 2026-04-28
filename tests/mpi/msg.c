@@ -86,15 +86,15 @@ static void test_put_roundtrip(int rank)
 		dstm_ptr_t dst = {.region = REGION, .offset = OFFSET};
 
 		int rc;
-		rc = dstm_msg_fill_hdr(&msg, DSTM_MSG_TYPE_PUT, 10, 2, SENDER,
-		                       RECEIVER);
+		rc = dstm_msg_fill_hdr(&msg, DSTM_MSG_TYPE_PUT, 10, 2, RECEIVER,
+		                       SENDER);
 		assert(rc == 0);
 		/* fill_payload sets msg.data to src without copying; the
 		 * caller is responsible for keeping src alive until the send
 		 * completes. */
 		rc = dstm_msg_fill_payload(&msg, dst, src, DATA_SZ);
 		assert(rc == 0);
-		rc = dstm_msg_isend(&msg, 0);
+		rc = dstm_msg_isend(&msg, 1);
 		assert(rc == 0);
 
 		MPI_Wait(&msg.request, &status);

@@ -23,6 +23,7 @@
 MPI_Datatype dstm_msg_hdr_dt;
 MPI_Datatype dstm_msg_putget_dt;
 MPI_Datatype dstm_msg_heartbeat_dt;
+MPI_Datatype dstm_msg_barrier_dt;
 
 /*******************************************************************************
  * MPI Datatypes management
@@ -66,6 +67,15 @@ int dstm_msg_init(void)
 	                       &dstm_msg_heartbeat_dt);
 	MPI_Type_commit(&dstm_msg_heartbeat_dt);
 
+	/* dstm_msg_barrier_t: last_time(int64_t) */
+	MPI_Datatype dstm_msg_barrier_sig[1] = {MPI_INT64_T};
+	int dstm_msg_barrier_bl[1] = {1};
+	MPI_Aint dstm_msg_barrier_disp[1] = {
+	        offsetof(dstm_msg_barrier_t, last_time)};
+	MPI_Type_create_struct(1, dstm_msg_barrier_bl, dstm_msg_barrier_disp,
+	                       dstm_msg_barrier_sig, &dstm_msg_barrier_dt);
+	MPI_Type_commit(&dstm_msg_barrier_dt);
+
 	return 0;
 }
 
@@ -74,6 +84,7 @@ int dstm_msg_finalize(void)
 	MPI_Type_free(&dstm_msg_hdr_dt);
 	MPI_Type_free(&dstm_msg_putget_dt);
 	MPI_Type_free(&dstm_msg_heartbeat_dt);
+	MPI_Type_free(&dstm_msg_barrier_dt);
 	return 0;
 }
 
@@ -95,8 +106,8 @@ int dstm_msg_fill_hdr(dstm_msg_t *m,
                       int type,
                       dstm_time_t time,
                       dstm_time_t delta,
-                      int src_rank,
-                      int dst_rank)
+                      int dst_rank,
+                      int src_rank)
 {
 	if (type < 0 || type >= DSTM_MSG_TYPE_MAX) {
 		dstm_errno = DSTM_EINVAL;
@@ -123,6 +134,12 @@ int dstm_msg_fill_payload(dstm_msg_t *m, dstm_ptr_t ptr, void *src, size_t size)
 int dstm_msg_fill_heartbeat(dstm_msg_t *m, int status)
 {
 	m->u.heartbeat.status = status;
+	return 0;
+}
+
+int dstm_msg_fill_barrier(dstm_msg_t *m, dstm_time_t last_time)
+{
+	m->u.barrier.last_time = last_time;
 	return 0;
 }
 
@@ -229,6 +246,30 @@ static int dstm_msg_send_heartbeat(dstm_msg_t *msg, int tag)
 	return 0;
 }
 
+static int dstm_msg_send_barrier(dstm_msg_t *msg, int tag)
+{
+	int hsz, bsz;
+	MPI_Pack_size(1, dstm_msg_hdr_dt, dstm_global_context.comm, &hsz);
+	MPI_Pack_size(1, dstm_msg_barrier_dt, dstm_global_context.comm, &bsz);
+	size_t bufsz = hsz + bsz;
+
+	msg->packbuf = calloc(bufsz, sizeof(char));
+	if (msg->packbuf == NULL)
+		return -DSTM_ENOMEM;
+
+	int pos = 0;
+	MPI_Pack(&msg->header, 1, dstm_msg_hdr_dt, msg->packbuf, bufsz, &pos,
+	         dstm_global_context.comm);
+	MPI_Pack(&msg->u.barrier, 1, dstm_msg_barrier_dt, msg->packbuf, bufsz,
+	         &pos, dstm_global_context.comm);
+
+	MPI_Send(msg->packbuf, pos, MPI_PACKED, msg->header.dst_rank, tag,
+	         dstm_global_context.comm);
+
+	dstm_msg_free_packbuf(msg);
+	return 0;
+}
+
 int dstm_msg_send(dstm_msg_t *msg, int tag)
 {
 	assert(msg != NULL);
@@ -237,6 +278,8 @@ int dstm_msg_send(dstm_msg_t *msg, int tag)
 		return dstm_msg_send_getreq(msg, tag);
 	case DSTM_MSG_TYPE_HEARTBEAT:
 		return dstm_msg_send_heartbeat(msg, tag);
+	case DSTM_MSG_TYPE_BARRIER:
+		return dstm_msg_send_barrier(msg, tag);
 	default:
 		assert(0);
 	}
@@ -296,6 +339,10 @@ int dstm_msg_recvany(MPI_Status status, dstm_msg_t *msg)
 	case DSTM_MSG_TYPE_HEARTBEAT:
 		MPI_Unpack(msg->packbuf, bufsz, &pos, &msg->u.heartbeat, 1,
 		           dstm_msg_heartbeat_dt, dstm_global_context.comm);
+		break;
+	case DSTM_MSG_TYPE_BARRIER:
+		MPI_Unpack(msg->packbuf, bufsz, &pos, &msg->u.barrier, 1,
+		           dstm_msg_barrier_dt, dstm_global_context.comm);
 		break;
 	default:
 		assert(0);
@@ -367,6 +414,10 @@ int dstm_msg_snprintf(char *buf, size_t n, dstm_msg_t *msg)
 		                                  DSTM_REGION_STATUS_READABLE ?
 		                          "readable" :
 		                          "writable");
+		break;
+	case DSTM_MSG_TYPE_BARRIER:
+		suffix = snprintf(p, rem, "barrier: { last_time: %" PRId64 "}}",
+		                  msg->u.barrier.last_time);
 		break;
 	default:
 		suffix = snprintf(p, rem, "unknown}}");

@@ -47,7 +47,7 @@ test_allgatherv_stencil(int rank, int world_size, dstm_distance_t *dist)
 	int *dst_buf = malloc((size_t)world_size * sizeof(int));
 	assert(dst_buf != NULL);
 	/* init it at a specific value to help debugging */
-	for(int i = 0; i < world_size; i++)
+	for (int i = 0; i < world_size; i++)
 		dst_buf[i] = 0xff00 + rank;
 
 	/* Per-rank deltas array: deltas[self] >= 0 (put), rest <= 0 (get). */
@@ -94,13 +94,11 @@ test_allgatherv_stencil(int rank, int world_size, dstm_distance_t *dist)
 				continue;
 			int dist_r = dstm_distance_get(dist, rank, r);
 			int expected = r + (t - 1 - dist_r);
-			fprintf(stderr, "%d: (%d, %d) %p -> %d == %d\n", t, r, dist_r,
-				&dst_buf[r],
-			        dst_buf[r], expected);
+			fprintf(stderr, "%d: (%d, %d) %p -> %d == %d\n", t, r,
+			        dist_r, &dst_buf[r], dst_buf[r], expected);
 			assert(dst_buf[r] == expected);
 		}
 
-		MPI_Barrier(MPI_COMM_WORLD);
 	}
 
 	free(deltas);
@@ -137,7 +135,15 @@ int main(int argc, char *argv[])
 		printf("PASS: allgatherv stencil (world_size=%d)\n",
 		       world_size);
 
-	dstm_fini();
+	/* The highest effective timestep is the last allgatherv put:
+	 * time = max_dist*2+2 with delta = +1, so last_time = max_dist*2+3. */
+	int max_dist = 0;
+	for (int r = 0; r < world_size; r++) {
+		int d = dstm_distance_get(dist, rank, r);
+		if (d > max_dist)
+			max_dist = d;
+	}
+	dstm_fini((dstm_time_t)(max_dist * 2 + 3));
 	dstm_distance_destroy(&dist);
 	dstm_finalize();
 	MPI_Finalize();

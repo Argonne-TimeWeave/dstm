@@ -215,13 +215,59 @@ int dstm_distance_create_dragonfly(dstm_distance_t **ret, size_t size);
 void dstm_distance_destroy(dstm_distance_t **dist);
 
 /*******************************************************************************
+ * DSTM TIME
+ ******************************************************************************/
+
+/* type alias to a timestamp, this is logical time (within the simulation), not
+ * real time. */
+typedef int64_t dstm_time_t;
+
+/*******************************************************************************
  * DSTM START/FINISH
  ******************************************************************************/
 
 /* basic configuration of dstm:
  */
 int dstm_start(dstm_distance_t *dist);
-int dstm_fini();
+
+/**
+ * Flush all in-flight requests and shut down the local region.
+ *
+ * Spins the progress loop until every pending request (IN_PUT, LOCAL_PUT,
+ * IN_GET and its GET_REP send, OUT_PUT MPI_Isend) has completed, then issues
+ * an MPI_Barrier so that no rank tears down its region while a peer may still
+ * be sending messages to it.
+ *
+ * @param last_time  The highest effective timestep submitted by this rank,
+ *                   i.e. max(time + delta) across all dstm_put / dstm_get
+ *                   calls.  Must be large enough to allow the region state
+ *                   machine to complete the final timestep's WRITABLE and
+ *                   READABLE phases.  Passing a value that is too small will
+ *                   cause the drain loop to stall indefinitely.
+ *
+ * @return 0 if successful; an error code otherwise.
+ */
+int dstm_fini(dstm_time_t last_time);
+
+/**
+ * Distributed barrier over all ranks using a two-pass ring token algorithm.
+ *
+ * Ensures that all in-flight requests across all ranks have completed before
+ * returning.  The algorithm:
+ *   1. Drains all local OUT_PUT MPI_Isend operations.
+ *   2. Passes a token around the ring (rank 0 -> 1 -> ... -> N-1 -> 0).
+ *      Each rank receiving the token knows its predecessor has finished all
+ *      sends, drains its remaining requests, then forwards the token.
+ *   3. Rank 0 re-injects the token for a second pass to signal global
+ *      completion to all ranks.
+ *
+ * @param last_time  The highest effective timestep submitted by this rank,
+ *                   i.e. max(time + delta) across all dstm_put / dstm_get
+ *                   calls.  All ranks must pass the same value.
+ *
+ * @return 0 if successful; an error code otherwise.
+ */
+int dstm_barrier(dstm_time_t last_time);
 
 /*******************************************************************************
  * DSTM MEMORY MANAGEMENT
@@ -236,10 +282,6 @@ int dstm_fini();
 
 struct dstm_region_s;
 typedef struct dstm_region_s dstm_region_t;
-
-/* type alias to a timestamp, this is logical time (within the simulation), not
- * real time. */
-typedef int64_t dstm_time_t;
 
 /* distributed array over regions */
 struct dstm_darray_s;

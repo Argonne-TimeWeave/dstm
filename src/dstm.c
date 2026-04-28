@@ -10,12 +10,13 @@
 
 #include "config.h"
 
-#include "dstm.h"
-#include "internal/globals.h"
-#include "internal/region.h"
-#include "internal/msg.h"
-#include <mpi.h>
 #include <stdlib.h>
+
+#include "dstm.h"
+
+#include "internal/globals.h"
+#include "internal/msg.h"
+#include "internal/region.h"
 
 const int dstm_version_major = DSTM_VERSION_MAJOR;
 const int dstm_version_minor = DSTM_VERSION_MINOR;
@@ -30,7 +31,7 @@ int dstm_errno = 0;
  * Should be in a user controlled struct, but a singleton will do for now.
  ******************************************************************************/
 
-dstm_context_t dstm_global_context = { 0, 0 , 0, NULL, NULL};
+dstm_context_t dstm_global_context = {0, 0, 0, NULL, NULL};
 
 /*******************************************************************************
  * Utils
@@ -53,7 +54,7 @@ int dstm_start(dstm_distance_t *dist)
 {
 	int err;
 
-	if (dstm_distance_size(dist) != (size_t )dstm_global_context.world_size)
+	if (dstm_distance_size(dist) != (size_t)dstm_global_context.world_size)
 		return -DSTM_EINVAL;
 
 	err = dstm_distance_create_copy(&dstm_global_context.distances, dist);
@@ -61,14 +62,20 @@ int dstm_start(dstm_distance_t *dist)
 		return err;
 
 	/* create a region locally, let's go for 1GB of memory available */
-	err = dstm_region_create(&dstm_global_context.region, DSTM_DEFAULT_REGION_SIZE);
+	err = dstm_region_create(&dstm_global_context.region,
+	                         DSTM_DEFAULT_REGION_SIZE);
 	if (err)
 		return err;
 	return 0;
 }
 
-int dstm_fini(void)
+int dstm_fini(dstm_time_t last_time)
 {
+	/* Run the distributed ring barrier to ensure all in-flight requests
+	 * across all ranks have completed before any rank tears down its
+	 * local region. */
+	dstm_barrier(last_time);
+
 	dstm_region_destroy(&dstm_global_context.region);
 	return 0;
 }

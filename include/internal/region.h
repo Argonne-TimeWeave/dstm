@@ -96,6 +96,13 @@ struct dstm_region_s {
 
 	dstm_time_t time;
 	dstm_region_ninfo_t *ninfos;
+
+	/* Set to last_time from the barrier token while a barrier is in
+	 * progress; -1 when no barrier is active.  Used by
+	 * dstm_region_status_update() to skip lower-ranked neighbors that
+	 * have already forwarded the token (and thus will not send any more
+	 * PUT/GET messages). */
+	dstm_time_t barrier_time;
 };
 
 /*******************************************************************************

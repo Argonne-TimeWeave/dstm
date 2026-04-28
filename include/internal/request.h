@@ -33,13 +33,43 @@ extern "C" {
 #define DSTM_REQUEST_TYPE_IN_GET 3
 #define DSTM_REQUEST_TYPE_OUT_PUT 4
 #define DSTM_REQUEST_TYPE_OUT_GET 5
-#define DSTM_REQUEST_TYPE_MAX 6
+#define DSTM_REQUEST_TYPE_BARRIER 6
+#define DSTM_REQUEST_TYPE_MAX 7
 
+/* Standard request status values (shared by all request types) */
 #define DSTM_REQUEST_STATUS_INIT 0
 #define DSTM_REQUEST_STATUS_ISEND 1
 #define DSTM_REQUEST_STATUS_IRECV 2
 #define DSTM_REQUEST_STATUS_DONE 3
-#define DSTM_REQUEST_STATUS_MAX 4
+
+/* Barrier-request DFA states (values >= 4, only used by BARRIER requests).
+ *
+ * Forward pass (all ranks):
+ *   BARRIER_DRAIN        - waiting until all OUT_PUT isends have completed
+ *   BARRIER_WAIT         - non-zero ranks: waiting for token from predecessor
+ *                          (rank 0 skips this state and goes straight to
+ *                          BARRIER_DRAINING after injecting the token)
+ *   BARRIER_DRAINING     - draining remaining requests now that predecessor
+ *                          is known to have finished; also sends the forward
+ *                          token once the queue is empty
+ *
+ * Return pass (all ranks):
+ *   BARRIER_FORWARDED    - forward token sent; rank 0 now waits for the ring
+ *                          to complete (token returns from rank N-1); non-zero
+ *                          ranks wait for the completion token
+ *   BARRIER_COMPLETE     - completion token received; non-zero ranks forward
+ *                          it to their successor then transition to DONE
+ *
+ * Terminal state (shared):
+ *   DONE (== 3)          - barrier finished; request is removed from the list
+ */
+#define DSTM_REQUEST_STATUS_BARRIER_DRAIN 4
+#define DSTM_REQUEST_STATUS_BARRIER_WAIT 5
+#define DSTM_REQUEST_STATUS_BARRIER_DRAINING 6
+#define DSTM_REQUEST_STATUS_BARRIER_FORWARDED 7
+#define DSTM_REQUEST_STATUS_BARRIER_COMPLETE 8
+
+#define DSTM_REQUEST_STATUS_MAX 9
 
 /*******************************************************************************
  * Request struct
@@ -74,6 +104,17 @@ typedef struct dstm_request_s dstm_request_t;
 /*******************************************************************************
  * Request API
  ******************************************************************************/
+
+/* Global pending request list.  All in-flight requests (LOCAL_PUT, LOCAL_GET,
+ * IN_PUT, IN_GET, OUT_PUT, OUT_GET) are kept on this list until they reach
+ * DONE status. */
+extern dstm_request_t *requests;
+
+/* Drive the progress loop one step: probe for incoming messages, update the
+ * region state machine, and advance all pending requests.
+ * @param time  The caller's current logical timestep (passed to the region
+ *              state machine to control clock advancement). */
+int dstm_do_progress(dstm_time_t time);
 
 int dstm_request_create(dstm_request_t **r,
                         int type,

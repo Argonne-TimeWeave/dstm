@@ -324,6 +324,7 @@ static int dstm_region_init_allocator(dstm_region_t *r)
 	/* Initialize metadata */
 	r->time = 0;
 	r->ninfos = NULL;
+	r->barrier_time = -1;
 
 	return DSTM_SUCCESS;
 }

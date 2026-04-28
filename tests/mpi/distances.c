@@ -14,12 +14,14 @@
 #include <stdlib.h>
 
 #include "dstm.h"
+
 #include "internal/distance.h"
 
 int main(int argc, char *argv[])
 {
 	MPI_Init(&argc, &argv);
 	dstm_init(&argc, &argv);
+	dstm_log_setlevel(DSTM_LOG_DEBUG);
 
 	int world_size, rank;
 	MPI_Comm_size(MPI_COMM_WORLD, &world_size);
@@ -50,7 +52,7 @@ int main(int argc, char *argv[])
 		rc = dstm_start(ring_dist);
 		assert(rc == DSTM_SUCCESS);
 
-		dstm_fini();
+		dstm_fini(0);
 		dstm_distance_destroy(&ring_dist);
 		assert(ring_dist == NULL);
 
@@ -87,7 +89,7 @@ int main(int argc, char *argv[])
 		rc = dstm_start(complete_dist);
 		assert(rc == DSTM_SUCCESS);
 
-		dstm_fini();
+		dstm_fini(0);
 		dstm_distance_destroy(&complete_dist);
 
 		if (rank == 0)
@@ -130,7 +132,7 @@ int main(int argc, char *argv[])
 		rc = dstm_start(star_dist);
 		assert(rc == DSTM_SUCCESS);
 
-		dstm_fini();
+		dstm_fini(0);
 		dstm_distance_destroy(&star_dist);
 
 		if (rank == 0)
@@ -159,7 +161,7 @@ int main(int argc, char *argv[])
 		rc = dstm_start(line_dist);
 		assert(rc == DSTM_SUCCESS);
 
-		dstm_fini();
+		dstm_fini(0);
 		dstm_distance_destroy(&line_dist);
 
 		if (rank == 0)

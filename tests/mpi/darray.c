@@ -325,7 +325,7 @@ int main(int argc, char *argv[])
 	test_get_null_dst();
 	test_get_positive_delta();
 
-	dstm_fini();
+	dstm_fini(0);
 	dstm_finalize();
 	MPI_Finalize();
 	return 0;

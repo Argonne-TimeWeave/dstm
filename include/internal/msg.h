@@ -32,7 +32,8 @@ extern "C" {
 #define DSTM_MSG_TYPE_GET_REQ 1
 #define DSTM_MSG_TYPE_GET_REP 2
 #define DSTM_MSG_TYPE_HEARTBEAT 3
-#define DSTM_MSG_TYPE_MAX 4
+#define DSTM_MSG_TYPE_BARRIER 4
+#define DSTM_MSG_TYPE_MAX 5
 
 struct dstm_msg_hdr_s {
 	int type;
@@ -55,6 +56,14 @@ struct dstm_msg_heartbeat_s {
 };
 typedef struct dstm_msg_heartbeat_s dstm_msg_heartbeat_t;
 
+/* Barrier token payload: carries the target logical time so that all ranks in
+ * the ring can verify consistency.  src_rank in the header identifies which
+ * rank forwarded this token. */
+struct dstm_msg_barrier_s {
+	dstm_time_t last_time;
+};
+typedef struct dstm_msg_barrier_s dstm_msg_barrier_t;
+
 struct dstm_msg_s {
 	/* required for asynchronous requests */
 	MPI_Request request;
@@ -65,6 +74,7 @@ struct dstm_msg_s {
 	union {
 		dstm_msg_putget_t putget;
 		dstm_msg_heartbeat_t heartbeat;
+		dstm_msg_barrier_t barrier;
 	} u;
 	/* data buffer, if needed */
 	void *data;
@@ -88,6 +98,7 @@ int dstm_msg_fill_hdr(dstm_msg_t *msg,
                       int src_rank);
 
 int dstm_msg_fill_heartbeat(dstm_msg_t *msg, int status);
+int dstm_msg_fill_barrier(dstm_msg_t *msg, dstm_time_t last_time);
 
 /* Fill the putget body and set a non-owning data pointer.
  *
