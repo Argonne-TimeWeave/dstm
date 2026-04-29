@@ -1,7 +1,7 @@
 bin_PROGRAMS = 
 check_PROGRAMS = 
 TESTS = 
-SUBDIRS = 
+SUBDIRS = .
 BUILT_SOURCES = 
 EXTRA_DIST = 
 CLEANFILES = 
@@ -49,8 +49,10 @@ noinst_include_internal_HEADERS = \
 				  include/internal/globals.h \
 				  include/internal/msg.h \
 				  include/internal/region.h \
+				  include/internal/request.h \
 				  include/internal/uthash.h \
-				  include/internal/utlist.h
+				  include/internal/utlist.h \
+				  include/internal/utils.h
 ###############################################################################
 # Library
 ###############################################################################
@@ -58,6 +60,7 @@ noinst_include_internal_HEADERS = \
 lib_LTLIBRARIES = libdstm.la
 
 libdstm_la_SOURCES = \
+		    src/barrier.c \
 		    src/darray.c \
 		    src/distance.c \
 		    src/dstm.c \
@@ -65,7 +68,8 @@ libdstm_la_SOURCES = \
 		    src/log.c \
 		    src/ops.c \
 		    src/msg.c \
-		    src/region.c
+		    src/region.c \
+		    src/request.c
 
 libdstm_la_LIBADD = $(LTLIBOBJS)
 
@@ -90,7 +94,7 @@ AM_CFLAGS += $(CHECK_CFLAGS)
 AM_LDFLAGS += $(CHECK_LIBS)
 LDADD = libdstm.la
 
-VALGRIND_SUPPRESSIONS_FILES = $(top_srcdir)/.valgrind.supp
+#VALGRIND_SUPPRESSIONS_FILES = $(top_srcdir)/.valgrind.supp
 
 # valgrind support
 @VALGRIND_CHECK_RULES@

@@ -17,6 +17,7 @@
 #include "dstm.h"
 
 #include "internal/distance.h"
+#include "internal/utils.h"
 
 /*******************************************************************************
  * Helper Functions
@@ -36,11 +37,11 @@ static void compute_shortest_paths(int *distances, size_t size)
 			for (size_t j = 0; j < size; j++) {
 				int ik = distances[i * size + k];
 				int kj = distances[k * size + j];
-				if (ik != INT_MAX && kj != INT_MAX) {
-					int via_k = ik + kj;
-					if (via_k < distances[i * size + j])
-						distances[i * size + j] = via_k;
-				}
+				if (ik == INT_MAX || kj == INT_MAX)
+					continue;
+				int via_k = ik + kj;
+				if (via_k < distances[i * size + j])
+					distances[i * size + j] = via_k;
 			}
 }
 
@@ -57,6 +58,51 @@ static void init_distance_matrix(int *distances, size_t size)
 		distances[i] = INT_MAX;
 	for (size_t i = 0; i < size; i++)
 		distances[i * size + i] = 0;
+}
+
+/**
+ * Allocate and initialise a dstm_distance_t with a zeroed distance matrix.
+ *
+ * Validates parameters, allocates the structure and its distance array, and
+ * stores the result in *ret.  On failure, sets dstm_errno and returns a
+ * negative error code.
+ *
+ * @param[out] ret       pointer to distance structure pointer (must be non-NULL)
+ * @param[in]  size      number of nodes
+ * @param[in]  min_size  minimum acceptable size (topology-dependent)
+ * @return DSTM_SUCCESS on success, negative error code on failure
+ */
+static int dstm_distance_alloc(dstm_distance_t **ret, size_t size,
+                               size_t min_size)
+{
+	dstm_distance_t *dist;
+
+	if (ret == NULL)
+		goto err_inval;
+
+	if (size < min_size || size > DSTM_DISTANCE_MAX_SIZE)
+		goto err_inval;
+
+	dist = malloc(sizeof(*dist));
+	if (dist == NULL)
+		goto err_nomem;
+
+	dist->distances = calloc(size * size, sizeof(int));
+	if (dist->distances == NULL)
+		goto err_free_dist;
+
+	dist->size = size;
+	*ret = dist;
+	return DSTM_SUCCESS;
+
+err_free_dist:
+	free(dist);
+err_nomem:
+	dstm_errno = DSTM_ENOMEM;
+	return -DSTM_ENOMEM;
+err_inval:
+	dstm_errno = DSTM_EINVAL;
+	return -DSTM_EINVAL;
 }
 
 /*******************************************************************************
@@ -90,30 +136,11 @@ static void init_distance_matrix(int *distances, size_t size)
  */
 int dstm_distance_create_ring(dstm_distance_t **ret, size_t size)
 {
-	if (ret == NULL) {
-		dstm_errno = DSTM_EINVAL;
-		return -DSTM_EINVAL;
-	}
+	int err = dstm_distance_alloc(ret, size, 3);
+	if (err)
+		return err;
 
-	if (size < 3 || size > DSTM_DISTANCE_MAX_SIZE) {
-		dstm_errno = DSTM_EINVAL;
-		return -DSTM_EINVAL;
-	}
-
-	dstm_distance_t *dist = malloc(sizeof(*dist));
-	if (dist == NULL) {
-		dstm_errno = DSTM_ENOMEM;
-		return -DSTM_ENOMEM;
-	}
-
-	dist->distances = calloc(size * size, sizeof(int));
-	if (dist->distances == NULL) {
-		free(dist);
-		dstm_errno = DSTM_ENOMEM;
-		return -DSTM_ENOMEM;
-	}
-
-	dist->size = size;
+	dstm_distance_t *dist = *ret;
 	init_distance_matrix(dist->distances, size);
 
 	/* Set ring edges (bidirectional) */
@@ -125,8 +152,6 @@ int dstm_distance_create_ring(dstm_distance_t **ret, size_t size)
 	}
 
 	compute_shortest_paths(dist->distances, size);
-
-	*ret = dist;
 	return DSTM_SUCCESS;
 }
 
@@ -160,37 +185,17 @@ int dstm_distance_create_ring(dstm_distance_t **ret, size_t size)
  */
 int dstm_distance_create_complete(dstm_distance_t **ret, size_t size)
 {
-	if (ret == NULL) {
-		dstm_errno = DSTM_EINVAL;
-		return -DSTM_EINVAL;
-	}
+	int err = dstm_distance_alloc(ret, size, 1);
+	if (err)
+		return err;
 
-	if (size < 1 || size > DSTM_DISTANCE_MAX_SIZE) {
-		dstm_errno = DSTM_EINVAL;
-		return -DSTM_EINVAL;
-	}
-
-	dstm_distance_t *dist = malloc(sizeof(*dist));
-	if (dist == NULL) {
-		dstm_errno = DSTM_ENOMEM;
-		return -DSTM_ENOMEM;
-	}
-
-	dist->distances = calloc(size * size, sizeof(int));
-	if (dist->distances == NULL) {
-		free(dist);
-		dstm_errno = DSTM_ENOMEM;
-		return -DSTM_ENOMEM;
-	}
-
-	dist->size = size;
+	dstm_distance_t *dist = *ret;
 
 	/* In a complete graph, all nodes are directly connected */
 	for (size_t i = 0; i < size; i++)
 		for (size_t j = 0; j < size; j++)
 			dist->distances[i * size + j] = (i == j) ? 0 : 1;
 
-	*ret = dist;
 	return DSTM_SUCCESS;
 }
 
@@ -224,30 +229,11 @@ int dstm_distance_create_complete(dstm_distance_t **ret, size_t size)
  */
 int dstm_distance_create_star(dstm_distance_t **ret, size_t size)
 {
-	if (ret == NULL) {
-		dstm_errno = DSTM_EINVAL;
-		return -DSTM_EINVAL;
-	}
+	int err = dstm_distance_alloc(ret, size, 2);
+	if (err)
+		return err;
 
-	if (size < 2 || size > DSTM_DISTANCE_MAX_SIZE) {
-		dstm_errno = DSTM_EINVAL;
-		return -DSTM_EINVAL;
-	}
-
-	dstm_distance_t *dist = malloc(sizeof(*dist));
-	if (dist == NULL) {
-		dstm_errno = DSTM_ENOMEM;
-		return -DSTM_ENOMEM;
-	}
-
-	dist->distances = calloc(size * size, sizeof(int));
-	if (dist->distances == NULL) {
-		free(dist);
-		dstm_errno = DSTM_ENOMEM;
-		return -DSTM_ENOMEM;
-	}
-
-	dist->size = size;
+	dstm_distance_t *dist = *ret;
 	init_distance_matrix(dist->distances, size);
 
 	/* Set edges: center (node 0) to all others */
@@ -257,8 +243,6 @@ int dstm_distance_create_star(dstm_distance_t **ret, size_t size)
 	}
 
 	compute_shortest_paths(dist->distances, size);
-
-	*ret = dist;
 	return DSTM_SUCCESS;
 }
 
@@ -288,30 +272,11 @@ int dstm_distance_create_star(dstm_distance_t **ret, size_t size)
  */
 int dstm_distance_create_line(dstm_distance_t **ret, size_t size)
 {
-	if (ret == NULL) {
-		dstm_errno = DSTM_EINVAL;
-		return -DSTM_EINVAL;
-	}
+	int err = dstm_distance_alloc(ret, size, 1);
+	if (err)
+		return err;
 
-	if (size < 1 || size > DSTM_DISTANCE_MAX_SIZE) {
-		dstm_errno = DSTM_EINVAL;
-		return -DSTM_EINVAL;
-	}
-
-	dstm_distance_t *dist = malloc(sizeof(*dist));
-	if (dist == NULL) {
-		dstm_errno = DSTM_ENOMEM;
-		return -DSTM_ENOMEM;
-	}
-
-	dist->distances = calloc(size * size, sizeof(int));
-	if (dist->distances == NULL) {
-		free(dist);
-		dstm_errno = DSTM_ENOMEM;
-		return -DSTM_ENOMEM;
-	}
-
-	dist->size = size;
+	dstm_distance_t *dist = *ret;
 
 	/* For a line topology, distance is simply |i - j| */
 	for (size_t i = 0; i < size; i++)
@@ -320,7 +285,6 @@ int dstm_distance_create_line(dstm_distance_t **ret, size_t size)
 			dist->distances[i * size + j] = diff < 0 ? -diff : diff;
 		}
 
-	*ret = dist;
 	return DSTM_SUCCESS;
 }
 
@@ -332,9 +296,9 @@ int dstm_distance_create_line(dstm_distance_t **ret, size_t size)
  * fewer connections. The distance is the Manhattan distance on the grid.
  *
  * Grid dimensions are automatically computed to be as square as possible.
- * For example, 12 nodes creates a 3×4 grid, 16 nodes creates a 4×4 grid.
+ * For example, 12 nodes creates a 3x4 grid, 16 nodes creates a 4x4 grid.
  *
- * Example for 12 nodes (3×4 grid):
+ * Example for 12 nodes (3x4 grid):
  *   0 -- 1 -- 2 -- 3
  *   |    |    |    |
  *   4 -- 5 -- 6 -- 7
@@ -352,30 +316,11 @@ int dstm_distance_create_line(dstm_distance_t **ret, size_t size)
  */
 int dstm_distance_create_mesh(dstm_distance_t **ret, size_t size)
 {
-	if (ret == NULL) {
-		dstm_errno = DSTM_EINVAL;
-		return -DSTM_EINVAL;
-	}
+	int err = dstm_distance_alloc(ret, size, 1);
+	if (err)
+		return err;
 
-	if (size < 1 || size > DSTM_DISTANCE_MAX_SIZE) {
-		dstm_errno = DSTM_EINVAL;
-		return -DSTM_EINVAL;
-	}
-
-	dstm_distance_t *dist = malloc(sizeof(*dist));
-	if (dist == NULL) {
-		dstm_errno = DSTM_ENOMEM;
-		return -DSTM_ENOMEM;
-	}
-
-	dist->distances = calloc(size * size, sizeof(int));
-	if (dist->distances == NULL) {
-		free(dist);
-		dstm_errno = DSTM_ENOMEM;
-		return -DSTM_ENOMEM;
-	}
-
-	dist->size = size;
+	dstm_distance_t *dist = *ret;
 
 	/* Compute grid dimensions (as square as possible) */
 	size_t cols = size;
@@ -399,7 +344,6 @@ int dstm_distance_create_mesh(dstm_distance_t **ret, size_t size)
 		}
 	}
 
-	*ret = dist;
 	return DSTM_SUCCESS;
 }
 
@@ -413,7 +357,7 @@ int dstm_distance_create_mesh(dstm_distance_t **ret, size_t size)
  * Grid dimensions are automatically computed to be as square as possible.
  * The distance is the shortest Manhattan distance considering wraparound.
  *
- * Example for 12 nodes (3×4 torus):
+ * Example for 12 nodes (3x4 torus):
  *   The grid wraps: leftmost column connects to rightmost,
  *   top row connects to bottom row.
  *
@@ -426,30 +370,11 @@ int dstm_distance_create_mesh(dstm_distance_t **ret, size_t size)
  */
 int dstm_distance_create_torus(dstm_distance_t **ret, size_t size)
 {
-	if (ret == NULL) {
-		dstm_errno = DSTM_EINVAL;
-		return -DSTM_EINVAL;
-	}
+	int err = dstm_distance_alloc(ret, size, 4);
+	if (err)
+		return err;
 
-	if (size < 4 || size > DSTM_DISTANCE_MAX_SIZE) {
-		dstm_errno = DSTM_EINVAL;
-		return -DSTM_EINVAL;
-	}
-
-	dstm_distance_t *dist = malloc(sizeof(*dist));
-	if (dist == NULL) {
-		dstm_errno = DSTM_ENOMEM;
-		return -DSTM_ENOMEM;
-	}
-
-	dist->distances = calloc(size * size, sizeof(int));
-	if (dist->distances == NULL) {
-		free(dist);
-		dstm_errno = DSTM_ENOMEM;
-		return -DSTM_ENOMEM;
-	}
-
-	dist->size = size;
+	dstm_distance_t *dist = *ret;
 
 	/* Compute grid dimensions (as square as possible) */
 	size_t rows = 1, cols = size;
@@ -488,8 +413,53 @@ int dstm_distance_create_torus(dstm_distance_t **ret, size_t size)
 		}
 	}
 
-	*ret = dist;
 	return DSTM_SUCCESS;
+}
+
+/**
+ * Compute the tree distance between two nodes in a binary tree.
+ *
+ * The distance is the path length through the lowest common ancestor (LCA).
+ * Node i has children at (2*i + 1) and (2*i + 2), parent at (i-1)/2.
+ *
+ * @param i: first node index
+ * @param j: second node index
+ * @return distance between nodes i and j
+ */
+static int tree_distance(size_t i, size_t j)
+{
+	if (i == j)
+		return 0;
+
+	/* Build path from i to root */
+	size_t path_i[64];
+	size_t len_i = 0;
+	size_t node = i;
+	while (len_i < 64) {
+		path_i[len_i++] = node;
+		if (node == 0)
+			break;
+		node = (node - 1) / 2;
+	}
+
+	/* Build path from j to root */
+	size_t path_j[64];
+	size_t len_j = 0;
+	node = j;
+	while (len_j < 64) {
+		path_j[len_j++] = node;
+		if (node == 0)
+			break;
+		node = (node - 1) / 2;
+	}
+
+	/* Find LCA (first common node) */
+	for (size_t pi = 0; pi < len_i; pi++)
+		for (size_t pj = 0; pj < len_j; pj++)
+			if (path_i[pi] == path_j[pj])
+				return (int)pi + (int)pj;
+
+	return 0;
 }
 
 /**
@@ -516,81 +486,16 @@ int dstm_distance_create_torus(dstm_distance_t **ret, size_t size)
  */
 int dstm_distance_create_tree(dstm_distance_t **ret, size_t size)
 {
-	if (ret == NULL) {
-		dstm_errno = DSTM_EINVAL;
-		return -DSTM_EINVAL;
-	}
+	int err = dstm_distance_alloc(ret, size, 1);
+	if (err)
+		return err;
 
-	if (size < 1 || size > DSTM_DISTANCE_MAX_SIZE) {
-		dstm_errno = DSTM_EINVAL;
-		return -DSTM_EINVAL;
-	}
+	dstm_distance_t *dist = *ret;
 
-	dstm_distance_t *dist = malloc(sizeof(*dist));
-	if (dist == NULL) {
-		dstm_errno = DSTM_ENOMEM;
-		return -DSTM_ENOMEM;
-	}
+	for (size_t i = 0; i < size; i++)
+		for (size_t j = 0; j < size; j++)
+			dist->distances[i * size + j] = tree_distance(i, j);
 
-	dist->distances = calloc(size * size, sizeof(int));
-	if (dist->distances == NULL) {
-		free(dist);
-		dstm_errno = DSTM_ENOMEM;
-		return -DSTM_ENOMEM;
-	}
-
-	dist->size = size;
-
-	/* Compute tree distances */
-	for (size_t i = 0; i < size; i++) {
-		for (size_t j = 0; j < size; j++) {
-			if (i == j) {
-				dist->distances[i * size + j] = 0;
-				continue;
-			}
-
-			/* Find path from i to j through tree */
-			/* Get ancestors of both nodes */
-			size_t path_i[64], path_j[64];
-			size_t len_i = 0, len_j = 0;
-			size_t node_i = i, node_j = j;
-
-			/* Build path from i to root */
-			while (node_i < size && len_i < 64) {
-				path_i[len_i++] = node_i;
-				if (node_i == 0)
-					break;
-				node_i = (node_i - 1) / 2;
-			}
-
-			/* Build path from j to root */
-			while (node_j < size && len_j < 64) {
-				path_j[len_j++] = node_j;
-				if (node_j == 0)
-					break;
-				node_j = (node_j - 1) / 2;
-			}
-
-			/* Find LCA (first common node) */
-			int distance = 0;
-			int found_lca = 0;
-			for (size_t pi = 0; pi < len_i; pi++) {
-				for (size_t pj = 0; pj < len_j; pj++) {
-					if (path_i[pi] == path_j[pj]) {
-						distance = (int)pi + (int)pj;
-						found_lca = 1;
-						break;
-					}
-				}
-				if (found_lca)
-					break;
-			}
-
-			dist->distances[i * size + j] = distance;
-		}
-	}
-
-	*ret = dist;
 	return DSTM_SUCCESS;
 }
 
@@ -616,37 +521,16 @@ int dstm_distance_create_tree(dstm_distance_t **ret, size_t size)
  */
 int dstm_distance_create_hypercube(dstm_distance_t **ret, size_t size)
 {
-	if (ret == NULL) {
+	if (ret == NULL || (size & (size - 1)) != 0) {
 		dstm_errno = DSTM_EINVAL;
 		return -DSTM_EINVAL;
 	}
 
-	/* Check if size is a power of 2 and within bounds */
-	if (size < 2 || size > DSTM_DISTANCE_MAX_SIZE) {
-		dstm_errno = DSTM_EINVAL;
-		return -DSTM_EINVAL;
-	}
+	int err = dstm_distance_alloc(ret, size, 2);
+	if (err)
+		return err;
 
-	/* Verify size is power of 2 */
-	if ((size & (size - 1)) != 0) {
-		dstm_errno = DSTM_EINVAL;
-		return -DSTM_EINVAL;
-	}
-
-	dstm_distance_t *dist = malloc(sizeof(*dist));
-	if (dist == NULL) {
-		dstm_errno = DSTM_ENOMEM;
-		return -DSTM_ENOMEM;
-	}
-
-	dist->distances = calloc(size * size, sizeof(int));
-	if (dist->distances == NULL) {
-		free(dist);
-		dstm_errno = DSTM_ENOMEM;
-		return -DSTM_ENOMEM;
-	}
-
-	dist->size = size;
+	dstm_distance_t *dist = *ret;
 
 	/* Compute Hamming distances */
 	for (size_t i = 0; i < size; i++) {
@@ -662,7 +546,6 @@ int dstm_distance_create_hypercube(dstm_distance_t **ret, size_t size)
 		}
 	}
 
-	*ret = dist;
 	return DSTM_SUCCESS;
 }
 
@@ -691,30 +574,11 @@ int dstm_distance_create_hypercube(dstm_distance_t **ret, size_t size)
  */
 int dstm_distance_create_dragonfly(dstm_distance_t **ret, size_t size)
 {
-	if (ret == NULL) {
-		dstm_errno = DSTM_EINVAL;
-		return -DSTM_EINVAL;
-	}
+	int err = dstm_distance_alloc(ret, size, 4);
+	if (err)
+		return err;
 
-	if (size < 4 || size > DSTM_DISTANCE_MAX_SIZE) {
-		dstm_errno = DSTM_EINVAL;
-		return -DSTM_EINVAL;
-	}
-
-	dstm_distance_t *dist = malloc(sizeof(*dist));
-	if (dist == NULL) {
-		dstm_errno = DSTM_ENOMEM;
-		return -DSTM_ENOMEM;
-	}
-
-	dist->distances = calloc(size * size, sizeof(int));
-	if (dist->distances == NULL) {
-		free(dist);
-		dstm_errno = DSTM_ENOMEM;
-		return -DSTM_ENOMEM;
-	}
-
-	dist->size = size;
+	dstm_distance_t *dist = *ret;
 
 	/* Determine number of groups (aim for sqrt(size) nodes per group) */
 	size_t group_size = 1;
@@ -747,7 +611,6 @@ int dstm_distance_create_dragonfly(dstm_distance_t **ret, size_t size)
 		}
 	}
 
-	*ret = dist;
 	return DSTM_SUCCESS;
 }
 
@@ -771,9 +634,7 @@ void dstm_distance_destroy(dstm_distance_t **dist)
 	if (dist == NULL || *dist == NULL)
 		return;
 
-	if ((*dist)->distances != NULL)
-		free((*dist)->distances);
-
+	free((*dist)->distances);
 	free(*dist);
 	*dist = NULL;
 }
@@ -790,9 +651,8 @@ int dstm_distance_create_copy(dstm_distance_t **dst, dstm_distance_t *src)
 
 	size_t size = src->size;
 	dstm_distance_t *dist = malloc(sizeof(*dist));
-	if (dist == NULL) {
+	if (dist == NULL)
 		return -DSTM_ENOMEM;
-	}
 
 	dist->distances = calloc(size * size, sizeof(int));
 	if (dist->distances == NULL) {
@@ -801,7 +661,6 @@ int dstm_distance_create_copy(dstm_distance_t **dst, dstm_distance_t *src)
 	}
 
 	dist->size = size;
-
 	memcpy(dist->distances, src->distances,
 	       dist->size * dist->size * sizeof(int));
 	*dst = dist;
@@ -829,32 +688,22 @@ int dstm_distance_snprintf(char *buf, size_t n, dstm_distance_t *d)
 
 	int total = snprintf(buf, n, "{ size: %zu", d->size);
 
-#define ADVANCE(written)                                                       \
-	do {                                                                   \
-		int _w = (written);                                            \
-		buf += (_w < (int)n ? _w : (int)n - 1);                        \
-		n = (_w < (int)n ? n - (size_t)_w : 1);                        \
-		total += _w;                                                   \
-	} while (0)
-
-	ADVANCE(total);
+	DSTM_SNPRINTF_ADVANCE(buf, n, total, total);
 
 	/* Print the first row of the distance matrix as a representative
-	 * sample.  Printing the full N×N matrix would overflow any fixed-size
+	 * sample.  Printing the full NxN matrix would overflow any fixed-size
 	 * buffer for non-trivial process counts. */
 	if (d->distances != NULL && d->size > 0) {
 		int w = snprintf(buf, n, ", row[0]:");
-		ADVANCE(w);
+		DSTM_SNPRINTF_ADVANCE(buf, n, total, w);
 		for (size_t j = 0; j < d->size; j++) {
 			w = snprintf(buf, n, " %d", d->distances[j]);
-			ADVANCE(w);
+			DSTM_SNPRINTF_ADVANCE(buf, n, total, w);
 		}
 	}
 
 	int w = snprintf(buf, n, "}");
 	total += w;
-
-#undef ADVANCE
 
 	return total;
 }

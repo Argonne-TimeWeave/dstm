@@ -313,10 +313,8 @@ static int dstm_region_init_allocator(dstm_region_t *r)
 	size_t num_blocks = r->size / DSTM_REGION_MIN_BLOCK_SIZE;
 	r->bitmap_size = (num_blocks + 7) / 8;
 	r->bitmap = calloc(r->bitmap_size, 1);
-	if (r->bitmap == NULL) {
-		free(r->free_lists);
-		return -DSTM_ENOMEM;
-	}
+	if (r->bitmap == NULL)
+		goto err_free_lists;
 
 	/* Initialize with entire region as one large free block */
 	dstm_region_add_to_free_list(r, r->buffer, r->max_order);
@@ -329,6 +327,11 @@ static int dstm_region_init_allocator(dstm_region_t *r)
 	r->barrier_all_drained = 0;
 
 	return DSTM_SUCCESS;
+
+err_free_lists:
+	free(r->free_lists);
+	r->free_lists = NULL;
+	return -DSTM_ENOMEM;
 }
 
 int dstm_region_create(dstm_region_t **region, size_t size)
@@ -345,23 +348,24 @@ int dstm_region_create(dstm_region_t **region, size_t size)
 
 	/* Allocate buffer */
 	r->buffer = malloc(r->size);
-	if (r->buffer == NULL) {
-		free(r);
-		return -DSTM_ENOMEM;
-	}
+	if (r->buffer == NULL)
+		goto err_free_region;
 
 	r->owns_buffer = 1;
 
 	/* Initialize buddy allocator */
 	int err = dstm_region_init_allocator(r);
-	if (err != DSTM_SUCCESS) {
-		free(r->buffer);
-		free(r);
-		return err;
-	}
+	if (err != DSTM_SUCCESS)
+		goto err_free_buffer;
 
 	*region = r;
 	return DSTM_SUCCESS;
+
+err_free_buffer:
+	free(r->buffer);
+err_free_region:
+	free(r);
+	return -DSTM_ENOMEM;
 }
 
 int dstm_region_create_with_buffer(dstm_region_t **region,
@@ -385,13 +389,15 @@ int dstm_region_create_with_buffer(dstm_region_t **region,
 
 	/* Initialize buddy allocator */
 	int err = dstm_region_init_allocator(r);
-	if (err != DSTM_SUCCESS) {
-		free(r);
-		return err;
-	}
+	if (err != DSTM_SUCCESS)
+		goto err_free_region;
 
 	*region = r;
 	return DSTM_SUCCESS;
+
+err_free_region:
+	free(r);
+	return err;
 }
 
 void dstm_region_destroy(dstm_region_t **region)

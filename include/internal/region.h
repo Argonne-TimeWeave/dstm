@@ -21,6 +21,8 @@ extern "C" {
 
 #include <stdint.h>
 
+#include "dstm.h"
+
 #include "internal/uthash.h"
 #include "internal/utlist.h"
 
@@ -198,10 +200,10 @@ void dstm_region_version_destroy(dstm_region_t *region,
  * of bytes that would have been written had n been large enough (not counting
  * the NUL).  Use the accompanying SIZE macro to allocate a buffer that is
  * always sufficient.
+ *
+ * DSTM_PTR_SNPRINTF_SIZE, DSTM_REGION_SNPRINTF_SIZE, dstm_ptr_snprintf,
+ * and dstm_region_snprintf are declared in the public header (dstm.h).
  ******************************************************************************/
-
-#define DSTM_PTR_SNPRINTF_SIZE 64
-int dstm_ptr_snprintf(char *buf, size_t n, dstm_ptr_t p);
 
 #define DSTM_REGION_NINFO_SNPRINTF_SIZE 96
 int dstm_region_ninfo_snprintf(char *buf, size_t n, dstm_region_ninfo_t *ni);
@@ -209,9 +211,6 @@ int dstm_region_ninfo_snprintf(char *buf, size_t n, dstm_region_ninfo_t *ni);
 #define DSTM_REGION_VERSION_SNPRINTF_SIZE 128
 int dstm_region_version_snprintf(char *buf, size_t n,
                                  dstm_region_version_t *v);
-
-#define DSTM_REGION_SNPRINTF_SIZE 128
-int dstm_region_snprintf(char *buf, size_t n, dstm_region_t *r);
 
 /* Emit a log message at the given level with label: <formatted value>.
  * The buffer is allocated on the stack and the level is checked before any

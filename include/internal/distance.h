@@ -11,6 +11,10 @@
 #ifndef DSTM_INTERNAL_DISTANCE_H
 #define DSTM_INTERNAL_DISTANCE_H 1
 
+#include <stddef.h>
+
+#include "dstm.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif

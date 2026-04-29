@@ -15,6 +15,12 @@
 #ifndef DSTM_INTERNAL_MSG_H
 #define DSTM_INTERNAL_MSG_H 1
 
+#include <stddef.h>
+
+#include <mpi.h>
+
+#include "dstm.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif

@@ -101,6 +101,12 @@ void dstm_log_printf(int level,
 
 int dstm_log_setlevel(int level);
 
+/**
+ * Current log level.  Checked by logging macros before formatting
+ * to avoid unnecessary work at suppressed levels.
+ */
+extern int dstm_log_level;
+
 #define dstm_log_error(...)                                                    \
 	dstm_log_printf(DSTM_LOG_ERROR, __FILE__, __func__, __LINE__,          \
 	                __VA_ARGS__)
@@ -351,28 +357,6 @@ dstm_region_t *dstm_get_local_region(void);
 
 int dstm_ptr_snprintf(char *buf, size_t n, dstm_ptr_t p);
 int dstm_region_snprintf(char *buf, size_t n, dstm_region_t *r);
-
-/* Level-parameterised logging helpers.  The level check is performed before
- * any formatting work so suppressed messages have near-zero overhead. */
-#define dstm_log_ptr(level, label, ptr)                                        \
-	do {                                                                   \
-		if ((level) <= dstm_log_level) {                               \
-			char __buf[DSTM_PTR_SNPRINTF_SIZE];                    \
-			dstm_ptr_snprintf(__buf, sizeof(__buf), (ptr));        \
-			dstm_log_printf((level), __FILE__, __func__, __LINE__, \
-			                "%s: %s\n", (label), __buf);           \
-		}                                                              \
-	} while (0)
-
-#define dstm_log_region(level, label, r)                                       \
-	do {                                                                   \
-		if ((level) <= dstm_log_level) {                               \
-			char __buf[DSTM_REGION_SNPRINTF_SIZE];                 \
-			dstm_region_snprintf(__buf, sizeof(__buf), (r));       \
-			dstm_log_printf((level), __FILE__, __func__, __LINE__, \
-			                "%s: %s\n", (label), __buf);           \
-		}                                                              \
-	} while (0)
 
 /*******************************************************************************
  * DSTM BASIC OPERATIONS

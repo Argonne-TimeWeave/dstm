@@ -15,11 +15,15 @@
 #ifndef DSTM_INTERNAL_GLOBALS_H
 #define DSTM_INTERNAL_GLOBALS_H 1
 
+#include <stdio.h>
+
+#include <mpi.h>
+
+#include "dstm.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
-
-#include <mpi.h>
 
 struct dstm_context_s {
 	MPI_Comm comm;

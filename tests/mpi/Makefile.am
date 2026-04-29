@@ -10,7 +10,7 @@ LDADD = $(top_builddir)/libdstm.la
 
 AM_COLOR_TESTS = yes
 
-VALGRIND_SUPPRESSIONS_FILES = $(top_srcdir)/.valgrind.supp
+#VALGRIND_SUPPRESSIONS_FILES = $(top_srcdir)/.valgrind.supp
 
 # valgrind support
 @VALGRIND_CHECK_RULES@

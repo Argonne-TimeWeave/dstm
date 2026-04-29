@@ -2,8 +2,8 @@
  * Copyright 2025 UChicago Argonne, LLC.
  * (c.f. AUTHORS, LICENSE)
  *
- * This file is part of the libdstm project.
- * For more info, see https://github.com/anlsys/libdstm
+ * This file is part of the dstm project.
+ * For more info, see https://github.com/anlsys/dstm
  *
  * SPDX-License-Identifier: BSD-3-Clause
  *******************************************************************************/

@@ -19,6 +19,8 @@
 extern "C" {
 #endif
 
+#include "dstm.h"
+
 #include "internal/msg.h"
 
 /*******************************************************************************
@@ -125,6 +127,10 @@ extern dstm_request_t *requests;
  *              state machine to control clock advancement). */
 int dstm_do_progress(dstm_time_t time);
 
+int dstm_request_new_tag(void);
+
+int dstm_request_cmp_departure(dstm_request_t *a, dstm_request_t *b);
+
 int dstm_request_create(dstm_request_t **r,
                         int type,
                         int tag,
@@ -140,6 +146,8 @@ int dstm_request_destroy(dstm_request_t **r);
 int dstm_request_isdone(dstm_request_t *req);
 
 int dstm_request_progress(dstm_request_t *req);
+
+int dstm_request_progress_barrier(dstm_request_t *req);
 
 #define DSTM_REQUEST_SNPRINTF_SIZE 576
 int dstm_request_snprintf(char *buf, size_t n, dstm_request_t *req);

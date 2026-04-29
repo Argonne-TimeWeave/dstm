@@ -22,88 +22,6 @@
 #include "internal/request.h"
 #include "internal/utlist.h"
 
-dstm_request_t *requests = NULL;
-
-/* sort by r->time + r->delta */
-int dstm_request_cmp_arrival(dstm_request_t *a, dstm_request_t *b)
-{
-	dstm_time_t ta, tb;
-	ta = a->time + a->delta;
-	tb = b->time + b->delta;
-	return ta - tb;
-}
-
-/* sort by r->time and then by r->delta */
-int dstm_request_cmp_departure(dstm_request_t *a, dstm_request_t *b)
-{
-	dstm_time_t ta;
-	ta = a->time - b->time;
-	if (ta)
-		return ta;
-
-	return a->delta - b->delta;
-}
-
-/*******************************************************************************
- * Basic request management
- ******************************************************************************/
-
-static int dstm_request_tag_count = 1;
-
-int dstm_request_new_tag(void)
-{
-	int ret = -1;
-	int tag_range = dstm_global_context.world_size * 1000;
-	ret = tag_range * dstm_global_context.rank + dstm_request_tag_count;
-	dstm_request_tag_count++;
-	return ret;
-}
-
-int dstm_request_create(dstm_request_t **r,
-                        int type,
-                        int tag,
-                        dstm_time_t time,
-                        dstm_time_t delta,
-                        int rank,
-                        dstm_ptr_t dst,
-                        dstm_ptr_t src,
-                        size_t size)
-{
-	assert(type < DSTM_REQUEST_TYPE_MAX);
-	assert(r != NULL);
-
-	dstm_request_t *req = calloc(1, sizeof(dstm_request_t));
-	if (req == NULL)
-		return -DSTM_ENOMEM;
-
-	req->type = type;
-	req->tag = tag;
-	req->status = DSTM_REQUEST_STATUS_INIT;
-	req->time = time;
-	req->delta = delta;
-	req->rank = rank;
-	req->dst = dst;
-	req->src = src;
-	req->size = size;
-	req->buf = NULL;
-	*r = req;
-	return 0;
-}
-
-int dstm_request_destroy(dstm_request_t **r)
-{
-	if (r == NULL || *r == NULL)
-		return 0;
-	dstm_log_request(DSTM_LOG_DEBUG, "destroy", *r);
-	/* free the owned payload buffer, if any */
-	free((*r)->buf);
-	/* free any MPI pack buffer that is still outstanding */
-	free((*r)->msg.packbuf);
-	free(*r);
-	*r = NULL;
-	return 0;
-}
-
 /*******************************************************************************
  * Versioning logic: multi-version edition.
  *
@@ -116,7 +34,7 @@ int dstm_request_destroy(dstm_request_t **r)
  * for that timestamp (distance-based check).
  ******************************************************************************/
 
-int dstm_region_send_heartbeat_to_all(dstm_time_t time, int status)
+static int dstm_region_send_heartbeat_to_all(dstm_time_t time, int status)
 {
 	for (int i = 0; i < dstm_global_context.world_size; i++) {
 		int dist = dstm_distance_get(dstm_global_context.distances,
@@ -242,7 +160,7 @@ static int dstm_version_can_become_discardable(dstm_region_version_t *v)
 	return 1;
 }
 
-int dstm_region_status_update(dstm_time_t time)
+static int dstm_region_status_update(dstm_time_t time)
 {
 	dstm_region_t *region = dstm_global_context.region;
 	dstm_region_version_t *v, *vtmp;
@@ -287,20 +205,10 @@ int dstm_region_status_update(dstm_time_t time)
 }
 
 /*******************************************************************************
- * Request Mechanics
+ * Request progress functions
  ******************************************************************************/
 
-int dstm_request_isdone(dstm_request_t *req)
-{
-	return req->status == DSTM_REQUEST_STATUS_DONE;
-}
-
-typedef struct dstm_request_progress_s {
-	int type;
-	int (*progress)(dstm_request_t *req);
-} dstm_request_progress_t;
-
-int dstm_request_progress_local_put(dstm_request_t *req)
+static int dstm_request_progress_local_put(dstm_request_t *req)
 {
 	/* logic of a local put:
 	 * - starts in INIT state, with payload buffered in req->buf.
@@ -319,7 +227,7 @@ int dstm_request_progress_local_put(dstm_request_t *req)
 	return 0;
 }
 
-int dstm_request_progress_local_get(dstm_request_t *req)
+static int dstm_request_progress_local_get(dstm_request_t *req)
 {
 	/* logic of a local get:
 	 * - starts in INIT state, enqueued as a request to copy data from a
@@ -341,7 +249,7 @@ int dstm_request_progress_local_get(dstm_request_t *req)
 	return 0;
 }
 
-int dstm_request_progress_in_put(dstm_request_t *req)
+static int dstm_request_progress_in_put(dstm_request_t *req)
 {
 	/* logic:
 	 * - init: payload already buffered in req->buf (copied on receipt).
@@ -359,7 +267,7 @@ int dstm_request_progress_in_put(dstm_request_t *req)
 	return 0;
 }
 
-int dstm_request_progress_in_get(dstm_request_t *req)
+static int dstm_request_progress_in_get(dstm_request_t *req)
 {
 	/* logic:
 	 * - init: GET_REQ received, waiting for the version to become
@@ -403,7 +311,7 @@ int dstm_request_progress_in_get(dstm_request_t *req)
 	return 0;
 }
 
-int dstm_request_progress_out_put(dstm_request_t *req)
+static int dstm_request_progress_out_put(dstm_request_t *req)
 {
 	/* logic:
 	 * - isend: data sent out, isend posted.
@@ -416,7 +324,7 @@ int dstm_request_progress_out_put(dstm_request_t *req)
 	return 0;
 }
 
-int dstm_request_progress_out_get(dstm_request_t *req)
+static int dstm_request_progress_out_get(dstm_request_t *req)
 {
 	/* logic:
 	 * - irecv: GET_REQ sent, reply received and buffered in req->buf.
@@ -433,210 +341,15 @@ int dstm_request_progress_out_get(dstm_request_t *req)
 }
 
 /*******************************************************************************
- * Barrier request DFA
- *
- * The barrier is implemented as a first-class request driven by the standard
- * dstm_do_progress() loop.  A BARRIER request is created by dstm_barrier()
- * and inserted into the global request list; dstm_request_progress_barrier()
- * advances its state machine on every progress iteration.
- *
- * 3-round ring protocol (rank 0 -> 1 -> ... -> N-1 -> 0):
- *
- * Round 1 -- drain outgoing:
- *   Each rank waits until its OUT_PUT/OUT_GET requests have completed, then
- *   forwards the token.  When the token returns to rank 0, all ranks have
- *   finished their outgoing work: no new PUT or GET messages will be issued
- *   by any rank.
- *
- *   BARRIER_DRAIN_OUT
- *     Wait for all OUT_PUT/OUT_GET requests to finish.
- *     -> rank 0:  inject R1 token, go to R1_FORWARDED
- *        rank >0: go to R1_WAIT
- *
- *   BARRIER_R1_WAIT  (non-zero ranks only)
- *     Wait for a token (barrier_token_count > 0).  Consume it, send the
- *     R1 token to the successor, go to R1_FORWARDED.
- *
- *   BARRIER_R1_FORWARDED
- *     Wait for a token.  Consume it.
- *     -> rank 0:  inject R2 token
- *     -> all:     set barrier_all_drained = 1, go to R2_DRAINING
- *
- * Round 2 -- complete all pending:
- *   barrier_all_drained is now set, which bypasses all neighbor distance
- *   checks in version transitions.  Versions rapidly advance through
- *   WRITABLE -> READABLE -> DISCARDABLE, unblocking any pending IN_GET
- *   and LOCAL_GET requests.
- *
- *   BARRIER_R2_DRAINING
- *     Drain all non-barrier requests.  Once the queue is empty, send the
- *     R2 token to the successor, go to R2_FORWARDED.
- *
- *   BARRIER_R2_FORWARDED
- *     Wait for a token.  Consume it.
- *     -> rank 0:  inject exit token (if world_size > 1)
- *     -> rank >0 (< N-1): forward exit token to successor
- *     -> all:     reset barrier_all_drained = 0, go to DONE
- *
- * Helper: dstm_barrier_send_token() -- sends a BARRIER message to the ring
- * successor carrying the barrier's last_time.
+ * Progress dispatch
  ******************************************************************************/
 
-/* Send the barrier token to the ring successor. */
-static void dstm_barrier_send_token(dstm_time_t last_time)
-{
-	int next =
-	        (dstm_global_context.rank + 1) % dstm_global_context.world_size;
-	dstm_msg_t m;
-	memset(&m, 0, sizeof(m));
-	dstm_msg_fill_hdr(&m, DSTM_MSG_TYPE_BARRIER, last_time, 0, next,
-	                  dstm_global_context.rank);
-	dstm_msg_fill_barrier(&m, last_time);
-	int tag = dstm_request_new_tag();
-	dstm_msg_send(&m, tag);
-}
+typedef struct dstm_request_progress_s {
+	int type;
+	int (*progress)(dstm_request_t *req);
+} dstm_request_progress_t;
 
-/* Return 1 if any outgoing request (OUT_PUT or OUT_GET) is not yet done. */
-static int dstm_has_pending_outgoing(void)
-{
-	dstm_request_t *it;
-	DL_FOREACH(requests, it)
-	{
-		if ((it->type == DSTM_REQUEST_TYPE_OUT_PUT ||
-		     it->type == DSTM_REQUEST_TYPE_OUT_GET) &&
-		    it->status != DSTM_REQUEST_STATUS_DONE)
-			return 1;
-	}
-	return 0;
-}
-
-/* Return 1 if any request other than `barrier_req` is still in the list. */
-static int dstm_has_non_barrier_requests(dstm_request_t *barrier_req)
-{
-	dstm_request_t *it;
-	DL_FOREACH(requests, it)
-	{
-		if (it != barrier_req)
-			return 1;
-	}
-	return 0;
-}
-
-int dstm_request_progress_barrier(dstm_request_t *req)
-{
-	int rank = dstm_global_context.rank;
-	int world_size = dstm_global_context.world_size;
-	dstm_time_t last_time = req->time; /* last_time stored in req->time */
-	dstm_region_t *region = dstm_global_context.region;
-
-	switch (req->status) {
-
-	/* ---- Round 1: drain outgoing requests ---- */
-
-	case DSTM_REQUEST_STATUS_BARRIER_DRAIN_OUT:
-		/* Wait for all outgoing PUT/GET requests to finish. */
-		if (dstm_has_pending_outgoing())
-			break;
-
-		if (rank == 0) {
-			/* Rank 0 injects the R1 token immediately. */
-			dstm_barrier_send_token(last_time);
-			dstm_log_info("barrier: rank 0 sent R1 token, "
-			              "last_time: %" PRId64 "\n",
-			              last_time);
-			req->status =
-			        DSTM_REQUEST_STATUS_BARRIER_R1_FORWARDED;
-		} else {
-			req->status = DSTM_REQUEST_STATUS_BARRIER_R1_WAIT;
-		}
-		break;
-
-	case DSTM_REQUEST_STATUS_BARRIER_R1_WAIT:
-		/* Non-zero ranks: wait for the R1 token from predecessor. */
-		if (region->barrier_token_count == 0)
-			break;
-
-		region->barrier_token_count--;
-		dstm_log_info("barrier: rank %d received R1 token\n", rank);
-
-		/* Forward R1 token to successor. */
-		dstm_barrier_send_token(last_time);
-		dstm_log_info("barrier: rank %d sent R1 token\n", rank);
-		req->status = DSTM_REQUEST_STATUS_BARRIER_R1_FORWARDED;
-		break;
-
-	case DSTM_REQUEST_STATUS_BARRIER_R1_FORWARDED:
-		/* Wait for the R1 ring to close (rank 0) or for the R2
-		 * token (non-zero ranks). */
-		if (region->barrier_token_count == 0)
-			break;
-
-		region->barrier_token_count--;
-		dstm_log_info("barrier: rank %d R1 complete\n", rank);
-
-		/* Rank 0: inject R2 token. */
-		if (rank == 0) {
-			dstm_barrier_send_token(last_time);
-			dstm_log_info("barrier: rank 0 sent R2 token\n");
-		}
-
-		/* All ranks: enable barrier optimization so version
-		 * transitions bypass neighbor distance checks. */
-		region->barrier_all_drained = 1;
-		req->status = DSTM_REQUEST_STATUS_BARRIER_R2_DRAINING;
-		break;
-
-	/* ---- Round 2: complete all pending requests ---- */
-
-	case DSTM_REQUEST_STATUS_BARRIER_R2_DRAINING:
-		/* Drain all non-barrier requests. With barrier_all_drained
-		 * set, version transitions are no longer blocked by stale
-		 * neighbor heartbeat times. */
-		if (dstm_has_non_barrier_requests(req))
-			break;
-
-		/* Queue is empty: forward the R2 token. */
-		dstm_barrier_send_token(last_time);
-		dstm_log_info("barrier: rank %d sent R2 token\n", rank);
-		req->status = DSTM_REQUEST_STATUS_BARRIER_R2_FORWARDED;
-		break;
-
-	case DSTM_REQUEST_STATUS_BARRIER_R2_FORWARDED:
-		/* Wait for the R2 ring to close (rank 0) or for the exit
-		 * token (non-zero ranks). */
-		if (region->barrier_token_count == 0)
-			break;
-
-		region->barrier_token_count--;
-
-		if (rank == 0) {
-			/* R2 ring complete.  Inject exit token so all other
-			 * ranks can leave.  Single-rank case needs no token. */
-			dstm_log_info("barrier: rank 0 R2 complete\n");
-			if (world_size > 1)
-				dstm_barrier_send_token(last_time);
-		} else {
-			dstm_log_info("barrier: rank %d received exit "
-			              "token\n",
-			              rank);
-			/* Forward exit token to successor (all but last). */
-			if (rank < world_size - 1)
-				dstm_barrier_send_token(last_time);
-		}
-
-		/* Clean up barrier state. */
-		region->barrier_all_drained = 0;
-		req->status = DSTM_REQUEST_STATUS_DONE;
-		break;
-
-	default:
-		/* DONE is handled by dstm_do_progress; nothing else expected. */
-		break;
-	}
-	return 0;
-}
-
-dstm_request_progress_t progress_sm[DSTM_REQUEST_TYPE_MAX] = {
+static dstm_request_progress_t progress_sm[DSTM_REQUEST_TYPE_MAX] = {
         {DSTM_REQUEST_TYPE_LOCAL_PUT, dstm_request_progress_local_put},
         {DSTM_REQUEST_TYPE_LOCAL_GET, dstm_request_progress_local_get},
         {DSTM_REQUEST_TYPE_IN_PUT, dstm_request_progress_in_put},
@@ -655,6 +368,102 @@ int dstm_request_progress(dstm_request_t *req)
 	return progress_sm[req->type].progress(req);
 }
 
+/*******************************************************************************
+ * Progress engine
+ ******************************************************************************/
+
+/* Handle a single incoming MPI message: dispatch by type and either create
+ * a new request or update an existing one. */
+static void dstm_handle_incoming_msg(MPI_Status status)
+{
+	dstm_request_t *nr;
+	dstm_ptr_t dptr, sptr;
+	dstm_msg_t m;
+
+	dstm_log_debug("incoming message: %d,%d\n", status.MPI_SOURCE,
+	               status.MPI_TAG);
+
+	/* block until we receive the incoming message */
+	dstm_msg_recvany(status, &m);
+	dstm_region_set_ninfo(dstm_global_context.region, m.header.src_rank,
+	                      m.header.time, DSTM_REGION_STATUS_WRITABLE);
+
+	dstm_log_msg(DSTM_LOG_DEBUG, "received", &m);
+
+	switch (m.header.type) {
+	case DSTM_MSG_TYPE_PUT:
+		/* Incoming PUT: copy the payload into a request-owned
+		 * buffer so we can free the MPI packbuf immediately. */
+		dptr = (dstm_ptr_t){m.u.putget.ptr.region,
+		                    m.u.putget.ptr.offset};
+		dstm_request_create(&nr, DSTM_REQUEST_TYPE_IN_PUT,
+		                    status.MPI_TAG, m.header.time,
+		                    m.header.delta, m.header.dst_rank, dptr,
+		                    (dstm_ptr_t){0, 0}, m.u.putget.size);
+		nr->buf = malloc(m.u.putget.size);
+		assert(nr->buf != NULL);
+		memcpy(nr->buf, m.data, m.u.putget.size);
+		dstm_msg_free_packbuf(&m);
+		DL_INSERT_INORDER(requests, nr, dstm_request_cmp_departure);
+		break;
+
+	case DSTM_MSG_TYPE_GET_REQ:
+		/* Incoming GET request: store enough info to send the
+		 * reply later (when the region is readable).  The
+		 * received packbuf is kept in nr->msg until the reply
+		 * is built, at which point it is freed. */
+		sptr = (dstm_ptr_t){m.u.putget.ptr.region,
+		                    m.u.putget.ptr.offset};
+		dstm_request_create(&nr, DSTM_REQUEST_TYPE_IN_GET,
+		                    status.MPI_TAG, m.header.time,
+		                    m.header.delta, m.header.src_rank,
+		                    (dstm_ptr_t){0, 0}, sptr,
+		                    m.u.putget.size);
+		nr->msg = m;
+		DL_INSERT_INORDER(requests, nr, dstm_request_cmp_departure);
+		break;
+
+	case DSTM_MSG_TYPE_GET_REP: {
+		/* Reply to an outgoing GET: find the matching request,
+		 * copy the data into req->buf, and free the packbuf. */
+		dstm_request_t *it = NULL;
+		DL_FOREACH(requests, it)
+		{
+			if (it->tag == status.MPI_TAG)
+				break;
+		}
+		assert(it != NULL);
+		it->buf = malloc(m.u.putget.size);
+		assert(it->buf != NULL);
+		memcpy(it->buf, m.data, m.u.putget.size);
+		dstm_msg_free_packbuf(&m);
+		it->status = DSTM_REQUEST_STATUS_IRECV;
+		break;
+	}
+
+	case DSTM_MSG_TYPE_HEARTBEAT:
+		dstm_region_set_ninfo(dstm_global_context.region,
+		                      m.header.src_rank, m.header.time,
+		                      m.u.heartbeat.status);
+		dstm_msg_free_packbuf(&m);
+		break;
+
+	case DSTM_MSG_TYPE_BARRIER:
+		/* Increment the token count so the barrier DFA can
+		 * detect and consume this token on its next
+		 * progress iteration. */
+		dstm_global_context.region->barrier_token_count++;
+		dstm_log_info("barrier token received from rank %d, "
+		              "last_time: %" PRId64 "\n",
+		              m.header.src_rank, m.u.barrier.last_time);
+		dstm_msg_free_packbuf(&m);
+		break;
+
+	default:
+		assert(0);
+	}
+}
+
 /* Progress loop: recv messages and try to make progress on any request.
  *
  * We try to progress as much as we can each call. An alternative design
@@ -668,99 +477,12 @@ int dstm_do_progress(dstm_time_t time)
 	dstm_log_debug("progress loop: reqtime: %" PRId64
 	               ", region time: %" PRId64 "\n",
 	               time, dstm_global_context.region->time);
-	dstm_request_t *nr;
-	dstm_ptr_t dptr, sptr;
-	dstm_msg_t m;
-	MPI_Status status;
 
 	/* test if we have any message to deal with */
+	MPI_Status status;
 	int ret = dstm_msg_iprobe(&status);
-
-	if (ret) {
-		dstm_log_debug("incoming message: %d,%d\n", status.MPI_SOURCE,
-		               status.MPI_TAG);
-		/* block until we receive the incoming message */
-		dstm_msg_recvany(status, &m);
-		dstm_region_set_ninfo(dstm_global_context.region,
-		                      m.header.src_rank, m.header.time,
-		                      DSTM_REGION_STATUS_WRITABLE);
-
-		dstm_log_msg(DSTM_LOG_DEBUG, "received", &m);
-		switch (m.header.type) {
-		case DSTM_MSG_TYPE_PUT:
-			/* Incoming PUT: copy the payload into a request-owned
-			 * buffer so we can free the MPI packbuf immediately.
-			 */
-			dptr = (dstm_ptr_t){m.u.putget.ptr.region,
-			                    m.u.putget.ptr.offset};
-			dstm_request_create(&nr, DSTM_REQUEST_TYPE_IN_PUT,
-			                    status.MPI_TAG, m.header.time,
-			                    m.header.delta, m.header.dst_rank,
-			                    dptr, (dstm_ptr_t){0, 0},
-			                    m.u.putget.size);
-			nr->buf = malloc(m.u.putget.size);
-			assert(nr->buf != NULL);
-			memcpy(nr->buf, m.data, m.u.putget.size);
-			dstm_msg_free_packbuf(&m);
-			DL_INSERT_INORDER(requests, nr,
-			                  dstm_request_cmp_departure);
-			break;
-		case DSTM_MSG_TYPE_GET_REQ:
-			/* Incoming GET request: store enough info to send the
-			 * reply later (when the region is readable).  The
-			 * received packbuf is kept in nr->msg until the reply
-			 * is built, at which point it is freed.
-			 */
-			sptr = (dstm_ptr_t){m.u.putget.ptr.region,
-			                    m.u.putget.ptr.offset};
-			dstm_request_create(&nr, DSTM_REQUEST_TYPE_IN_GET,
-			                    status.MPI_TAG, m.header.time,
-			                    m.header.delta, m.header.src_rank,
-			                    (dstm_ptr_t){0, 0}, sptr,
-			                    m.u.putget.size);
-			nr->msg = m;
-			DL_INSERT_INORDER(requests, nr,
-			                  dstm_request_cmp_departure);
-			break;
-		case DSTM_MSG_TYPE_GET_REP: {
-			/* Reply to an outgoing GET: find the matching request,
-			 * copy the data into req->buf, and free the packbuf.
-			 */
-			dstm_request_t *it = NULL;
-			DL_FOREACH(requests, it)
-			{
-				if (it->tag == status.MPI_TAG)
-					break;
-			}
-			assert(it != NULL);
-			it->buf = malloc(m.u.putget.size);
-			assert(it->buf != NULL);
-			memcpy(it->buf, m.data, m.u.putget.size);
-			dstm_msg_free_packbuf(&m);
-			it->status = DSTM_REQUEST_STATUS_IRECV;
-			break;
-		}
-		case DSTM_MSG_TYPE_HEARTBEAT:
-			dstm_region_set_ninfo(dstm_global_context.region,
-			                      m.header.src_rank, m.header.time,
-			                      m.u.heartbeat.status);
-			dstm_msg_free_packbuf(&m);
-			break;
-		case DSTM_MSG_TYPE_BARRIER:
-			/* Increment the token count so the barrier DFA can
-			 * detect and consume this token on its next
-			 * progress iteration. */
-			dstm_global_context.region->barrier_token_count++;
-			dstm_log_info("barrier token received from rank %d, "
-			              "last_time: %" PRId64 "\n",
-			              m.header.src_rank,
-			              m.u.barrier.last_time);
-			dstm_msg_free_packbuf(&m);
-			break;
-		default:
-			assert(0);
-		}
-	}
+	if (ret)
+		dstm_handle_incoming_msg(status);
 
 	/* Multi-version progress model:
 	 *
@@ -782,6 +504,7 @@ int dstm_do_progress(dstm_time_t time)
 	 */
 
 	dstm_region_status_update(time);
+
 	/* loop over all requests, see what can be progressed */
 	dstm_request_t *it, *tmp;
 	DL_FOREACH_SAFE(requests, it, tmp)
@@ -827,17 +550,12 @@ int dstm_put(int rank,
 	if (delta < 0)
 		return -DSTM_EINVAL;
 
-
 	/* did we increase our local time */
 	if (dstm_local_heartbeat_time < time) {
 		dstm_region_send_heartbeat_to_all(time,
 						  DSTM_REGION_STATUS_WRITABLE);
 		dstm_local_heartbeat_time = time;
 	}
-
-	/* request tracking part:
-	 * making sure the request is being sent to the right place
-	 */
 
 	/* first, figure out if this is a local request or a remote one */
 	dstm_request_t *req;
@@ -868,7 +586,6 @@ int dstm_put(int rank,
 		req->status = DSTM_REQUEST_STATUS_ISEND;
 	}
 	DL_INSERT_INORDER(requests, req, dstm_request_cmp_departure);
-	// by the time we return, the request is at least registered.
 	return 0;
 }
 
@@ -903,25 +620,17 @@ int dstm_get(int rank,
 		dstm_local_heartbeat_time = time;
 	}
 
-	/* request tracking part:
-	 * making sure the request is being sent to the right place
-	 */
-
 	/* first, figure out if this is a local request or a remote one */
 	dstm_request_t *req;
 	if (rank == dstm_global_context.rank) {
-		/* local get:
-		 * we just enqueue it locally
-		 * */
+		/* local get: we just enqueue it locally */
 		dptr = (dstm_ptr_t){DSTM_REGIONID_LOCAL, (intptr_t)dst};
 		dstm_request_create(&req, DSTM_REQUEST_TYPE_LOCAL_GET, -1, time,
 		                    delta, rank, dptr, src, size);
 		req->caller_owned = 1;
 	} else {
-		/* outgoing get
-		 * we enqueue it for tracking purposes, and push it out to the
-		 * appropriate rank.
-		 */
+		/* outgoing get: enqueue for tracking, push to the
+		 * appropriate rank. */
 		dptr = (dstm_ptr_t){DSTM_REGIONID_LOCAL, (intptr_t)dst};
 		int tag = dstm_request_new_tag();
 		dstm_request_create(&req, DSTM_REQUEST_TYPE_OUT_GET, tag, time,
@@ -956,134 +665,11 @@ int dstm_get(int rank,
 	}
 	DL_INSERT_INORDER(requests, req, dstm_request_cmp_departure);
 
-	/* synchronization part:
-	 * this is a blocking call, so we take advantage of it to make progress
-	 * on stuff, until we can verify that the request itself is completed:
-	 */
-	int done = 0;
-	while (!done) {
-		dstm_do_progress(time);
-		if (dstm_request_isdone(req))
-			done = 1;
-	}
-	dstm_request_destroy(&req);
-	return 0;
-}
-
-/*******************************************************************************
- * Barrier: distributed termination via a three-round ring token algorithm.
- *
- * dstm_barrier() creates a BARRIER request and inserts it into the global
- * request list.  The barrier DFA (dstm_request_progress_barrier()) is then
- * driven by the standard dstm_do_progress() loop until the request reaches
- * DONE status, at which point dstm_barrier() returns.
- *
- * See the comment above dstm_request_progress_barrier() for the full protocol.
- ******************************************************************************/
-
-int dstm_barrier(dstm_time_t last_time)
-{
-	/* Create a caller-owned BARRIER request.  We store last_time in
-	 * req->time (delta and rank are unused for barrier requests). */
-	dstm_request_t *req;
-	dstm_ptr_t null_ptr = {DSTM_REGIONID_INVALID, 0};
-	dstm_request_create(&req, DSTM_REQUEST_TYPE_BARRIER, 0, last_time, 0,
-	                    0, null_ptr, null_ptr, 0);
-	assert(req != NULL);
-	req->status = DSTM_REQUEST_STATUS_BARRIER_DRAIN_OUT;
-	req->caller_owned = 1;
-
-	/* Insert at the end of the list so existing requests are processed
-	 * first (the barrier DFA itself handles ordering internally). */
-	DL_APPEND(requests, req);
-
-	/* Spin the unified progress loop until the barrier is done. */
+	/* synchronization: this is a blocking call, so we drive progress
+	 * until the request completes. */
 	while (!dstm_request_isdone(req))
-		dstm_do_progress(last_time);
+		dstm_do_progress(time);
 
 	dstm_request_destroy(&req);
 	return 0;
 }
-
-/*******************************************************************************
- * Formatting helpers
- ******************************************************************************/
-
-typedef struct dstm_request_type_table_s {
-	int type;
-	const char *s;
-} dstm_request_type_table_t;
-
-static const dstm_request_type_table_t dstm_request_type_table[] = {
-        {DSTM_REQUEST_TYPE_LOCAL_PUT, "LOCAL_PUT"},
-        {DSTM_REQUEST_TYPE_LOCAL_GET, "LOCAL_GET"},
-        {DSTM_REQUEST_TYPE_IN_PUT, "IN_PUT"},
-        {DSTM_REQUEST_TYPE_IN_GET, "IN_GET"},
-        {DSTM_REQUEST_TYPE_OUT_PUT, "OUT_PUT"},
-        {DSTM_REQUEST_TYPE_OUT_GET, "OUT_GET"},
-        {DSTM_REQUEST_TYPE_BARRIER, "BARRIER"},
-        {0, NULL},
-};
-
-static const char *dstm_request_type_t2s(int type,
-                                         const dstm_request_type_table_t *table)
-{
-	if (type < 0)
-		return "UNKNOWN";
-	for (int i = 0; table[i].s != NULL; i++)
-		if (table[i].type == type)
-			return table[i].s;
-	return "UNKNOWN";
-}
-
-int dstm_request_snprintf(char *buf, size_t n, dstm_request_t *req)
-{
-	assert(buf != NULL);
-	if (req == NULL)
-		return snprintf(buf, n, "NULL");
-
-	/* Header line */
-	int total = snprintf(buf, n,
-	                     "{ type: %s, tag: %d, status: %d, time: %" PRIu64
-	                     ", delta: %" PRId64 ", rank: %d, size: %zu, dst: ",
-	                     dstm_request_type_t2s(req->type,
-	                                           dstm_request_type_table),
-	                     req->tag, req->status, req->time, req->delta,
-	                     req->rank, req->size);
-
-#define ADVANCE(written)                                                       \
-	do {                                                                   \
-		int _w = (written);                                            \
-		buf += (_w < (int)n ? _w : (int)n - 1);                        \
-		n = (_w < (int)n ? n - (size_t)_w : 1);                        \
-		total += _w;                                                   \
-	} while (0)
-
-	ADVANCE(total);
-
-	/* dst pointer */
-	int w = dstm_ptr_snprintf(buf, n, req->dst);
-	ADVANCE(w);
-
-	w = snprintf(buf, n, ", src: ");
-	ADVANCE(w);
-
-	/* src pointer */
-	w = dstm_ptr_snprintf(buf, n, req->src);
-	ADVANCE(w);
-
-	w = snprintf(buf, n, ", msg: ");
-	ADVANCE(w);
-
-	/* embedded message */
-	w = dstm_msg_snprintf(buf, n, &req->msg);
-	ADVANCE(w);
-
-	w = snprintf(buf, n, "}");
-	total += w;
-
-#undef ADVANCE
-
-	return total;
-}
-
