@@ -28,9 +28,19 @@ extern "C" {
  * CONSTANTS
  ******************************************************************************/
 
-#define DSTM_DEFAULT_REGION_SIZE (1 << 30)
+#define DSTM_DEFAULT_REGION_SIZE (1 << 20)
 #define DSTM_REGION_MIN_BLOCK_SIZE 64 /* 64 bytes minimum allocation */
 #define DSTM_REGION_MAX_ORDER 30 /* Supports up to 1GB regions */
+
+/*******************************************************************************
+ * REGION STATUS VALUES
+ *
+ * Used by the per-version state machine and the messaging layer (heartbeats).
+ ******************************************************************************/
+
+#define DSTM_REGION_STATUS_WRITABLE 0
+#define DSTM_REGION_STATUS_READABLE 1
+#define DSTM_REGION_STATUS_DISCARDABLE 2
 
 /*******************************************************************************
  * BUDDY ALLOCATOR STRUCTURES
@@ -80,6 +90,28 @@ struct dstm_region_ninfo_s {
 };
 typedef struct dstm_region_ninfo_s dstm_region_ninfo_t;
 
+/*******************************************************************************
+ * VERSION STRUCTURE
+ *
+ * Each version represents a full snapshot of the region's data buffer at a
+ * specific logical timestamp.  Versions are maintained in a doubly-linked list
+ * sorted by time.  Each version has its own state machine:
+ *   WRITABLE -> READABLE -> DISCARDABLE
+ *
+ * PUTs create/update the target version immediately.  GETs wait for the
+ * version to become READABLE.  Old versions are evicted (DISCARDABLE) once
+ * all GETs are done and no neighbor can still send a GET for that timestamp
+ * (distance-based check).
+ ******************************************************************************/
+
+struct dstm_region_version_s {
+	dstm_time_t time; /* Logical timestamp this version represents */
+	int status; /* WRITABLE, READABLE, or DISCARDABLE */
+	void *buffer; /* Full copy of region data (malloc'd, region->size) */
+	struct dstm_region_version_s *prev, *next; /* utlist DL linkage */
+};
+typedef struct dstm_region_version_s dstm_region_version_t;
+
 /* Region structure with buddy allocator */
 struct dstm_region_s {
 	/* Memory buffer */
@@ -94,15 +126,25 @@ struct dstm_region_s {
 	uint8_t *bitmap; /* Split bitmap for buddy tracking */
 	size_t bitmap_size; /* Size of bitmap in bytes */
 
-	dstm_time_t time;
+	dstm_time_t time; /* Minimum active version timestamp */
 	dstm_region_ninfo_t *ninfos;
 
-	/* Set to last_time from the barrier token while a barrier is in
-	 * progress; -1 when no barrier is active.  Used by
-	 * dstm_region_status_update() to skip lower-ranked neighbors that
-	 * have already forwarded the token (and thus will not send any more
-	 * PUT/GET messages). */
-	dstm_time_t barrier_time;
+	/* DL list of active versions, sorted by time (ascending).
+	 * Each version has its own buffer and state machine. */
+	dstm_region_version_t *versions;
+
+	/* Number of barrier tokens received but not yet consumed by the
+	 * barrier DFA.  The BARRIER message handler increments this on
+	 * every token arrival; the barrier DFA decrements it when it
+	 * consumes a token to advance to the next state. */
+	int barrier_token_count;
+
+	/* Set to 1 after the first barrier round completes (all ranks
+	 * have drained their outgoing requests).  When set, the version
+	 * transition checks (WRITABLE->READABLE, READABLE->DISCARDABLE)
+	 * skip ALL neighbor distance checks, since no rank can issue new
+	 * PUT/GET messages.  Reset to 0 when the barrier exits. */
+	int barrier_all_drained;
 };
 
 /*******************************************************************************
@@ -130,6 +172,25 @@ dstm_ptr_t dstm_region_malloc(dstm_region_t *r, size_t size);
 void dstm_region_free(dstm_region_t *r, dstm_ptr_t ptr);
 
 /*******************************************************************************
+ * Version management
+ ******************************************************************************/
+
+/* Find an existing version for the given timestamp, or NULL. */
+dstm_region_version_t *dstm_region_version_find(dstm_region_t *region,
+                                                dstm_time_t time);
+
+/* Find or create a version for the given timestamp.  New versions are
+ * created with an uninitialized buffer and WRITABLE status, inserted in
+ * sorted order.  Returns NULL on allocation failure. */
+dstm_region_version_t *
+dstm_region_version_find_or_create(dstm_region_t *region, dstm_time_t time);
+
+/* Destroy a single version: free its buffer and remove it from the
+ * region's version list. */
+void dstm_region_version_destroy(dstm_region_t *region,
+                                 dstm_region_version_t *version);
+
+/*******************************************************************************
  * Formatting helpers
  *
  * Each *_snprintf function follows the standard snprintf contract: writes at
@@ -144,6 +205,10 @@ int dstm_ptr_snprintf(char *buf, size_t n, dstm_ptr_t p);
 
 #define DSTM_REGION_NINFO_SNPRINTF_SIZE 96
 int dstm_region_ninfo_snprintf(char *buf, size_t n, dstm_region_ninfo_t *ni);
+
+#define DSTM_REGION_VERSION_SNPRINTF_SIZE 128
+int dstm_region_version_snprintf(char *buf, size_t n,
+                                 dstm_region_version_t *v);
 
 #define DSTM_REGION_SNPRINTF_SIZE 128
 int dstm_region_snprintf(char *buf, size_t n, dstm_region_t *r);
@@ -167,6 +232,17 @@ int dstm_region_snprintf(char *buf, size_t n, dstm_region_t *r);
 			char __buf[DSTM_REGION_NINFO_SNPRINTF_SIZE];           \
 			dstm_region_ninfo_snprintf(__buf, sizeof(__buf),       \
 			                           (ni));                      \
+			dstm_log_printf((level), __FILE__, __func__, __LINE__, \
+			                "%s: %s\n", (label), __buf);           \
+		}                                                              \
+	} while (0)
+
+#define dstm_log_region_version(level, label, v)                               \
+	do {                                                                   \
+		if ((level) <= dstm_log_level) {                               \
+			char __buf[DSTM_REGION_VERSION_SNPRINTF_SIZE];         \
+			dstm_region_version_snprintf(__buf, sizeof(__buf),     \
+			                             (v));                     \
 			dstm_log_printf((level), __FILE__, __func__, __LINE__, \
 			                "%s: %s\n", (label), __buf);           \
 		}                                                              \

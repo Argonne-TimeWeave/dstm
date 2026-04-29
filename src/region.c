@@ -324,7 +324,9 @@ static int dstm_region_init_allocator(dstm_region_t *r)
 	/* Initialize metadata */
 	r->time = 0;
 	r->ninfos = NULL;
-	r->barrier_time = -1;
+	r->versions = NULL;
+	r->barrier_token_count = 0;
+	r->barrier_all_drained = 0;
 
 	return DSTM_SUCCESS;
 }
@@ -401,6 +403,15 @@ void dstm_region_destroy(dstm_region_t **region)
 	if (r == NULL)
 		return;
 
+	/* Free all active versions */
+	dstm_region_version_t *v, *vtmp;
+	DL_FOREACH_SAFE(r->versions, v, vtmp)
+	{
+		DL_DELETE(r->versions, v);
+		free(v->buffer);
+		free(v);
+	}
+
 	/* Free neighbor info hash table */
 	dstm_region_ninfo_t *ni, *tmp;
 	HASH_ITER(hh, r->ninfos, ni, tmp)
@@ -475,6 +486,77 @@ int dstm_region_get_ninfo(dstm_region_t *region, int rank, dstm_time_t *time,
 	*time = ni->time;
 	*state = ni->state;
 	return DSTM_SUCCESS;
+}
+
+/*******************************************************************************
+ * Version Management Functions
+ ******************************************************************************/
+
+/* Comparison function for sorted insertion into the version DL list. */
+static int dstm_region_version_cmp(dstm_region_version_t *a,
+                                   dstm_region_version_t *b)
+{
+	if (a->time < b->time)
+		return -1;
+	if (a->time > b->time)
+		return 1;
+	return 0;
+}
+
+dstm_region_version_t *dstm_region_version_find(dstm_region_t *region,
+                                                dstm_time_t time)
+{
+	if (region == NULL)
+		return NULL;
+
+	dstm_region_version_t *it;
+	DL_FOREACH(region->versions, it)
+	{
+		if (it->time == time)
+			return it;
+		/* List is sorted ascending; stop early if past target. */
+		if (it->time > time)
+			return NULL;
+	}
+	return NULL;
+}
+
+dstm_region_version_t *
+dstm_region_version_find_or_create(dstm_region_t *region, dstm_time_t time)
+{
+	if (region == NULL)
+		return NULL;
+
+	dstm_region_version_t *existing = dstm_region_version_find(region,
+	                                                           time);
+	if (existing != NULL)
+		return existing;
+
+	dstm_region_version_t *v = calloc(1, sizeof(*v));
+	if (v == NULL)
+		return NULL;
+
+	v->time = time;
+	v->status = DSTM_REGION_STATUS_WRITABLE;
+	v->buffer = malloc(region->size);
+	if (v->buffer == NULL) {
+		free(v);
+		return NULL;
+	}
+
+	DL_INSERT_INORDER(region->versions, v, dstm_region_version_cmp);
+	return v;
+}
+
+void dstm_region_version_destroy(dstm_region_t *region,
+                                 dstm_region_version_t *version)
+{
+	if (region == NULL || version == NULL)
+		return;
+
+	DL_DELETE(region->versions, version);
+	free(version->buffer);
+	free(version);
 }
 
 /*******************************************************************************
@@ -580,6 +662,31 @@ int dstm_region_ninfo_snprintf(char *buf, size_t n, dstm_region_ninfo_t *ni)
 	                ni->rank, ni->time,
 	                ni->state == DSTM_REGION_STATUS_READABLE ? "readable" :
 	                                                           "writable");
+}
+
+int dstm_region_version_snprintf(char *buf, size_t n,
+                                 dstm_region_version_t *v)
+{
+	assert(buf != NULL);
+	if (v == NULL)
+		return snprintf(buf, n, "NULL");
+	const char *status_str;
+	switch (v->status) {
+	case DSTM_REGION_STATUS_WRITABLE:
+		status_str = "writable";
+		break;
+	case DSTM_REGION_STATUS_READABLE:
+		status_str = "readable";
+		break;
+	case DSTM_REGION_STATUS_DISCARDABLE:
+		status_str = "discardable";
+		break;
+	default:
+		status_str = "unknown";
+		break;
+	}
+	return snprintf(buf, n, "{ time: %" PRId64 ", status: %s, buffer: %p}",
+	                v->time, status_str, v->buffer);
 }
 
 int dstm_region_snprintf(char *buf, size_t n, dstm_region_t *r)

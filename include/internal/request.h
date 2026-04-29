@@ -44,30 +44,39 @@ extern "C" {
 
 /* Barrier-request DFA states (values >= 4, only used by BARRIER requests).
  *
- * Forward pass (all ranks):
- *   BARRIER_DRAIN        - waiting until all OUT_PUT isends have completed
- *   BARRIER_WAIT         - non-zero ranks: waiting for token from predecessor
- *                          (rank 0 skips this state and goes straight to
- *                          BARRIER_DRAINING after injecting the token)
- *   BARRIER_DRAINING     - draining remaining requests now that predecessor
- *                          is known to have finished; also sends the forward
- *                          token once the queue is empty
+ * The barrier uses a 3-round ring protocol (rank 0 -> 1 -> ... -> N-1 -> 0).
  *
- * Return pass (all ranks):
- *   BARRIER_FORWARDED    - forward token sent; rank 0 now waits for the ring
- *                          to complete (token returns from rank N-1); non-zero
- *                          ranks wait for the completion token
- *   BARRIER_COMPLETE     - completion token received; non-zero ranks forward
- *                          it to their successor then transition to DONE
+ * Round 1 -- drain outgoing:
+ *   Each rank waits for its own OUT_PUT/OUT_GET requests to finish, then
+ *   forwards the token.  When the token returns to rank 0, all ranks have
+ *   finished their outgoing work and no new PUT/GET messages will be issued.
+ *
+ *   BARRIER_DRAIN_OUT    - wait for OUT_PUT/OUT_GET to complete
+ *   BARRIER_R1_WAIT      - non-zero ranks: wait for R1 token from predecessor
+ *   BARRIER_R1_FORWARDED - R1 token sent; waiting for the R1 ring to close
+ *                          (rank 0) or for the R2 token (non-zero ranks)
+ *
+ * Round 2 -- complete all pending:
+ *   Now barrier_all_drained is set, which bypasses all neighbor distance
+ *   checks in version transitions.  Each rank drains all remaining requests
+ *   (IN_GET, LOCAL_GET, etc.) then forwards the token.
+ *
+ *   BARRIER_R2_DRAINING  - drain all non-barrier requests
+ *   BARRIER_R2_FORWARDED - R2 token sent; waiting for the R2 ring to close
+ *                          (rank 0) or for the exit token (non-zero ranks)
+ *
+ * Round 3 -- exit:
+ *   Rank 0 injects the exit token; each rank forwards it and transitions
+ *   to DONE.
  *
  * Terminal state (shared):
  *   DONE (== 3)          - barrier finished; request is removed from the list
  */
-#define DSTM_REQUEST_STATUS_BARRIER_DRAIN 4
-#define DSTM_REQUEST_STATUS_BARRIER_WAIT 5
-#define DSTM_REQUEST_STATUS_BARRIER_DRAINING 6
-#define DSTM_REQUEST_STATUS_BARRIER_FORWARDED 7
-#define DSTM_REQUEST_STATUS_BARRIER_COMPLETE 8
+#define DSTM_REQUEST_STATUS_BARRIER_DRAIN_OUT 4
+#define DSTM_REQUEST_STATUS_BARRIER_R1_WAIT 5
+#define DSTM_REQUEST_STATUS_BARRIER_R1_FORWARDED 6
+#define DSTM_REQUEST_STATUS_BARRIER_R2_DRAINING 7
+#define DSTM_REQUEST_STATUS_BARRIER_R2_FORWARDED 8
 
 #define DSTM_REQUEST_STATUS_MAX 9
 

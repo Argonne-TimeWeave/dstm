@@ -29,8 +29,8 @@ START_TEST(test_fill_hdr_put)
 	int rc = dstm_msg_fill_hdr(&m, DSTM_MSG_TYPE_PUT, 10, 2, 0, 1);
 	ck_assert_int_eq(rc, DSTM_SUCCESS);
 	ck_assert_int_eq(m.header.type, DSTM_MSG_TYPE_PUT);
-	ck_assert_int_eq(m.header.src_rank, 0);
-	ck_assert_int_eq(m.header.dst_rank, 1);
+	ck_assert_int_eq(m.header.dst_rank, 0);
+	ck_assert_int_eq(m.header.src_rank, 1);
 	ck_assert_int_eq(m.header.time, 10);
 	ck_assert_int_eq(m.header.delta, 2);
 }
@@ -43,8 +43,8 @@ START_TEST(test_fill_hdr_getreq)
 	int rc = dstm_msg_fill_hdr(&m, DSTM_MSG_TYPE_GET_REQ, 42, 1, 3, 7);
 	ck_assert_int_eq(rc, DSTM_SUCCESS);
 	ck_assert_int_eq(m.header.type, DSTM_MSG_TYPE_GET_REQ);
-	ck_assert_int_eq(m.header.src_rank, 3);
-	ck_assert_int_eq(m.header.dst_rank, 7);
+	ck_assert_int_eq(m.header.dst_rank, 3);
+	ck_assert_int_eq(m.header.src_rank, 7);
 	ck_assert_int_eq(m.header.time, 42);
 	ck_assert_int_eq(m.header.delta, 1);
 }
@@ -57,8 +57,8 @@ START_TEST(test_fill_hdr_getrep)
 	int rc = dstm_msg_fill_hdr(&m, DSTM_MSG_TYPE_GET_REP, 99, 5, 2, 0);
 	ck_assert_int_eq(rc, DSTM_SUCCESS);
 	ck_assert_int_eq(m.header.type, DSTM_MSG_TYPE_GET_REP);
-	ck_assert_int_eq(m.header.src_rank, 2);
-	ck_assert_int_eq(m.header.dst_rank, 0);
+	ck_assert_int_eq(m.header.dst_rank, 2);
+	ck_assert_int_eq(m.header.src_rank, 0);
 	ck_assert_int_eq(m.header.time, 99);
 	ck_assert_int_eq(m.header.delta, 5);
 }

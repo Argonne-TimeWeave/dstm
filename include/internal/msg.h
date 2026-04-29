@@ -23,10 +23,8 @@ extern "C" {
  * CONSTANTS
  ******************************************************************************/
 
-/* Region status values, shared between the messaging layer (heartbeat body)
- * and the ops layer (local region state machine). */
-#define DSTM_REGION_STATUS_WRITABLE 0
-#define DSTM_REGION_STATUS_READABLE 1
+/* Region status values (DSTM_REGION_STATUS_WRITABLE, DSTM_REGION_STATUS_READABLE,
+ * DSTM_REGION_STATUS_DISCARDABLE) are defined in internal/region.h. */
 
 #define DSTM_MSG_TYPE_PUT 0
 #define DSTM_MSG_TYPE_GET_REQ 1

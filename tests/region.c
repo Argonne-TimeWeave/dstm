@@ -649,6 +649,197 @@ START_TEST(test_region_stress_many_small)
 END_TEST
 
 /*******************************************************************************
+ * Version Management Tests
+ ******************************************************************************/
+
+START_TEST(test_version_find_nonexistent)
+{
+	dstm_region_t *r = NULL;
+	int err = dstm_region_create(&r, 4096);
+	ck_assert_int_eq(err, DSTM_SUCCESS);
+	ck_assert_ptr_nonnull(r);
+
+	/* No versions exist yet */
+	dstm_region_version_t *v = dstm_region_version_find(r, 0);
+	ck_assert_ptr_null(v);
+
+	v = dstm_region_version_find(r, 42);
+	ck_assert_ptr_null(v);
+
+	/* NULL region */
+	v = dstm_region_version_find(NULL, 0);
+	ck_assert_ptr_null(v);
+
+	dstm_region_destroy(&r);
+}
+END_TEST
+
+START_TEST(test_version_find_or_create)
+{
+	dstm_region_t *r = NULL;
+	int err = dstm_region_create(&r, 4096);
+	ck_assert_int_eq(err, DSTM_SUCCESS);
+
+	/* Create version 0 */
+	dstm_region_version_t *v0 = dstm_region_version_find_or_create(r, 0);
+	ck_assert_ptr_nonnull(v0);
+	ck_assert_int_eq(v0->time, 0);
+	ck_assert_int_eq(v0->status, DSTM_REGION_STATUS_WRITABLE);
+	ck_assert_ptr_nonnull(v0->buffer);
+
+	/* Find it again — should return the same pointer */
+	dstm_region_version_t *v0b = dstm_region_version_find_or_create(r, 0);
+	ck_assert_ptr_eq(v0, v0b);
+
+	/* Also findable via find */
+	dstm_region_version_t *v0c = dstm_region_version_find(r, 0);
+	ck_assert_ptr_eq(v0, v0c);
+
+	dstm_region_destroy(&r);
+}
+END_TEST
+
+START_TEST(test_version_multiple)
+{
+	dstm_region_t *r = NULL;
+	int err = dstm_region_create(&r, 4096);
+	ck_assert_int_eq(err, DSTM_SUCCESS);
+
+	/* Create versions out of order */
+	dstm_region_version_t *v5 = dstm_region_version_find_or_create(r, 5);
+	dstm_region_version_t *v2 = dstm_region_version_find_or_create(r, 2);
+	dstm_region_version_t *v8 = dstm_region_version_find_or_create(r, 8);
+	dstm_region_version_t *v0 = dstm_region_version_find_or_create(r, 0);
+
+	ck_assert_ptr_nonnull(v0);
+	ck_assert_ptr_nonnull(v2);
+	ck_assert_ptr_nonnull(v5);
+	ck_assert_ptr_nonnull(v8);
+
+	/* Verify sorted order (ascending by time) */
+	ck_assert_ptr_eq(r->versions, v0);
+	ck_assert_ptr_eq(v0->next, v2);
+	ck_assert_ptr_eq(v2->next, v5);
+	ck_assert_ptr_eq(v5->next, v8);
+
+	/* Each has its own buffer */
+	ck_assert_ptr_ne(v0->buffer, v2->buffer);
+	ck_assert_ptr_ne(v2->buffer, v5->buffer);
+	ck_assert_ptr_ne(v5->buffer, v8->buffer);
+
+	/* All start WRITABLE */
+	ck_assert_int_eq(v0->status, DSTM_REGION_STATUS_WRITABLE);
+	ck_assert_int_eq(v2->status, DSTM_REGION_STATUS_WRITABLE);
+	ck_assert_int_eq(v5->status, DSTM_REGION_STATUS_WRITABLE);
+	ck_assert_int_eq(v8->status, DSTM_REGION_STATUS_WRITABLE);
+
+	/* Find each one */
+	ck_assert_ptr_eq(dstm_region_version_find(r, 0), v0);
+	ck_assert_ptr_eq(dstm_region_version_find(r, 2), v2);
+	ck_assert_ptr_eq(dstm_region_version_find(r, 5), v5);
+	ck_assert_ptr_eq(dstm_region_version_find(r, 8), v8);
+
+	/* Non-existent timestamps return NULL */
+	ck_assert_ptr_null(dstm_region_version_find(r, 1));
+	ck_assert_ptr_null(dstm_region_version_find(r, 3));
+	ck_assert_ptr_null(dstm_region_version_find(r, 99));
+
+	dstm_region_destroy(&r);
+}
+END_TEST
+
+START_TEST(test_version_destroy)
+{
+	dstm_region_t *r = NULL;
+	int err = dstm_region_create(&r, 4096);
+	ck_assert_int_eq(err, DSTM_SUCCESS);
+
+	dstm_region_version_t *v0 = dstm_region_version_find_or_create(r, 0);
+	dstm_region_version_t *v1 = dstm_region_version_find_or_create(r, 1);
+	dstm_region_version_t *v2 = dstm_region_version_find_or_create(r, 2);
+	ck_assert_ptr_nonnull(v0);
+	ck_assert_ptr_nonnull(v1);
+	ck_assert_ptr_nonnull(v2);
+
+	/* Destroy the middle version */
+	dstm_region_version_destroy(r, v1);
+
+	/* v1 is gone */
+	ck_assert_ptr_null(dstm_region_version_find(r, 1));
+
+	/* v0 and v2 are still there */
+	ck_assert_ptr_eq(dstm_region_version_find(r, 0), v0);
+	ck_assert_ptr_eq(dstm_region_version_find(r, 2), v2);
+
+	/* List integrity: v0 -> v2 */
+	ck_assert_ptr_eq(r->versions, v0);
+	ck_assert_ptr_eq(v0->next, v2);
+
+	/* Destroy the head */
+	dstm_region_version_destroy(r, v0);
+	ck_assert_ptr_eq(r->versions, v2);
+	ck_assert_ptr_null(dstm_region_version_find(r, 0));
+
+	/* Destroy the last one */
+	dstm_region_version_destroy(r, v2);
+	ck_assert_ptr_null(r->versions);
+
+	dstm_region_destroy(&r);
+}
+END_TEST
+
+START_TEST(test_version_buffer_independence)
+{
+	dstm_region_t *r = NULL;
+	int err = dstm_region_create(&r, 4096);
+	ck_assert_int_eq(err, DSTM_SUCCESS);
+
+	dstm_region_version_t *v0 = dstm_region_version_find_or_create(r, 0);
+	dstm_region_version_t *v1 = dstm_region_version_find_or_create(r, 1);
+	ck_assert_ptr_nonnull(v0);
+	ck_assert_ptr_nonnull(v1);
+
+	/* Write different patterns to each version's buffer */
+	memset(v0->buffer, 0xAA, r->size);
+	memset(v1->buffer, 0xBB, r->size);
+
+	/* Verify they are independent */
+	unsigned char *b0 = (unsigned char *)v0->buffer;
+	unsigned char *b1 = (unsigned char *)v1->buffer;
+	for (size_t i = 0; i < r->size; i++) {
+		ck_assert_uint_eq(b0[i], 0xAA);
+		ck_assert_uint_eq(b1[i], 0xBB);
+	}
+
+	dstm_region_destroy(&r);
+}
+END_TEST
+
+START_TEST(test_version_status_transitions)
+{
+	dstm_region_t *r = NULL;
+	int err = dstm_region_create(&r, 4096);
+	ck_assert_int_eq(err, DSTM_SUCCESS);
+
+	dstm_region_version_t *v = dstm_region_version_find_or_create(r, 0);
+	ck_assert_ptr_nonnull(v);
+
+	/* Starts WRITABLE */
+	ck_assert_int_eq(v->status, DSTM_REGION_STATUS_WRITABLE);
+
+	/* Manual transition to READABLE */
+	v->status = DSTM_REGION_STATUS_READABLE;
+	ck_assert_int_eq(v->status, DSTM_REGION_STATUS_READABLE);
+
+	/* Manual transition to DISCARDABLE */
+	v->status = DSTM_REGION_STATUS_DISCARDABLE;
+	ck_assert_int_eq(v->status, DSTM_REGION_STATUS_DISCARDABLE);
+
+	dstm_region_destroy(&r);
+}
+END_TEST
+
+/*******************************************************************************
  * Test Suite Setup
  ******************************************************************************/
 
@@ -662,6 +853,7 @@ Suite *region_suite(void)
 	TCase *tc_frag;
 	TCase *tc_exhaust;
 	TCase *tc_stress;
+	TCase *tc_version;
 
 	s = suite_create("region");
 
@@ -722,6 +914,16 @@ Suite *region_suite(void)
 	tcase_add_test(tc_stress, test_region_stress_mixed_sizes);
 	tcase_add_test(tc_stress, test_region_stress_many_small);
 	suite_add_tcase(s, tc_stress);
+
+	/* Version management tests */
+	tc_version = tcase_create("version");
+	tcase_add_test(tc_version, test_version_find_nonexistent);
+	tcase_add_test(tc_version, test_version_find_or_create);
+	tcase_add_test(tc_version, test_version_multiple);
+	tcase_add_test(tc_version, test_version_destroy);
+	tcase_add_test(tc_version, test_version_buffer_independence);
+	tcase_add_test(tc_version, test_version_status_transitions);
+	suite_add_tcase(s, tc_version);
 
 	return s;
 }

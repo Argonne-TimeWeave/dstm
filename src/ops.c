@@ -105,11 +105,15 @@ int dstm_request_destroy(dstm_request_t **r)
 }
 
 /*******************************************************************************
- * Versioning logic: single copy edition.
+ * Versioning logic: multi-version edition.
  *
- * Two states for a region:
- * - writable:
- * - readable
+ * Each region maintains a list of timestamped versions, each with its own
+ * state machine:  WRITABLE -> READABLE -> DISCARDABLE.
+ *
+ * PUTs are applied immediately to the target version (creating it on demand).
+ * GETs wait for the version to become READABLE.  Old versions are evicted
+ * (DISCARDABLE) once all GETs are done and no neighbor can still send a GET
+ * for that timestamp (distance-based check).
  ******************************************************************************/
 
 int dstm_region_send_heartbeat_to_all(dstm_time_t time, int status)
@@ -131,141 +135,155 @@ int dstm_region_send_heartbeat_to_all(dstm_time_t time, int status)
 	return 0;
 }
 
-static int dstm_local_region_status = DSTM_REGION_STATUS_WRITABLE;
 static int dstm_local_heartbeat_time = 0;
+
+/* Check whether a WRITABLE version can transition to READABLE.
+ * Returns 1 if the transition should happen, 0 otherwise. */
+static int dstm_version_can_become_readable(dstm_region_version_t *v)
+{
+	dstm_region_t *region = dstm_global_context.region;
+
+	/* Check for pending PUT requests targeting this version's time. */
+	dstm_request_t *it;
+	DL_FOREACH(requests, it)
+	{
+		dstm_time_t target = it->time + it->delta;
+		if (target != v->time)
+			continue;
+
+		if (it->type == DSTM_REQUEST_TYPE_LOCAL_PUT &&
+		    it->status != DSTM_REQUEST_STATUS_DONE)
+			return 0;
+
+		if (it->type == DSTM_REQUEST_TYPE_IN_PUT &&
+		    it->status != DSTM_REQUEST_STATUS_DONE)
+			return 0;
+	}
+
+	/* Could we receive more PUTs from neighbors?
+	 * A neighbor at distance dist whose last-known time is nt can still
+	 * send a PUT targeting v->time if nt + dist <= v->time.
+	 *
+	 * Barrier optimization: after barrier round 1 completes, all ranks
+	 * have finished their outgoing work.  No new PUT messages will
+	 * arrive, so skip all neighbor distance checks. */
+	if (!region->barrier_all_drained) {
+		for (int i = 0; i < dstm_global_context.world_size; i++) {
+			int dist = dstm_distance_get(
+			        dstm_global_context.distances,
+			        dstm_global_context.rank, i);
+			if (dist <= 0)
+				continue;
+
+			dstm_time_t nt;
+			int s;
+			dstm_region_get_ninfo(region, i, &nt, &s);
+
+			dstm_log_debug("checkr v%" PRId64 ": nt=%" PRId64
+			               " dist=%d\n",
+			               v->time, nt, dist);
+			if (nt + dist <= v->time)
+				return 0;
+		}
+	}
+
+	return 1;
+}
+
+/* Check whether a READABLE version can transition to DISCARDABLE.
+ * Returns 1 if the transition should happen, 0 otherwise. */
+static int dstm_version_can_become_discardable(dstm_region_version_t *v)
+{
+	dstm_region_t *region = dstm_global_context.region;
+
+	/* Check for pending GET requests targeting this version's time. */
+	dstm_request_t *it;
+	DL_FOREACH(requests, it)
+	{
+		dstm_time_t target = it->time + it->delta;
+		if (target != v->time)
+			continue;
+
+		if (it->type == DSTM_REQUEST_TYPE_LOCAL_GET &&
+		    it->status != DSTM_REQUEST_STATUS_DONE)
+			return 0;
+
+		if (it->type == DSTM_REQUEST_TYPE_IN_GET &&
+		    it->status != DSTM_REQUEST_STATUS_DONE)
+			return 0;
+	}
+
+	/* Could we receive more GETs from neighbors?
+	 * A neighbor at distance dist whose last-known time is nt can still
+	 * send a GET targeting v->time if nt - dist <= v->time.
+	 *
+	 * Barrier optimization: after barrier round 1 completes, no new
+	 * GET messages will arrive, so skip all neighbor distance checks. */
+	if (!region->barrier_all_drained) {
+		for (int i = 0; i < dstm_global_context.world_size; i++) {
+			int dist = dstm_distance_get(
+			        dstm_global_context.distances,
+			        dstm_global_context.rank, i);
+			if (dist <= 0)
+				continue;
+
+			dstm_time_t nt;
+			int s;
+			dstm_region_get_ninfo(region, i, &nt, &s);
+
+			dstm_log_debug("checkd v%" PRId64 ": nt=%" PRId64
+			               " dist=%d\n",
+			               v->time, nt, dist);
+			if (nt - dist <= v->time)
+				return 0;
+		}
+	}
+
+	return 1;
+}
 
 int dstm_region_status_update(dstm_time_t time)
 {
-	(void)time;
-	if (dstm_local_region_status == DSTM_REGION_STATUS_WRITABLE) {
-		/* we're in the process of accepting writes, check if we should
-		 * stay in that state or start accepting reads
-		 */
+	dstm_region_t *region = dstm_global_context.region;
+	dstm_region_version_t *v, *vtmp;
 
-		/* do we have pending puts? */
-		dstm_request_t *it;
-		DL_FOREACH(requests, it)
-		{
-			/* skip any put not related to current region time */
-			if (it->time + it->delta >
-			    dstm_global_context.region->time)
-				continue;
+	DL_FOREACH_SAFE(region->versions, v, vtmp)
+	{
+		switch (v->status) {
+		case DSTM_REGION_STATUS_WRITABLE:
+			if (dstm_version_can_become_readable(v)) {
+				v->status = DSTM_REGION_STATUS_READABLE;
+				dstm_log_info("version readable, time: %" PRId64
+				              "\n",
+				              v->time);
+			}
+			break;
 
-			if (it->type == DSTM_REQUEST_TYPE_LOCAL_PUT &&
-			    it->status != DSTM_REQUEST_STATUS_DONE)
-				return 0;
+		case DSTM_REGION_STATUS_READABLE:
+			if (dstm_version_can_become_discardable(v)) {
+				v->status = DSTM_REGION_STATUS_DISCARDABLE;
+				dstm_log_info("version discardable, time: %"
+				              PRId64 "\n",
+				              v->time);
+			}
+			break;
 
-			if (it->type == DSTM_REQUEST_TYPE_IN_PUT &&
-			    it->status != DSTM_REQUEST_STATUS_DONE)
-				return 0;
+		case DSTM_REGION_STATUS_DISCARDABLE:
+			dstm_log_info("evicting version, time: %" PRId64 "\n",
+			              v->time);
+			dstm_region_version_destroy(region, v);
+			break;
 		}
-
-		/* could we receive more puts?
-		 * i.e. are my neighbors all after currenttime - distance
-		 */
-		for (int i = 0; i < dstm_global_context.world_size; i++) {
-			int dist =
-			        dstm_distance_get(dstm_global_context.distances,
-			                          dstm_global_context.rank, i);
-
-			/* skip non neighbors */
-			if (dist <= 0)
-				continue;
-
-			/* A lower-ranked neighbor that has forwarded the
-			 * barrier token will never send another req with a
-			 * lower time, so it is has if it reached that time.
-			 */
-			dstm_time_t bt =
-			        dstm_global_context.region->barrier_time;
-			
-			if (bt >= 0 && i < dstm_global_context.rank
-			    && bt + dist >= dstm_global_context.region->time)
-				continue;
-
-			dstm_time_t nt;
-			int s;
-			dstm_region_get_ninfo(dstm_global_context.region, i,
-			                      &nt, &s);
-			
-			dstm_log_debug("checkr: %" PRIu64 " %d\n", nt, dist);
-			if (nt + dist <= dstm_global_context.region->time)
-				return 0;
-
-		}
-		dstm_log_info("region readable, time: %" PRId64 "\n",
-		              dstm_global_context.region->time);
-
-		/* switching to read, not changing time */
-		dstm_local_region_status = DSTM_REGION_STATUS_READABLE;
-
-		return 0;
-	} else {
-		/* we're in the progress of accepting reads, check if we should
-		 * stay in that state or start accepting writes
-		 */
-
-		/* do we have pending gets */
-		dstm_request_t *it;
-		DL_FOREACH(requests, it)
-		{
-			/* skip any get not related to current region time */
-			if (it->time + it->delta >
-			    dstm_global_context.region->time)
-				continue;
-
-			if (it->type == DSTM_REQUEST_TYPE_LOCAL_GET &&
-			    it->status != DSTM_REQUEST_STATUS_DONE)
-				return 0;
-
-			if (it->type == DSTM_REQUEST_TYPE_IN_GET &&
-			    it->status != DSTM_REQUEST_STATUS_DONE)
-				return 0;
-		}
-
-		/* could we receive more gets?
-		 * i.e. are my neighbors closer than currenttime - distance
-		 */
-		for (int i = 0; i < dstm_global_context.world_size; i++) {
-			int dist =
-			        dstm_distance_get(dstm_global_context.distances,
-			                          dstm_global_context.rank, i);
-
-			/* skip non neighbors */
-			if (dist <= 0)
-				continue;
-
-			/* A lower-ranked neighbor that has forwarded the
-			 * barrier token will never send another PUT or
-			 * GET_REQ, so it cannot block our state transition. */
-			dstm_time_t bt =
-			        dstm_global_context.region->barrier_time;
-			
-			if (bt >= 0 && i < dstm_global_context.rank
-			    && bt - dist >= dstm_global_context.region->time)
-				continue;
-
-			dstm_time_t nt;
-			int s;
-			dstm_region_get_ninfo(dstm_global_context.region, i,
-			                      &nt, &s);
-
-			dstm_log_debug("checkw: %" PRIu64 " %d\n", nt, dist);
-			if (nt - dist <= dstm_global_context.region->time)
-				return 0;
-
-		}
-
-		/* switching to write, should only happen when moving in time.
-		 * */
-		if (dstm_global_context.region->time < time) {
-			dstm_global_context.region->time++;
-			dstm_log_info("region writable, time: %" PRId64 "\n",
-			              dstm_global_context.region->time);
-			dstm_local_region_status = DSTM_REGION_STATUS_WRITABLE;
-		}
-		return 0;
 	}
+
+	/* Update region->time to the minimum active version timestamp.
+	 * If no versions remain, advance to the caller's time. */
+	if (region->versions != NULL)
+		region->time = region->versions->time;
+	else
+		region->time = time;
+
+	return 0;
 }
 
 /*******************************************************************************
@@ -287,33 +305,36 @@ int dstm_request_progress_local_put(dstm_request_t *req)
 	/* logic of a local put:
 	 * - starts in INIT state, with payload buffered in req->buf.
 	 *
-	 * Can be completed when the region is writable at the target time.
+	 * Applied immediately by finding or creating the target version.
 	 */
 	dstm_region_t *rg = dstm_get_local_region();
 	assert(req->status == DSTM_REQUEST_STATUS_INIT);
-	if (req->time + req->delta == rg->time &&
-	    dstm_local_region_status == DSTM_REGION_STATUS_WRITABLE) {
-		void *dptr = dstm_region_ptr_tovoid(rg, req->dst);
-		memcpy(dptr, req->buf, req->size);
-		req->status = DSTM_REQUEST_STATUS_DONE;
-	}
+	dstm_time_t target = req->time + req->delta;
+	dstm_region_version_t *v = dstm_region_version_find_or_create(rg,
+	                                                              target);
+	assert(v != NULL);
+	void *dptr = (char *)v->buffer + req->dst.offset;
+	memcpy(dptr, req->buf, req->size);
+	req->status = DSTM_REQUEST_STATUS_DONE;
 	return 0;
 }
 
 int dstm_request_progress_local_get(dstm_request_t *req)
 {
 	/* logic of a local get:
-	 * - starts in INIT state, enqueued as a request to copy data from the
-	 *   local region into the caller's buffer (req->dst, REGIONID_LOCAL).
+	 * - starts in INIT state, enqueued as a request to copy data from a
+	 *   version's buffer into the caller's buffer (req->dst,
+	 *   REGIONID_LOCAL).
 	 *
-	 * - when step == req->time + delta, apply the request.
+	 * - completes when the target version exists and is READABLE.
 	 */
 	dstm_region_t *rg = dstm_get_local_region();
 	assert(req->status == DSTM_REQUEST_STATUS_INIT);
-	if (req->time + req->delta == rg->time &&
-	    dstm_local_region_status == DSTM_REGION_STATUS_READABLE) {
+	dstm_time_t target = req->time + req->delta;
+	dstm_region_version_t *v = dstm_region_version_find(rg, target);
+	if (v != NULL && v->status == DSTM_REGION_STATUS_READABLE) {
 		void *dptr = dstm_region_ptr_tovoid(rg, req->dst);
-		void *sptr = dstm_region_ptr_tovoid(rg, req->src);
+		void *sptr = (char *)v->buffer + req->src.offset;
 		memcpy(dptr, sptr, req->size);
 		req->status = DSTM_REQUEST_STATUS_DONE;
 	}
@@ -324,31 +345,36 @@ int dstm_request_progress_in_put(dstm_request_t *req)
 {
 	/* logic:
 	 * - init: payload already buffered in req->buf (copied on receipt).
-	 * - done: payload applied to local region.
+	 * - done: payload applied immediately to the target version.
 	 */
 	dstm_region_t *rg = dstm_get_local_region();
 	assert(req->status == DSTM_REQUEST_STATUS_INIT);
-	if (req->time + req->delta == rg->time &&
-	    dstm_local_region_status == DSTM_REGION_STATUS_WRITABLE) {
-		void *dptr = dstm_region_ptr_tovoid(rg, req->dst);
-		memcpy(dptr, req->buf, req->size);
-		req->status = DSTM_REQUEST_STATUS_DONE;
-	}
+	dstm_time_t target = req->time + req->delta;
+	dstm_region_version_t *v = dstm_region_version_find_or_create(rg,
+	                                                              target);
+	assert(v != NULL);
+	void *dptr = (char *)v->buffer + req->dst.offset;
+	memcpy(dptr, req->buf, req->size);
+	req->status = DSTM_REQUEST_STATUS_DONE;
 	return 0;
 }
 
 int dstm_request_progress_in_get(dstm_request_t *req)
 {
 	/* logic:
-	 * - init: GET_REQ received, waiting for the region to become readable.
+	 * - init: GET_REQ received, waiting for the version to become
+	 *   readable.
 	 * - isend: reply buffered in req->buf and MPI_Isend posted.
 	 * - done: send completed.
 	 */
 	dstm_region_t *rg = dstm_get_local_region();
 	if (req->status == DSTM_REQUEST_STATUS_INIT) {
-		if (req->time + req->delta == rg->time &&
-		    dstm_local_region_status == DSTM_REGION_STATUS_READABLE) {
-			void *sptr = dstm_region_ptr_tovoid(rg, req->src);
+		dstm_time_t target = req->time + req->delta;
+		dstm_region_version_t *v = dstm_region_version_find(rg,
+		                                                    target);
+		if (v != NULL &&
+		    v->status == DSTM_REGION_STATUS_READABLE) {
+			void *sptr = (char *)v->buffer + req->src.offset;
 
 			/* Free the packbuf from the original received GET_REQ
 			 * before reusing the message for the reply. */
@@ -414,36 +440,45 @@ int dstm_request_progress_out_get(dstm_request_t *req)
  * and inserted into the global request list; dstm_request_progress_barrier()
  * advances its state machine on every progress iteration.
  *
- * Ring protocol (rank 0 → 1 → … → N-1 → 0, forward pass, then reverse):
+ * 3-round ring protocol (rank 0 -> 1 -> ... -> N-1 -> 0):
  *
- *   BARRIER_DRAIN
- *     Wait until all OUT_PUT requests have left ISEND status (i.e. MPI has
- *     accepted them).  This ensures every PUT we issued is in-flight before
- *     we touch the barrier token.
- *     → rank 0:     inject forward token, go to BARRIER_DRAINING
- *       rank > 0:   go to BARRIER_WAIT
+ * Round 1 -- drain outgoing:
+ *   Each rank waits until its OUT_PUT/OUT_GET requests have completed, then
+ *   forwards the token.  When the token returns to rank 0, all ranks have
+ *   finished their outgoing work: no new PUT or GET messages will be issued
+ *   by any rank.
  *
- *   BARRIER_WAIT  (non-zero ranks only)
- *     Wait for region->barrier_time >= 0, which means the BARRIER message
- *     handler in dstm_do_progress() has received the forward token from
- *     our predecessor (rank-1).  Once seen, reset barrier_time = -1 so the
- *     completion token can set it again, then go to BARRIER_DRAINING.
+ *   BARRIER_DRAIN_OUT
+ *     Wait for all OUT_PUT/OUT_GET requests to finish.
+ *     -> rank 0:  inject R1 token, go to R1_FORWARDED
+ *        rank >0: go to R1_WAIT
  *
- *   BARRIER_DRAINING
- *     Drain all remaining requests (other than this barrier request itself).
- *     Once the queue is empty, send the forward token to the successor and
- *     go to BARRIER_FORWARDED.
- *     (rank 0 transitions here immediately after injecting its forward token,
- *     so it also drains before waiting for the ring to close.)
+ *   BARRIER_R1_WAIT  (non-zero ranks only)
+ *     Wait for a token (barrier_token_count > 0).  Consume it, send the
+ *     R1 token to the successor, go to R1_FORWARDED.
  *
- *   BARRIER_FORWARDED
- *     rank 0:   wait for barrier_time >= 0 (forward token returned from N-1).
- *               Reset barrier_time = -1, drain queue (should already be empty),
- *               re-inject the completion token, go to DONE.
- *     rank > 0: wait for barrier_time >= 0 (completion token from predecessor).
- *               Forward it to successor (all but the last rank), go to DONE.
+ *   BARRIER_R1_FORWARDED
+ *     Wait for a token.  Consume it.
+ *     -> rank 0:  inject R2 token
+ *     -> all:     set barrier_all_drained = 1, go to R2_DRAINING
  *
- * Helper: dstm_barrier_send_token() — sends a BARRIER message to the ring
+ * Round 2 -- complete all pending:
+ *   barrier_all_drained is now set, which bypasses all neighbor distance
+ *   checks in version transitions.  Versions rapidly advance through
+ *   WRITABLE -> READABLE -> DISCARDABLE, unblocking any pending IN_GET
+ *   and LOCAL_GET requests.
+ *
+ *   BARRIER_R2_DRAINING
+ *     Drain all non-barrier requests.  Once the queue is empty, send the
+ *     R2 token to the successor, go to R2_FORWARDED.
+ *
+ *   BARRIER_R2_FORWARDED
+ *     Wait for a token.  Consume it.
+ *     -> rank 0:  inject exit token (if world_size > 1)
+ *     -> rank >0 (< N-1): forward exit token to successor
+ *     -> all:     reset barrier_all_drained = 0, go to DONE
+ *
+ * Helper: dstm_barrier_send_token() -- sends a BARRIER message to the ring
  * successor carrying the barrier's last_time.
  ******************************************************************************/
 
@@ -461,14 +496,15 @@ static void dstm_barrier_send_token(dstm_time_t last_time)
 	dstm_msg_send(&m, tag);
 }
 
-/* Return 1 if any OUT_PUT request is still being handed to MPI. */
-static int dstm_has_pending_out_puts(void)
+/* Return 1 if any outgoing request (OUT_PUT or OUT_GET) is not yet done. */
+static int dstm_has_pending_outgoing(void)
 {
 	dstm_request_t *it;
 	DL_FOREACH(requests, it)
 	{
-		if (it->type == DSTM_REQUEST_TYPE_OUT_PUT &&
-		    it->status == DSTM_REQUEST_STATUS_ISEND)
+		if ((it->type == DSTM_REQUEST_TYPE_OUT_PUT ||
+		     it->type == DSTM_REQUEST_TYPE_OUT_GET) &&
+		    it->status != DSTM_REQUEST_STATUS_DONE)
 			return 1;
 	}
 	return 0;
@@ -491,85 +527,105 @@ int dstm_request_progress_barrier(dstm_request_t *req)
 	int rank = dstm_global_context.rank;
 	int world_size = dstm_global_context.world_size;
 	dstm_time_t last_time = req->time; /* last_time stored in req->time */
-	dstm_time_t bt = dstm_global_context.region->barrier_time;
+	dstm_region_t *region = dstm_global_context.region;
 
 	switch (req->status) {
 
-	case DSTM_REQUEST_STATUS_BARRIER_DRAIN:
-		/* Wait for all outgoing PUTs to leave MPI's hands. */
-		if (dstm_has_pending_out_puts())
+	/* ---- Round 1: drain outgoing requests ---- */
+
+	case DSTM_REQUEST_STATUS_BARRIER_DRAIN_OUT:
+		/* Wait for all outgoing PUT/GET requests to finish. */
+		if (dstm_has_pending_outgoing())
 			break;
 
 		if (rank == 0) {
-			/* Rank 0 injects the forward token immediately. */
+			/* Rank 0 injects the R1 token immediately. */
 			dstm_barrier_send_token(last_time);
-			dstm_log_info("barrier: rank 0 sent forward token, "
+			dstm_log_info("barrier: rank 0 sent R1 token, "
 			              "last_time: %" PRId64 "\n",
 			              last_time);
-			req->status = DSTM_REQUEST_STATUS_BARRIER_DRAINING;
+			req->status =
+			        DSTM_REQUEST_STATUS_BARRIER_R1_FORWARDED;
 		} else {
-			req->status = DSTM_REQUEST_STATUS_BARRIER_WAIT;
+			req->status = DSTM_REQUEST_STATUS_BARRIER_R1_WAIT;
 		}
 		break;
 
-	case DSTM_REQUEST_STATUS_BARRIER_WAIT:
-		/* Non-zero ranks: wait for the forward token from predecessor.
-		 * barrier_time is set by the BARRIER message handler in
-		 * dstm_do_progress(). */
-		if (bt < 0)
+	case DSTM_REQUEST_STATUS_BARRIER_R1_WAIT:
+		/* Non-zero ranks: wait for the R1 token from predecessor. */
+		if (region->barrier_token_count == 0)
 			break;
 
-		/* Token received — reset so the completion token can re-arm
-		 * it. */
-		dstm_global_context.region->barrier_time = -1;
-		dstm_log_info("barrier: rank %d received forward token, "
-		              "last_time: %" PRId64 "\n",
-		              rank, bt);
-		req->status = DSTM_REQUEST_STATUS_BARRIER_DRAINING;
+		region->barrier_token_count--;
+		dstm_log_info("barrier: rank %d received R1 token\n", rank);
+
+		/* Forward R1 token to successor. */
+		dstm_barrier_send_token(last_time);
+		dstm_log_info("barrier: rank %d sent R1 token\n", rank);
+		req->status = DSTM_REQUEST_STATUS_BARRIER_R1_FORWARDED;
 		break;
 
-	case DSTM_REQUEST_STATUS_BARRIER_DRAINING:
-		/* Drain all non-barrier requests before forwarding. */
+	case DSTM_REQUEST_STATUS_BARRIER_R1_FORWARDED:
+		/* Wait for the R1 ring to close (rank 0) or for the R2
+		 * token (non-zero ranks). */
+		if (region->barrier_token_count == 0)
+			break;
+
+		region->barrier_token_count--;
+		dstm_log_info("barrier: rank %d R1 complete\n", rank);
+
+		/* Rank 0: inject R2 token. */
+		if (rank == 0) {
+			dstm_barrier_send_token(last_time);
+			dstm_log_info("barrier: rank 0 sent R2 token\n");
+		}
+
+		/* All ranks: enable barrier optimization so version
+		 * transitions bypass neighbor distance checks. */
+		region->barrier_all_drained = 1;
+		req->status = DSTM_REQUEST_STATUS_BARRIER_R2_DRAINING;
+		break;
+
+	/* ---- Round 2: complete all pending requests ---- */
+
+	case DSTM_REQUEST_STATUS_BARRIER_R2_DRAINING:
+		/* Drain all non-barrier requests. With barrier_all_drained
+		 * set, version transitions are no longer blocked by stale
+		 * neighbor heartbeat times. */
 		if (dstm_has_non_barrier_requests(req))
 			break;
 
-		/* Queue is empty: forward the token and move on. */
-		if (rank != 0) {
-			/* Non-zero: send to successor. */
-			dstm_barrier_send_token(last_time);
-			dstm_log_info("barrier: rank %d sent forward token, "
-			              "last_time: %" PRId64 "\n",
-			              rank, last_time);
-		}
-		req->status = DSTM_REQUEST_STATUS_BARRIER_FORWARDED;
+		/* Queue is empty: forward the R2 token. */
+		dstm_barrier_send_token(last_time);
+		dstm_log_info("barrier: rank %d sent R2 token\n", rank);
+		req->status = DSTM_REQUEST_STATUS_BARRIER_R2_FORWARDED;
 		break;
 
-	case DSTM_REQUEST_STATUS_BARRIER_FORWARDED:
-		/* Wait for the completion/return token. */
-		if (bt < 0)
+	case DSTM_REQUEST_STATUS_BARRIER_R2_FORWARDED:
+		/* Wait for the R2 ring to close (rank 0) or for the exit
+		 * token (non-zero ranks). */
+		if (region->barrier_token_count == 0)
 			break;
 
-		/* Token received. */
-		dstm_global_context.region->barrier_time = -1;
+		region->barrier_token_count--;
 
 		if (rank == 0) {
-			/* Ring is complete.  Re-inject the completion token so
-			 * all other ranks can exit.  With a single rank the
-			 * barrier is trivially done — no token needed. */
-			dstm_log_info("barrier: rank 0 ring complete, "
-			              "last_time: %" PRId64 "\n",
-			              last_time);
+			/* R2 ring complete.  Inject exit token so all other
+			 * ranks can leave.  Single-rank case needs no token. */
+			dstm_log_info("barrier: rank 0 R2 complete\n");
 			if (world_size > 1)
 				dstm_barrier_send_token(last_time);
 		} else {
-			/* Forward the completion token to successor (all but
-			 * the last rank). */
-			dstm_log_info("barrier: rank %d received completion "
-			              "token, last_time: %" PRId64 "\n",
-			              rank, bt);
+			dstm_log_info("barrier: rank %d received exit "
+			              "token\n",
+			              rank);
+			/* Forward exit token to successor (all but last). */
 			if (rank < world_size - 1)
 				dstm_barrier_send_token(last_time);
 		}
+
+		/* Clean up barrier state. */
+		region->barrier_all_drained = 0;
 		req->status = DSTM_REQUEST_STATUS_DONE;
 		break;
 
@@ -691,11 +747,10 @@ int dstm_do_progress(dstm_time_t time)
 			dstm_msg_free_packbuf(&m);
 			break;
 		case DSTM_MSG_TYPE_BARRIER:
-			/* Record the barrier's last_time so the region status
-			 * update can relax neighbor checks for lower-ranked
-			 * peers that have already forwarded the token. */
-			dstm_global_context.region->barrier_time =
-			        m.u.barrier.last_time;
+			/* Increment the token count so the barrier DFA can
+			 * detect and consume this token on its next
+			 * progress iteration. */
+			dstm_global_context.region->barrier_token_count++;
 			dstm_log_info("barrier token received from rank %d, "
 			              "last_time: %" PRId64 "\n",
 			              m.header.src_rank,
@@ -707,32 +762,23 @@ int dstm_do_progress(dstm_time_t time)
 		}
 	}
 
-	/* Progressing requests is quite counter-intuitive. We're not really
-	 * constrained by time, not directly. Sending out and Receiving messages
-	 * is just about making progress on MPI operations. And applying puts
-	 * and gets is about "availability" of that version in time of memory.
+	/* Multi-version progress model:
 	 *
-	 * Assume we maintain a copy of each local region per time stamp.  -
-	 * ignore unwritten bytes, assume arbitrary invalid data at init - when
-	 * all the puts directed at it have been applied, and no more can be
-	 * received, then this specific version is "ready" - gets to a region
-	 * can progress when the version is "ready".
+	 * Each region maintains multiple timestamped versions.  PUTs are
+	 * applied immediately to the target version (creating it on demand
+	 * with an uninitialized buffer).  GETs wait for the target version
+	 * to become READABLE (all PUTs applied, no more can arrive).
 	 *
-	 * The challenge is then mostly a question of extra constraints, in
-	 * particular:
-	 *  1. An optimized version of that were we remove old copies as we go.
-	 *  2. A version with limited amount of copies per region (a fixed
-	 *     number of timestamps available at once).
-	 *  3. A version with a single copy per region (only one timestamp
-	 *     available at once).
+	 * Each version has its own state machine:
+	 *   WRITABLE -> READABLE -> DISCARDABLE
 	 *
-	 * The unlimited case is almost too easy: apply any put as soon as
-	 * possible, and only track readiness of each region for gets.
-	 * A more constrained version introduces additional synchronizations,
-	 * since it requires discarding old copies, and that can only be done
-	 * once all gets are done and no more can arrive.
+	 * The WRITABLE -> READABLE transition uses distance-based neighbor
+	 * checks to ensure no more PUTs can arrive.  The READABLE ->
+	 * DISCARDABLE transition uses the same check for GETs.
+	 * DISCARDABLE versions are evicted (buffer freed).
 	 *
-	 * For now we implement the single copy version.
+	 * region->time tracks the minimum active version timestamp and
+	 * advances as old versions are evicted.
 	 */
 
 	dstm_region_status_update(time);
@@ -925,7 +971,7 @@ int dstm_get(int rank,
 }
 
 /*******************************************************************************
- * Barrier: distributed termination via a two-pass ring token algorithm.
+ * Barrier: distributed termination via a three-round ring token algorithm.
  *
  * dstm_barrier() creates a BARRIER request and inserts it into the global
  * request list.  The barrier DFA (dstm_request_progress_barrier()) is then
@@ -944,7 +990,7 @@ int dstm_barrier(dstm_time_t last_time)
 	dstm_request_create(&req, DSTM_REQUEST_TYPE_BARRIER, 0, last_time, 0,
 	                    0, null_ptr, null_ptr, 0);
 	assert(req != NULL);
-	req->status = DSTM_REQUEST_STATUS_BARRIER_DRAIN;
+	req->status = DSTM_REQUEST_STATUS_BARRIER_DRAIN_OUT;
 	req->caller_owned = 1;
 
 	/* Insert at the end of the list so existing requests are processed
