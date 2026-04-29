@@ -16,7 +16,9 @@
 #define DSTM_INTERNAL_MSG_H 1
 
 #include <stddef.h>
+#include <stdlib.h>
 
+#include <jansson.h>
 #include <mpi.h>
 
 #include "dstm.h"
@@ -131,16 +133,19 @@ int dstm_msg_recvany(MPI_Status status, dstm_msg_t *msg);
 
 int dstm_msg_test(dstm_msg_t msg);
 
-#define DSTM_MSG_SNPRINTF_SIZE 320
-int dstm_msg_snprintf(char *buf, size_t n, dstm_msg_t *msg);
+json_t *dstm_msg_to_json(dstm_msg_t *msg);
 
 #define dstm_log_msg(level, label, msg)                                        \
 	do {                                                                   \
 		if ((level) <= dstm_log_level) {                               \
-			char __buf[DSTM_MSG_SNPRINTF_SIZE];                    \
-			dstm_msg_snprintf(__buf, sizeof(__buf), (msg));        \
+			json_t *__j = dstm_msg_to_json((msg));                 \
+			char *__s = json_dumps(                                \
+			    __j, JSON_COMPACT | JSON_SORT_KEYS |               \
+				     JSON_ENCODE_ANY);                         \
 			dstm_log_printf((level), __FILE__, __func__, __LINE__, \
-			                "%s: %s\n", (label), __buf);           \
+			                "%s: %s\n", (label), __s);             \
+			free(__s);                                             \
+			json_decref(__j);                                      \
 		}                                                              \
 	} while (0)
 

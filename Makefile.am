@@ -12,7 +12,7 @@ AM_CPPFLAGS = \
 	      -I$(top_srcdir)/include \
 	      -I$(top_builddir)/include
 
-AM_CFLAGS = $(AML_CFLAGS)
+AM_CFLAGS = $(AML_CFLAGS) $(JANSSON_CFLAGS)
 
 AM_LDFLAGS = $(AML_LIBS)
 
@@ -51,8 +51,7 @@ noinst_include_internal_HEADERS = \
 				  include/internal/region.h \
 				  include/internal/request.h \
 				  include/internal/uthash.h \
-				  include/internal/utlist.h \
-				  include/internal/utils.h
+				  include/internal/utlist.h
 ###############################################################################
 # Library
 ###############################################################################
@@ -71,7 +70,7 @@ libdstm_la_SOURCES = \
 		    src/region.c \
 		    src/request.c
 
-libdstm_la_LIBADD = $(LTLIBOBJS)
+libdstm_la_LIBADD = $(LTLIBOBJS) $(JANSSON_LIBS)
 
 ###############################################################################
 # Bindings

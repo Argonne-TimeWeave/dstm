@@ -6,6 +6,7 @@ includedir=@includedir@
 Name: dstm
 Description: Distributed Shared Timestamped Memory
 Version: @PACKAGE_VERSION@
-Requires: 
+Requires:
+Requires.private: jansson
 Libs: -L${libdir} -ldstm
 Cflags: -I${includedir}

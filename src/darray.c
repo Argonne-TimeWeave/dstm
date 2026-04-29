@@ -286,12 +286,12 @@ int dstm_darray_allgatherv(dstm_darray_t *darray,
  * Formatting helpers
  ******************************************************************************/
 
-int dstm_darray_snprintf(char *buf, size_t n, dstm_darray_t *a)
+json_t *dstm_darray_to_json(dstm_darray_t *a)
 {
 	if (a == NULL)
-		return snprintf(buf, n, "NULL");
-	return snprintf(buf, n,
-	                "{ element_size: %zu, total_elements: %zu,"
-	                " local_elements: %zu }",
-	                a->element_size, a->total_elements, a->local_elements);
+		return json_null();
+	return json_pack("{s:I, s:I, s:I}", "element_size",
+	                 (json_int_t)a->element_size, "local_elements",
+	                 (json_int_t)a->local_elements, "total_elements",
+	                 (json_int_t)a->total_elements);
 }

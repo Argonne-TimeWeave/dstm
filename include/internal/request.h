@@ -149,16 +149,19 @@ int dstm_request_progress(dstm_request_t *req);
 
 int dstm_request_progress_barrier(dstm_request_t *req);
 
-#define DSTM_REQUEST_SNPRINTF_SIZE 576
-int dstm_request_snprintf(char *buf, size_t n, dstm_request_t *req);
+json_t *dstm_request_to_json(dstm_request_t *req);
 
 #define dstm_log_request(level, label, req)                                    \
 	do {                                                                   \
 		if ((level) <= dstm_log_level) {                               \
-			char __buf[DSTM_REQUEST_SNPRINTF_SIZE];                \
-			dstm_request_snprintf(__buf, sizeof(__buf), (req));    \
+			json_t *__j = dstm_request_to_json((req));             \
+			char *__s = json_dumps(                                \
+			    __j, JSON_COMPACT | JSON_SORT_KEYS |               \
+				     JSON_ENCODE_ANY);                         \
 			dstm_log_printf((level), __FILE__, __func__, __LINE__, \
-			                "%s: %s\n", (label), __buf);           \
+			                "%s: %s\n", (label), __s);             \
+			free(__s);                                             \
+			json_decref(__j);                                      \
 		}                                                              \
 	} while (0)
 

@@ -16,8 +16,8 @@
 
 #include "internal/globals.h"
 #include "internal/msg.h"
+#include "internal/region.h"
 #include "internal/request.h"
-#include "internal/utils.h"
 
 dstm_request_t *requests = NULL;
 
@@ -91,7 +91,7 @@ int dstm_request_destroy(dstm_request_t **r)
 {
 	if (r == NULL || *r == NULL)
 		return 0;
-	dstm_log_request(DSTM_LOG_DEBUG, "destroy", *r);
+	
 	/* free the owned payload buffer, if any */
 	free((*r)->buf);
 	/* free any MPI pack buffer that is still outstanding */
@@ -137,43 +137,26 @@ static const char *dstm_request_type_t2s(int type,
 	return "UNKNOWN";
 }
 
-int dstm_request_snprintf(char *buf, size_t n, dstm_request_t *req)
+json_t *dstm_request_to_json(dstm_request_t *req)
 {
-	assert(buf != NULL);
 	if (req == NULL)
-		return snprintf(buf, n, "NULL");
+		return json_null();
 
-	/* Header line */
-	int total = snprintf(buf, n,
-	                     "{ type: %s, tag: %d, status: %d, time: %" PRIu64
-	                     ", delta: %" PRId64 ", rank: %d, size: %zu, dst: ",
-	                     dstm_request_type_t2s(req->type,
-	                                           dstm_request_type_table),
-	                     req->tag, req->status, req->time, req->delta,
-	                     req->rank, req->size);
+	json_t *obj = json_pack(
+	        "{s:I, s:o?, s:o?, s:i, s:I, s:o?, s:i, s:i, s:I}",
+	        "delta", (json_int_t)req->delta,
+	        "dst", dstm_ptr_to_json(req->dst),
+	        "msg", dstm_msg_to_json(&req->msg),
+	        "rank", req->rank,
+	        "size", (json_int_t)req->size,
+	        "src", dstm_ptr_to_json(req->src),
+	        "status", req->status,
+	        "tag", req->tag,
+	        "time", (json_int_t)req->time);
 
-	DSTM_SNPRINTF_ADVANCE(buf, n, total, total);
+	json_object_set_new(obj, "type",
+	                    json_string(dstm_request_type_t2s(
+	                            req->type, dstm_request_type_table)));
 
-	/* dst pointer */
-	int w = dstm_ptr_snprintf(buf, n, req->dst);
-	DSTM_SNPRINTF_ADVANCE(buf, n, total, w);
-
-	w = snprintf(buf, n, ", src: ");
-	DSTM_SNPRINTF_ADVANCE(buf, n, total, w);
-
-	/* src pointer */
-	w = dstm_ptr_snprintf(buf, n, req->src);
-	DSTM_SNPRINTF_ADVANCE(buf, n, total, w);
-
-	w = snprintf(buf, n, ", msg: ");
-	DSTM_SNPRINTF_ADVANCE(buf, n, total, w);
-
-	/* embedded message */
-	w = dstm_msg_snprintf(buf, n, &req->msg);
-	DSTM_SNPRINTF_ADVANCE(buf, n, total, w);
-
-	w = snprintf(buf, n, "}");
-	total += w;
-
-	return total;
+	return obj;
 }

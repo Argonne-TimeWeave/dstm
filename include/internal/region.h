@@ -20,6 +20,9 @@ extern "C" {
 #endif
 
 #include <stdint.h>
+#include <stdlib.h>
+
+#include <jansson.h>
 
 #include "dstm.h"
 
@@ -193,67 +196,88 @@ void dstm_region_version_destroy(dstm_region_t *region,
                                  dstm_region_version_t *version);
 
 /*******************************************************************************
- * Formatting helpers
+ * JSON formatting helpers
  *
- * Each *_snprintf function follows the standard snprintf contract: writes at
- * most n bytes (including the NUL terminator) into buf, and returns the number
- * of bytes that would have been written had n been large enough (not counting
- * the NUL).  Use the accompanying SIZE macro to allocate a buffer that is
- * always sufficient.
- *
- * DSTM_PTR_SNPRINTF_SIZE, DSTM_REGION_SNPRINTF_SIZE, dstm_ptr_snprintf,
- * and dstm_region_snprintf are declared in the public header (dstm.h).
+ * Each *_to_json function returns a newly allocated json_t* with refcount 1.
+ * The caller is responsible for calling json_decref() when done.
+ * Returns json_null() for NULL input pointers.
  ******************************************************************************/
 
-#define DSTM_REGION_NINFO_SNPRINTF_SIZE 96
-int dstm_region_ninfo_snprintf(char *buf, size_t n, dstm_region_ninfo_t *ni);
+json_t *dstm_ptr_to_json(dstm_ptr_t p);
+json_t *dstm_region_to_json(dstm_region_t *r);
+json_t *dstm_region_ninfo_to_json(dstm_region_ninfo_t *ni);
+json_t *dstm_region_version_to_json(dstm_region_version_t *v);
+json_t *dstm_darray_to_json(dstm_darray_t *a);
 
-#define DSTM_REGION_VERSION_SNPRINTF_SIZE 128
-int dstm_region_version_snprintf(char *buf, size_t n,
-                                 dstm_region_version_t *v);
-
-/* Emit a log message at the given level with label: <formatted value>.
- * The buffer is allocated on the stack and the level is checked before any
- * formatting work is done. */
+/* Emit a log message at the given level with label: <json formatted value>.
+ * The json object is created and dumped only when the level is active. */
 #define dstm_log_ptr(level, label, ptr)                                        \
 	do {                                                                   \
 		if ((level) <= dstm_log_level) {                               \
-			char __buf[DSTM_PTR_SNPRINTF_SIZE];                    \
-			dstm_ptr_snprintf(__buf, sizeof(__buf), (ptr));        \
+			json_t *__j = dstm_ptr_to_json((ptr));                 \
+			char *__s = json_dumps(                                \
+			        __j, JSON_COMPACT | JSON_SORT_KEYS |   \
+			                     JSON_ENCODE_ANY);         \
 			dstm_log_printf((level), __FILE__, __func__, __LINE__, \
-			                "%s: %s\n", (label), __buf);           \
+			                "%s: %s\n", (label), __s);             \
+			free(__s);                                             \
+			json_decref(__j);                                      \
 		}                                                              \
 	} while (0)
 
 #define dstm_log_region_ninfo(level, label, ni)                                \
 	do {                                                                   \
 		if ((level) <= dstm_log_level) {                               \
-			char __buf[DSTM_REGION_NINFO_SNPRINTF_SIZE];           \
-			dstm_region_ninfo_snprintf(__buf, sizeof(__buf),       \
-			                           (ni));                      \
+			json_t *__j = dstm_region_ninfo_to_json((ni));         \
+			char *__s = json_dumps(                                \
+			        __j, JSON_COMPACT | JSON_SORT_KEYS |   \
+			                     JSON_ENCODE_ANY);         \
 			dstm_log_printf((level), __FILE__, __func__, __LINE__, \
-			                "%s: %s\n", (label), __buf);           \
+			                "%s: %s\n", (label), __s);             \
+			free(__s);                                             \
+			json_decref(__j);                                      \
 		}                                                              \
 	} while (0)
 
 #define dstm_log_region_version(level, label, v)                               \
 	do {                                                                   \
 		if ((level) <= dstm_log_level) {                               \
-			char __buf[DSTM_REGION_VERSION_SNPRINTF_SIZE];         \
-			dstm_region_version_snprintf(__buf, sizeof(__buf),     \
-			                             (v));                     \
+			json_t *__j = dstm_region_version_to_json((v));        \
+			char *__s = json_dumps(                                \
+			        __j, JSON_COMPACT | JSON_SORT_KEYS |   \
+			                     JSON_ENCODE_ANY);         \
 			dstm_log_printf((level), __FILE__, __func__, __LINE__, \
-			                "%s: %s\n", (label), __buf);           \
+			                "%s: %s\n", (label), __s);             \
+			free(__s);                                             \
+			json_decref(__j);                                      \
 		}                                                              \
 	} while (0)
 
 #define dstm_log_region(level, label, r)                                       \
 	do {                                                                   \
 		if ((level) <= dstm_log_level) {                               \
-			char __buf[DSTM_REGION_SNPRINTF_SIZE];                 \
-			dstm_region_snprintf(__buf, sizeof(__buf), (r));       \
+			json_t *__j = dstm_region_to_json((r));                \
+			char *__s = json_dumps(                                \
+			        __j, JSON_COMPACT | JSON_SORT_KEYS |   \
+			                     JSON_ENCODE_ANY);         \
 			dstm_log_printf((level), __FILE__, __func__, __LINE__, \
-			                "%s: %s\n", (label), __buf);           \
+			                "%s: %s\n", (label), __s);             \
+			free(__s);                                             \
+			json_decref(__j);                                      \
+		}                                                              \
+	} while (0)
+
+#define dstm_log_darray(level, label, a)                                       \
+	do {                                                                   \
+		if ((level) <= dstm_log_level) {                               \
+			json_t *__j = dstm_darray_to_json((a));                \
+			char *__s = json_dumps(                                \
+			        __j, JSON_COMPACT | JSON_SORT_KEYS |   \
+			                     JSON_ENCODE_ANY);         \
+			dstm_log_printf((level), __FILE__, __func__, __LINE__, \
+			                "%s: %s\n", (label), __s);             \
+			free(__s);                                             \
+			json_decref(__j);                                      \
 		}                                                              \
 	} while (0)
 

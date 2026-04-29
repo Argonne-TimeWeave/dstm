@@ -70,6 +70,9 @@ AC_SEARCH_LIBS([dlsym], [dl dld], [], [
 PKG_CHECK_MODULES([CHECK],[check],,
 		 AC_MSG_ERROR([unable to find check]))
 
+PKG_CHECK_MODULES([JANSSON],[jansson >= 2.0],,
+		 AC_MSG_ERROR([unable to find jansson >= 2.0]))
+
 # support for testing command line programs
 AC_CHECK_PROG([BATS], [bats], [bats])
 AS_IF([test "x$BATS" = "x"],[AC_MSG_ERROR(could not find bats)],[])

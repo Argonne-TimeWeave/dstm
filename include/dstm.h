@@ -321,20 +321,6 @@ int dstm_darray_allgatherv(dstm_darray_t *darray,
                            dstm_time_t time,
                            const dstm_time_t *deltas);
 
-/* Format: { element_size: N, total_elements: N, local_elements: N } */
-#define DSTM_DARRAY_SNPRINTF_SIZE 128
-int dstm_darray_snprintf(char *buf, size_t n, dstm_darray_t *a);
-
-#define dstm_log_darray(level, label, a)                                       \
-	do {                                                                   \
-		if ((level) <= dstm_log_level) {                               \
-			char __buf[DSTM_DARRAY_SNPRINTF_SIZE];                 \
-			dstm_darray_snprintf(__buf, sizeof(__buf), (a));       \
-			dstm_log_printf((level), __FILE__, __func__, __LINE__, \
-			                "%s: %s\n", (label), __buf);           \
-		}                                                              \
-	} while (0)
-
 /* opaque type for pointers into regions */
 #define DSTM_REGIONID_INVALID -1
 #define DSTM_REGIONID_LOCAL -2
@@ -350,13 +336,6 @@ int dstm_ptr_isnull(dstm_ptr_t ptr);
 
 int dstm_get_local_region_id(void);
 dstm_region_t *dstm_get_local_region(void);
-
-/* Maximum buffer sizes guaranteed to hold the formatted representation. */
-#define DSTM_PTR_SNPRINTF_SIZE 64
-#define DSTM_REGION_SNPRINTF_SIZE 128
-
-int dstm_ptr_snprintf(char *buf, size_t n, dstm_ptr_t p);
-int dstm_region_snprintf(char *buf, size_t n, dstm_region_t *r);
 
 /*******************************************************************************
  * DSTM BASIC OPERATIONS

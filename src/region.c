@@ -644,38 +644,34 @@ void dstm_region_free(dstm_region_t *r, dstm_ptr_t p)
  * Formatting helpers
  ******************************************************************************/
 
-int dstm_ptr_snprintf(char *buf, size_t n, dstm_ptr_t p)
+json_t *dstm_ptr_to_json(dstm_ptr_t p)
 {
-	assert(buf != NULL);
 	if (dstm_ptr_isnull(p))
-		return snprintf(buf, n, "NULL");
+		return json_null();
 	if (p.region == DSTM_REGIONID_LOCAL)
-		return snprintf(buf, n, "{ region: LOCAL, offset: %p}",
-		                (void *)p.offset);
+		return json_pack("{s:s, s:I}", "region", "LOCAL", "offset",
+		                 (json_int_t)p.offset);
 	if (p.region == DSTM_REGIONID_INVALID)
-		return snprintf(buf, n, "{ region: INVALID, offset: %zu}",
-		                (size_t)p.offset);
-	return snprintf(buf, n, "{ region: %d, offset: %zu}", p.region,
-	                (size_t)p.offset);
+		return json_pack("{s:s, s:I}", "region", "INVALID", "offset",
+		                 (json_int_t)p.offset);
+	return json_pack("{s:i, s:I}", "region", p.region, "offset",
+	                 (json_int_t)p.offset);
 }
 
-int dstm_region_ninfo_snprintf(char *buf, size_t n, dstm_region_ninfo_t *ni)
+json_t *dstm_region_ninfo_to_json(dstm_region_ninfo_t *ni)
 {
-	assert(buf != NULL);
 	if (ni == NULL)
-		return snprintf(buf, n, "NULL");
-	return snprintf(buf, n, "{ rank: %d, time: %" PRId64 ", state: %s}",
-	                ni->rank, ni->time,
-	                ni->state == DSTM_REGION_STATUS_READABLE ? "readable" :
-	                                                           "writable");
+		return json_null();
+	return json_pack("{s:i, s:I, s:s}", "rank", ni->rank, "time",
+	                 (json_int_t)ni->time, "state",
+	                 ni->state == DSTM_REGION_STATUS_READABLE ? "readable" :
+	                                                            "writable");
 }
 
-int dstm_region_version_snprintf(char *buf, size_t n,
-                                 dstm_region_version_t *v)
+json_t *dstm_region_version_to_json(dstm_region_version_t *v)
 {
-	assert(buf != NULL);
 	if (v == NULL)
-		return snprintf(buf, n, "NULL");
+		return json_null();
 	const char *status_str;
 	switch (v->status) {
 	case DSTM_REGION_STATUS_WRITABLE:
@@ -691,15 +687,16 @@ int dstm_region_version_snprintf(char *buf, size_t n,
 		status_str = "unknown";
 		break;
 	}
-	return snprintf(buf, n, "{ time: %" PRId64 ", status: %s, buffer: %p}",
-	                v->time, status_str, v->buffer);
+	json_t *buf = json_sprintf("%p", v->buffer);
+	return json_pack("{s:s, s:s, s:I}", "buffer", buf, "status", status_str,
+	                 "time", (json_int_t)v->time);
 }
 
-int dstm_region_snprintf(char *buf, size_t n, dstm_region_t *r)
+json_t *dstm_region_to_json(dstm_region_t *r)
 {
-	assert(buf != NULL);
 	if (r == NULL)
-		return snprintf(buf, n, "NULL");
-	return snprintf(buf, n, "{ buffer: %p, size: %zu, time: %" PRId64 "}",
-	                r->buffer, r->size, r->time);
+		return json_null();
+	json_t *buf = json_sprintf("%p", r->buffer);
+	return json_pack("{s:s, s:I, s:I}", "buffer", buf, "size",
+	                 (json_int_t)r->size, "time", (json_int_t)r->time);
 }

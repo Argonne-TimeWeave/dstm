@@ -367,62 +367,70 @@ int dstm_msg_test(dstm_msg_t msg)
  * Formatting helpers
  ******************************************************************************/
 
-int dstm_msg_snprintf(char *buf, size_t n, dstm_msg_t *msg)
+json_t *dstm_msg_to_json(dstm_msg_t *msg)
 {
-	assert(buf != NULL);
 	if (msg == NULL)
-		return snprintf(buf, n, "NULL");
+		return json_null();
 
-	int written = snprintf(
-	        buf, n,
-	        "{ header: { type: %d, dst_rank: %d, src_rank: %d, time: %" PRId64
-	        ", delta: %" PRId64 "}, data: %p, packbuf: %p, ",
-	        msg->header.type, msg->header.dst_rank, msg->header.src_rank,
-	        msg->header.time, msg->header.delta, msg->data, msg->packbuf);
+	char data_buf[32];
+	char pack_buf[32];
+	snprintf(data_buf, sizeof(data_buf), "%p", msg->data);
+	snprintf(pack_buf, sizeof(pack_buf), "%p", msg->packbuf);
 
-	/* Advance pointer and shrink remaining capacity for the suffix. */
-	char *p = buf + (written < (int)n ? written : (int)n - 1);
-	size_t rem = written < (int)n ? n - (size_t)written : 1;
+	json_t *header = json_pack("{s:i, s:I, s:i, s:i, s:I}", "delta",
+	                           (json_int_t)msg->header.delta, "dst_rank",
+	                           msg->header.dst_rank, "src_rank",
+	                           msg->header.src_rank, "time",
+	                           (json_int_t)msg->header.time, "type",
+	                           msg->header.type);
 
-	int suffix = 0;
+	json_t *obj = json_pack("{s:s, s:o, s:s}", "data", data_buf, "header",
+	                        header, "packbuf", pack_buf);
 
 	switch (msg->header.type) {
 	case DSTM_MSG_TYPE_PUT:
-		suffix = snprintf(p, rem,
-		                  "put: { region: %d, dst: %zu, size: %zu}}",
-		                  msg->u.putget.ptr.region,
-		                  (size_t)msg->u.putget.ptr.offset,
-		                  msg->u.putget.size);
+		json_object_set_new(
+		        obj, "put",
+		        json_pack("{s:I, s:i, s:I}", "dst",
+		                  (json_int_t)msg->u.putget.ptr.offset, "region",
+		                  msg->u.putget.ptr.region, "size",
+		                  (json_int_t)msg->u.putget.size));
 		break;
 	case DSTM_MSG_TYPE_GET_REQ:
-		suffix = snprintf(p, rem,
-		                  "getreq: { region: %d, ptr: %zu, size: %zu}}",
-		                  msg->u.putget.ptr.region,
-		                  (size_t)msg->u.putget.ptr.offset,
-		                  msg->u.putget.size);
+		json_object_set_new(
+		        obj, "getreq",
+		        json_pack("{s:I, s:i, s:I}", "ptr",
+		                  (json_int_t)msg->u.putget.ptr.offset, "region",
+		                  msg->u.putget.ptr.region, "size",
+		                  (json_int_t)msg->u.putget.size));
 		break;
 	case DSTM_MSG_TYPE_GET_REP:
-		suffix = snprintf(p, rem,
-		                  "getrep: { region: %d, ptr: %zu, size: %zu}}",
-		                  msg->u.putget.ptr.region,
-		                  (size_t)msg->u.putget.ptr.offset,
-		                  msg->u.putget.size);
+		json_object_set_new(
+		        obj, "getrep",
+		        json_pack("{s:I, s:i, s:I}", "ptr",
+		                  (json_int_t)msg->u.putget.ptr.offset, "region",
+		                  msg->u.putget.ptr.region, "size",
+		                  (json_int_t)msg->u.putget.size));
 		break;
 	case DSTM_MSG_TYPE_HEARTBEAT:
-		suffix = snprintf(p, rem, "heartbeat: { status: %s}}",
+		json_object_set_new(
+		        obj, "heartbeat",
+		        json_pack("{s:s}", "status",
 		                  msg->u.heartbeat.status ==
 		                                  DSTM_REGION_STATUS_READABLE ?
 		                          "readable" :
-		                          "writable");
+		                          "writable"));
 		break;
 	case DSTM_MSG_TYPE_BARRIER:
-		suffix = snprintf(p, rem, "barrier: { last_time: %" PRId64 "}}",
-		                  msg->u.barrier.last_time);
+		json_object_set_new(obj, "barrier",
+		                    json_pack("{s:I}", "last_time",
+		                             (json_int_t)msg->u.barrier
+		                                     .last_time));
 		break;
 	default:
-		suffix = snprintf(p, rem, "unknown}}");
+		json_object_set_new(obj, "type", json_string("unknown"));
 		break;
 	}
 
-	return written + suffix;
+	return obj;
 }

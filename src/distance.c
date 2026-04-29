@@ -17,7 +17,6 @@
 #include "dstm.h"
 
 #include "internal/distance.h"
-#include "internal/utils.h"
 
 /*******************************************************************************
  * Helper Functions
@@ -681,29 +680,22 @@ size_t dstm_distance_size(dstm_distance_t *dst)
  * Formatting helpers
  ******************************************************************************/
 
-int dstm_distance_snprintf(char *buf, size_t n, dstm_distance_t *d)
+json_t *dstm_distance_to_json(dstm_distance_t *d)
 {
 	if (d == NULL)
-		return snprintf(buf, n, "NULL");
+		return json_null();
 
-	int total = snprintf(buf, n, "{ size: %zu", d->size);
+	json_t *obj = json_pack("{s:I}", "size", (json_int_t)d->size);
 
-	DSTM_SNPRINTF_ADVANCE(buf, n, total, total);
-
-	/* Print the first row of the distance matrix as a representative
-	 * sample.  Printing the full NxN matrix would overflow any fixed-size
-	 * buffer for non-trivial process counts. */
+	/* Include the first row of the distance matrix as a representative
+	 * sample.  Including the full NxN matrix would be excessive for
+	 * non-trivial process counts. */
 	if (d->distances != NULL && d->size > 0) {
-		int w = snprintf(buf, n, ", row[0]:");
-		DSTM_SNPRINTF_ADVANCE(buf, n, total, w);
-		for (size_t j = 0; j < d->size; j++) {
-			w = snprintf(buf, n, " %d", d->distances[j]);
-			DSTM_SNPRINTF_ADVANCE(buf, n, total, w);
-		}
+		json_t *row = json_array();
+		for (size_t j = 0; j < d->size; j++)
+			json_array_append_new(row, json_integer(d->distances[j]));
+		json_object_set_new(obj, "row0", row);
 	}
 
-	int w = snprintf(buf, n, "}");
-	total += w;
-
-	return total;
+	return obj;
 }

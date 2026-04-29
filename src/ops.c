@@ -133,7 +133,8 @@ static int dstm_version_can_become_discardable(dstm_region_version_t *v)
 
 	/* Could we receive more GETs from neighbors?
 	 * A neighbor at distance dist whose last-known time is nt can still
-	 * send a GET targeting v->time if nt - dist <= v->time.
+	 * send a GET at time nt with max dist, so targeting nt - dist.
+	 * Thus, v->time greater (or equal) than nt - dist cannot be discarded.
 	 *
 	 * Barrier optimization: after barrier round 1 completes, no new
 	 * GET messages will arrive, so skip all neighbor distance checks. */
