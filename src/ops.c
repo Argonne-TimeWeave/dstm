@@ -295,7 +295,7 @@ static int dstm_request_progress_in_get(dstm_request_t *req)
 
 			dstm_ptr_t null_ptr = {DSTM_REGIONID_INVALID, 0};
 			dstm_msg_fill_hdr(&req->msg, DSTM_MSG_TYPE_GET_REP,
-			                  req->time, req->delta, req->rank,
+					  target, 0, req->rank,
 			                  dstm_global_context.rank);
 			dstm_msg_fill_payload(&req->msg, null_ptr, req->buf,
 			                      req->size);
