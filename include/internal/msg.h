@@ -31,8 +31,8 @@ extern "C" {
  * CONSTANTS
  ******************************************************************************/
 
-/* Region status values (DSTM_REGION_STATUS_WRITABLE, DSTM_REGION_STATUS_READABLE,
- * DSTM_REGION_STATUS_DISCARDABLE) are defined in internal/region.h. */
+/* Region status values used by the version state machine are defined
+ * in internal/region.h. */
 
 #define DSTM_MSG_TYPE_PUT 0
 #define DSTM_MSG_TYPE_GET_REQ 1
@@ -56,12 +56,6 @@ struct dstm_msg_putget_s {
 };
 typedef struct dstm_msg_putget_s dstm_msg_putget_t;
 
-struct dstm_msg_heartbeat_s {
-	int status; /* DSTM_REGION_STATUS_WRITABLE or
-	               DSTM_REGION_STATUS_READABLE */
-};
-typedef struct dstm_msg_heartbeat_s dstm_msg_heartbeat_t;
-
 /* Barrier token payload: carries the target logical time so that all ranks in
  * the ring can verify consistency.  src_rank in the header identifies which
  * rank forwarded this token. */
@@ -79,7 +73,6 @@ struct dstm_msg_s {
 	 */
 	union {
 		dstm_msg_putget_t putget;
-		dstm_msg_heartbeat_t heartbeat;
 		dstm_msg_barrier_t barrier;
 	} u;
 	/* data buffer, if needed */
@@ -103,7 +96,6 @@ int dstm_msg_fill_hdr(dstm_msg_t *msg,
                       int dst_rank,
                       int src_rank);
 
-int dstm_msg_fill_heartbeat(dstm_msg_t *msg, int status);
 int dstm_msg_fill_barrier(dstm_msg_t *msg, dstm_time_t last_time);
 
 /* Fill the putget body and set a non-owning data pointer.

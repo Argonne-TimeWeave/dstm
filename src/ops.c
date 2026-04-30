@@ -34,7 +34,7 @@
  * for that timestamp (distance-based check).
  ******************************************************************************/
 
-static int dstm_region_send_heartbeat_to_all(dstm_time_t time, int status)
+static int dstm_region_send_heartbeat_to_all(dstm_time_t time)
 {
 	for (int i = 0; i < dstm_global_context.world_size; i++) {
 		int dist = dstm_distance_get(dstm_global_context.distances,
@@ -45,7 +45,6 @@ static int dstm_region_send_heartbeat_to_all(dstm_time_t time, int status)
 		dstm_msg_t m;
 		dstm_msg_fill_hdr(&m, DSTM_MSG_TYPE_HEARTBEAT, time, 0, i,
 		                  dstm_global_context.rank);
-		dstm_msg_fill_heartbeat(&m, status);
 
 		int tag = dstm_request_new_tag();
 		dstm_msg_send(&m, tag);
@@ -94,8 +93,7 @@ static int dstm_version_can_become_readable(dstm_region_version_t *v)
 				continue;
 
 			dstm_time_t nt;
-			int s;
-			dstm_region_get_ninfo(region, i, &nt, &s);
+			dstm_region_get_ninfo(region, i, &nt);
 
 			dstm_log_debug("checkr v%" PRId64 ": nt=%" PRId64
 			               " dist=%d\n",
@@ -147,8 +145,7 @@ static int dstm_version_can_become_discardable(dstm_region_version_t *v)
 				continue;
 
 			dstm_time_t nt;
-			int s;
-			dstm_region_get_ninfo(region, i, &nt, &s);
+			dstm_region_get_ninfo(region, i, &nt);
 
 			dstm_log_debug("checkd v%" PRId64 ": nt=%" PRId64
 			               " dist=%d\n",
@@ -387,7 +384,7 @@ static void dstm_handle_incoming_msg(MPI_Status status)
 	/* block until we receive the incoming message */
 	dstm_msg_recvany(status, &m);
 	dstm_region_set_ninfo(dstm_global_context.region, m.header.src_rank,
-	                      m.header.time, DSTM_REGION_STATUS_WRITABLE);
+	                      m.header.time);
 
 	dstm_log_msg(DSTM_LOG_DEBUG, "received", &m);
 
@@ -443,9 +440,7 @@ static void dstm_handle_incoming_msg(MPI_Status status)
 	}
 
 	case DSTM_MSG_TYPE_HEARTBEAT:
-		dstm_region_set_ninfo(dstm_global_context.region,
-		                      m.header.src_rank, m.header.time,
-		                      m.u.heartbeat.status);
+		/* ninfo already updated above from the header */
 		dstm_msg_free_packbuf(&m);
 		break;
 
@@ -553,8 +548,7 @@ int dstm_put(int rank,
 
 	/* did we increase our local time */
 	if (dstm_local_heartbeat_time < time) {
-		dstm_region_send_heartbeat_to_all(time,
-						  DSTM_REGION_STATUS_WRITABLE);
+		dstm_region_send_heartbeat_to_all(time);
 		dstm_local_heartbeat_time = time;
 	}
 
@@ -616,8 +610,7 @@ int dstm_get(int rank,
 
 	/* did we increase our local time */
 	if (dstm_local_heartbeat_time < time) {
-		dstm_region_send_heartbeat_to_all(time,
-						  DSTM_REGION_STATUS_WRITABLE);
+		dstm_region_send_heartbeat_to_all(time);
 		dstm_local_heartbeat_time = time;
 	}
 

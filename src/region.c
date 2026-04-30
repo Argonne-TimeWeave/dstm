@@ -445,10 +445,7 @@ void dstm_region_destroy(dstm_region_t **region)
  * Neighbor Info Functions
  ******************************************************************************/
 
-int dstm_region_set_ninfo(dstm_region_t *region,
-                          int rank,
-                          dstm_time_t time,
-                          int state)
+int dstm_region_set_ninfo(dstm_region_t *region, int rank, dstm_time_t time)
 {
 	if (region == NULL)
 		return -DSTM_EINVAL;
@@ -460,23 +457,15 @@ int dstm_region_set_ninfo(dstm_region_t *region,
 		assert(ni != NULL);
 		ni->rank = rank;
 		ni->time = time;
-		ni->state = state;
 		HASH_ADD_INT(region->ninfos, rank, ni);
 	} else {
-		if (time > ni->time) {
-			/* new time: update both time and state */
+		if (time > ni->time)
 			ni->time = time;
-			ni->state = state;
-		} else if (time == ni->time && state > ni->state) {
-			/* same time, state advanced (WRITABLE -> READABLE) */
-			ni->state = state;
-		}
 	}
 	return DSTM_SUCCESS;
 }
 
-int dstm_region_get_ninfo(dstm_region_t *region, int rank, dstm_time_t *time,
-			  int *state)
+int dstm_region_get_ninfo(dstm_region_t *region, int rank, dstm_time_t *time)
 {
 	if (region == NULL)
 		return -DSTM_EINVAL;
@@ -485,12 +474,10 @@ int dstm_region_get_ninfo(dstm_region_t *region, int rank, dstm_time_t *time,
 	HASH_FIND_INT(region->ninfos, &rank, ni);
 	if (ni == NULL) {
 		*time = 0;
-		*state = DSTM_REGION_STATUS_WRITABLE;
 		return -DSTM_EINVAL;
 	}
 
 	*time = ni->time;
-	*state = ni->state;
 	return DSTM_SUCCESS;
 }
 
@@ -662,10 +649,8 @@ json_t *dstm_region_ninfo_to_json(dstm_region_ninfo_t *ni)
 {
 	if (ni == NULL)
 		return json_null();
-	return json_pack("{s:i, s:I, s:s}", "rank", ni->rank, "time",
-	                 (json_int_t)ni->time, "state",
-	                 ni->state == DSTM_REGION_STATUS_READABLE ? "readable" :
-	                                                            "writable");
+	return json_pack("{s:i, s:I}", "rank", ni->rank, "time",
+	                 (json_int_t)ni->time);
 }
 
 json_t *dstm_region_version_to_json(dstm_region_version_t *v)

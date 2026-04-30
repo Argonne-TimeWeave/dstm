@@ -40,7 +40,7 @@ extern "C" {
 /*******************************************************************************
  * REGION STATUS VALUES
  *
- * Used by the per-version state machine and the messaging layer (heartbeats).
+ * Used by the per-version state machine.
  ******************************************************************************/
 
 #define DSTM_REGION_STATUS_WRITABLE 0
@@ -89,8 +89,6 @@ typedef struct dstm_region_block_header_s dstm_region_block_header_t;
 struct dstm_region_ninfo_s {
 	int rank;
 	dstm_time_t time;
-	int state; /* DSTM_REGION_STATUS_WRITABLE or DSTM_REGION_STATUS_READABLE
-	            */
 	UT_hash_handle hh;
 };
 typedef struct dstm_region_ninfo_s dstm_region_ninfo_t;
@@ -166,12 +164,8 @@ void dstm_region_destroy(dstm_region_t **region);
  * Methods
  ******************************************************************************/
 
-int dstm_region_set_ninfo(dstm_region_t *region,
-                          int rank,
-                          dstm_time_t time,
-                          int state);
-int dstm_region_get_ninfo(dstm_region_t *region, int rank, dstm_time_t *time,
-			  int *state);
+int dstm_region_set_ninfo(dstm_region_t *region, int rank, dstm_time_t time);
+int dstm_region_get_ninfo(dstm_region_t *region, int rank, dstm_time_t *time);
 
 dstm_ptr_t dstm_region_malloc(dstm_region_t *r, size_t size);
 void dstm_region_free(dstm_region_t *r, dstm_ptr_t ptr);

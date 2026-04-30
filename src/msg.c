@@ -22,7 +22,6 @@
 
 MPI_Datatype dstm_msg_hdr_dt;
 MPI_Datatype dstm_msg_putget_dt;
-MPI_Datatype dstm_msg_heartbeat_dt;
 MPI_Datatype dstm_msg_barrier_dt;
 
 /*******************************************************************************
@@ -57,16 +56,6 @@ int dstm_msg_init(void)
 	                       dstm_msg_putget_sig, &dstm_msg_putget_dt);
 	MPI_Type_commit(&dstm_msg_putget_dt);
 
-	/* dstm_msg_heartbeat_t: status(int) */
-	MPI_Datatype dstm_msg_heartbeat_sig[1] = {MPI_INT};
-	int dstm_msg_heartbeat_bl[1] = {1};
-	MPI_Aint dstm_msg_heartbeat_disp[1] = {
-	        offsetof(dstm_msg_heartbeat_t, status)};
-	MPI_Type_create_struct(1, dstm_msg_heartbeat_bl,
-	                       dstm_msg_heartbeat_disp, dstm_msg_heartbeat_sig,
-	                       &dstm_msg_heartbeat_dt);
-	MPI_Type_commit(&dstm_msg_heartbeat_dt);
-
 	/* dstm_msg_barrier_t: last_time(int64_t) */
 	MPI_Datatype dstm_msg_barrier_sig[1] = {MPI_INT64_T};
 	int dstm_msg_barrier_bl[1] = {1};
@@ -83,7 +72,6 @@ int dstm_msg_finalize(void)
 {
 	MPI_Type_free(&dstm_msg_hdr_dt);
 	MPI_Type_free(&dstm_msg_putget_dt);
-	MPI_Type_free(&dstm_msg_heartbeat_dt);
 	MPI_Type_free(&dstm_msg_barrier_dt);
 	return 0;
 }
@@ -128,12 +116,6 @@ int dstm_msg_fill_payload(dstm_msg_t *m, dstm_ptr_t ptr, void *src, size_t size)
 	/* src may be NULL for messages that carry no payload (GET_REQ).
 	 * When non-NULL it is a non-owning pointer into the request's buf. */
 	m->data = src;
-	return 0;
-}
-
-int dstm_msg_fill_heartbeat(dstm_msg_t *m, int status)
-{
-	m->u.heartbeat.status = status;
 	return 0;
 }
 
@@ -224,10 +206,9 @@ int dstm_msg_send_getreq(dstm_msg_t *msg, int tag)
 
 static int dstm_msg_send_heartbeat(dstm_msg_t *msg, int tag)
 {
-	int hsz, bsz;
+	int hsz;
 	MPI_Pack_size(1, dstm_msg_hdr_dt, dstm_global_context.comm, &hsz);
-	MPI_Pack_size(1, dstm_msg_heartbeat_dt, dstm_global_context.comm, &bsz);
-	size_t bufsz = hsz + bsz;
+	size_t bufsz = hsz;
 
 	msg->packbuf = calloc(bufsz, sizeof(char));
 	if (msg->packbuf == NULL)
@@ -236,8 +217,6 @@ static int dstm_msg_send_heartbeat(dstm_msg_t *msg, int tag)
 	int pos = 0;
 	MPI_Pack(&msg->header, 1, dstm_msg_hdr_dt, msg->packbuf, bufsz, &pos,
 	         dstm_global_context.comm);
-	MPI_Pack(&msg->u.heartbeat, 1, dstm_msg_heartbeat_dt, msg->packbuf,
-	         bufsz, &pos, dstm_global_context.comm);
 
 	MPI_Send(msg->packbuf, pos, MPI_PACKED, msg->header.dst_rank, tag,
 	         dstm_global_context.comm);
@@ -337,8 +316,7 @@ int dstm_msg_recvany(MPI_Status status, dstm_msg_t *msg)
 		msg->data = (char *)msg->packbuf + pos;
 		break;
 	case DSTM_MSG_TYPE_HEARTBEAT:
-		MPI_Unpack(msg->packbuf, bufsz, &pos, &msg->u.heartbeat, 1,
-		           dstm_msg_heartbeat_dt, dstm_global_context.comm);
+		/* heartbeat is header-only, nothing to unpack */
 		break;
 	case DSTM_MSG_TYPE_BARRIER:
 		MPI_Unpack(msg->packbuf, bufsz, &pos, &msg->u.barrier, 1,
@@ -413,13 +391,7 @@ json_t *dstm_msg_to_json(dstm_msg_t *msg)
 		                  (json_int_t)msg->u.putget.size));
 		break;
 	case DSTM_MSG_TYPE_HEARTBEAT:
-		json_object_set_new(
-		        obj, "heartbeat",
-		        json_pack("{s:s}", "status",
-		                  msg->u.heartbeat.status ==
-		                                  DSTM_REGION_STATUS_READABLE ?
-		                          "readable" :
-		                          "writable"));
+		json_object_set_new(obj, "heartbeat", json_object());
 		break;
 	case DSTM_MSG_TYPE_BARRIER:
 		json_object_set_new(obj, "barrier",
