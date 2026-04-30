@@ -649,8 +649,8 @@ json_t *dstm_region_ninfo_to_json(dstm_region_ninfo_t *ni)
 {
 	if (ni == NULL)
 		return json_null();
-	return json_pack("{s:i, s:I}", "rank", ni->rank, "time",
-	                 (json_int_t)ni->time);
+	return json_pack("{s:I, s:i}", "time", (json_int_t)ni->time, "rank",
+	                 ni->rank);
 }
 
 json_t *dstm_region_version_to_json(dstm_region_version_t *v)
@@ -673,8 +673,8 @@ json_t *dstm_region_version_to_json(dstm_region_version_t *v)
 		break;
 	}
 	json_t *buf = json_sprintf("%p", v->buffer);
-	return json_pack("{s:s, s:s, s:I}", "buffer", buf, "status", status_str,
-	                 "time", (json_int_t)v->time);
+	return json_pack("{s:I, s:s, s:o}", "time", (json_int_t)v->time,
+	                 "status", status_str, "buffer", buf);
 }
 
 json_t *dstm_region_to_json(dstm_region_t *r)
@@ -682,6 +682,6 @@ json_t *dstm_region_to_json(dstm_region_t *r)
 	if (r == NULL)
 		return json_null();
 	json_t *buf = json_sprintf("%p", r->buffer);
-	return json_pack("{s:s, s:I, s:I}", "buffer", buf, "size",
-	                 (json_int_t)r->size, "time", (json_int_t)r->time);
+	return json_pack("{s:I, s:I, s:o}", "time", (json_int_t)r->time,
+	                 "size", (json_int_t)r->size, "buffer", buf);
 }

@@ -21,6 +21,7 @@ extern "C" {
 
 #include "dstm.h"
 
+#include "internal/log.h"
 #include "internal/msg.h"
 
 /*******************************************************************************
@@ -152,18 +153,7 @@ int dstm_request_progress_barrier(dstm_request_t *req);
 json_t *dstm_request_to_json(dstm_request_t *req);
 
 #define dstm_log_request(level, label, req)                                    \
-	do {                                                                   \
-		if ((level) <= dstm_log_level) {                               \
-			json_t *__j = dstm_request_to_json((req));             \
-			char *__s = json_dumps(                                \
-			    __j, JSON_COMPACT | JSON_SORT_KEYS |               \
-				     JSON_ENCODE_ANY);                         \
-			dstm_log_printf((level), __FILE__, __func__, __LINE__, \
-			                "%s: %s\n", (label), __s);             \
-			free(__s);                                             \
-			json_decref(__j);                                      \
-		}                                                              \
-	} while (0)
+	dstm_log_json((level), (label), dstm_request_to_json((req)))
 
 #ifdef __cplusplus
 }

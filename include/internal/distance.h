@@ -18,6 +18,8 @@
 
 #include "dstm.h"
 
+#include "internal/log.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -30,18 +32,7 @@ struct dstm_distance_s {
 json_t *dstm_distance_to_json(dstm_distance_t *d);
 
 #define dstm_log_distance(level, label, d)                                     \
-	do {                                                                   \
-		if ((level) <= dstm_log_level) {                               \
-			json_t *__j = dstm_distance_to_json((d));              \
-			char *__s = json_dumps(                                \
-			    __j, JSON_COMPACT | JSON_SORT_KEYS |               \
-				     JSON_ENCODE_ANY);                         \
-			dstm_log_printf((level), __FILE__, __func__, __LINE__, \
-			                "%s: %s\n", (label), __s);             \
-			free(__s);                                             \
-			json_decref(__j);                                      \
-		}                                                              \
-	} while (0)
+	dstm_log_json((level), (label), dstm_distance_to_json((d)))
 
 #ifdef __cplusplus
 }

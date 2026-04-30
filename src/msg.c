@@ -16,6 +16,7 @@
 #include "dstm.h"
 
 #include "internal/globals.h"
+#include "internal/log.h"
 #include "internal/msg.h"
 #include "internal/region.h"
 #include "internal/utlist.h"
@@ -345,6 +346,15 @@ int dstm_msg_test(dstm_msg_t msg)
  * Formatting helpers
  ******************************************************************************/
 
+static const dstm_enum_table_t dstm_msg_type_table[] = {
+        {DSTM_MSG_TYPE_PUT, "PUT"},
+        {DSTM_MSG_TYPE_GET_REQ, "GET_REQ"},
+        {DSTM_MSG_TYPE_GET_REP, "GET_REP"},
+        {DSTM_MSG_TYPE_HEARTBEAT, "HEARTBEAT"},
+        {DSTM_MSG_TYPE_BARRIER, "BARRIER"},
+        {0, NULL},
+};
+
 json_t *dstm_msg_to_json(dstm_msg_t *msg)
 {
 	if (msg == NULL)
@@ -355,15 +365,16 @@ json_t *dstm_msg_to_json(dstm_msg_t *msg)
 	snprintf(data_buf, sizeof(data_buf), "%p", msg->data);
 	snprintf(pack_buf, sizeof(pack_buf), "%p", msg->packbuf);
 
-	json_t *header = json_pack("{s:i, s:I, s:i, s:i, s:I}", "delta",
-	                           (json_int_t)msg->header.delta, "dst_rank",
-	                           msg->header.dst_rank, "src_rank",
-	                           msg->header.src_rank, "time",
-	                           (json_int_t)msg->header.time, "type",
-	                           msg->header.type);
+	json_t *header = json_pack("{s:s, s:I, s:I, s:i, s:i}", "type",
+	                           dstm_enum_to_string(msg->header.type,
+	                                               dstm_msg_type_table),
+	                           "time", (json_int_t)msg->header.time,
+	                           "delta", (json_int_t)msg->header.delta,
+	                           "dst_rank", msg->header.dst_rank,
+	                           "src_rank", msg->header.src_rank);
 
-	json_t *obj = json_pack("{s:s, s:o, s:s}", "data", data_buf, "header",
-	                        header, "packbuf", pack_buf);
+	json_t *obj = json_object();
+	json_object_set_new(obj, "header", header);
 
 	switch (msg->header.type) {
 	case DSTM_MSG_TYPE_PUT:
@@ -403,6 +414,9 @@ json_t *dstm_msg_to_json(dstm_msg_t *msg)
 		json_object_set_new(obj, "type", json_string("unknown"));
 		break;
 	}
+
+	json_object_set_new(obj, "data", json_string(data_buf));
+	json_object_set_new(obj, "packbuf", json_string(pack_buf));
 
 	return obj;
 }

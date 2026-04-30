@@ -15,6 +15,7 @@
 #include "dstm.h"
 
 #include "internal/globals.h"
+#include "internal/log.h"
 #include "internal/msg.h"
 #include "internal/region.h"
 #include "internal/request.h"
@@ -110,12 +111,7 @@ int dstm_request_isdone(dstm_request_t *req)
  * Formatting helpers
  ******************************************************************************/
 
-typedef struct dstm_request_type_table_s {
-	int type;
-	const char *s;
-} dstm_request_type_table_t;
-
-static const dstm_request_type_table_t dstm_request_type_table[] = {
+static const dstm_enum_table_t dstm_request_type_table[] = {
         {DSTM_REQUEST_TYPE_LOCAL_PUT, "LOCAL_PUT"},
         {DSTM_REQUEST_TYPE_LOCAL_GET, "LOCAL_GET"},
         {DSTM_REQUEST_TYPE_IN_PUT, "IN_PUT"},
@@ -126,37 +122,39 @@ static const dstm_request_type_table_t dstm_request_type_table[] = {
         {0, NULL},
 };
 
-static const char *dstm_request_type_t2s(int type,
-                                         const dstm_request_type_table_t *table)
-{
-	if (type < 0)
-		return "UNKNOWN";
-	for (int i = 0; table[i].s != NULL; i++)
-		if (table[i].type == type)
-			return table[i].s;
-	return "UNKNOWN";
-}
+static const dstm_enum_table_t dstm_request_status_table[] = {
+        {DSTM_REQUEST_STATUS_INIT, "INIT"},
+        {DSTM_REQUEST_STATUS_ISEND, "ISEND"},
+        {DSTM_REQUEST_STATUS_IRECV, "IRECV"},
+        {DSTM_REQUEST_STATUS_DONE, "DONE"},
+        {DSTM_REQUEST_STATUS_BARRIER_DRAIN_OUT, "BARRIER_DRAIN_OUT"},
+        {DSTM_REQUEST_STATUS_BARRIER_R1_WAIT, "BARRIER_R1_WAIT"},
+        {DSTM_REQUEST_STATUS_BARRIER_R1_FORWARDED, "BARRIER_R1_FORWARDED"},
+        {DSTM_REQUEST_STATUS_BARRIER_R2_DRAINING, "BARRIER_R2_DRAINING"},
+        {DSTM_REQUEST_STATUS_BARRIER_R2_FORWARDED, "BARRIER_R2_FORWARDED"},
+        {0, NULL},
+};
 
 json_t *dstm_request_to_json(dstm_request_t *req)
 {
 	if (req == NULL)
 		return json_null();
 
-	json_t *obj = json_pack(
-	        "{s:I, s:o?, s:o?, s:i, s:I, s:o?, s:i, s:i, s:I}",
-	        "delta", (json_int_t)req->delta,
-	        "dst", dstm_ptr_to_json(req->dst),
-	        "msg", dstm_msg_to_json(&req->msg),
-	        "rank", req->rank,
-	        "size", (json_int_t)req->size,
-	        "src", dstm_ptr_to_json(req->src),
-	        "status", req->status,
-	        "tag", req->tag,
-	        "time", (json_int_t)req->time);
-
+	json_t *obj = json_object();
 	json_object_set_new(obj, "type",
-	                    json_string(dstm_request_type_t2s(
+	                    json_string(dstm_enum_to_string(
 	                            req->type, dstm_request_type_table)));
+	json_object_set_new(obj, "time", json_integer(req->time));
+	json_object_set_new(obj, "delta", json_integer(req->delta));
+	json_object_set_new(obj, "dst", dstm_ptr_to_json(req->dst));
+	json_object_set_new(obj, "src", dstm_ptr_to_json(req->src));
+	json_object_set_new(obj, "rank", json_integer(req->rank));
+	json_object_set_new(obj, "size", json_integer(req->size));
+	json_object_set_new(obj, "status",
+	                    json_string(dstm_enum_to_string(
+	                            req->status, dstm_request_status_table)));
+	json_object_set_new(obj, "tag", json_integer(req->tag));
+	json_object_set_new(obj, "msg", dstm_msg_to_json(&req->msg));
 
 	return obj;
 }
