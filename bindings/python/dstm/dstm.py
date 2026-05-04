@@ -8,10 +8,10 @@
 
 import os
 import platform
-import sys
 import ctypes as ct
 
 import numpy as np
+import numpy.typing as npt
 
 if os.environ.get("LIBDSTM_SO_"):
     libnrm = ct.cdll.LoadLibrary(os.environ.get("LIBDSTM_SO_"))
@@ -35,7 +35,7 @@ else:
 # 	dstm_ptr_t *rank_ptrs;
 # };
 
-class Darray(ct.Structure):
+class _Darray(ct.Structure):
     _fields_ = [
         # byte size of each element
         ("element_size", ct.c_size_t),
@@ -54,10 +54,38 @@ class Darray(ct.Structure):
     ]
 
 
+class Darray:
+
+    def __init__(self, handle: ct._Pointer, dtype: npt.DTypeLike):
+        self.darray = handle.contents
+        self.handle = handle
+        self.dtype = dtype
+
+    @property
+    def element_size(self):
+        return self.darray.element_size
+    
+    @property
+    def n_total_elements(self):
+        return self.darray.n_total_elements
+    
+    @property
+    def n_local_elements(self):
+        return self.darray.n_local_elements
+    
+    @property
+    def rank_offsets(self):
+        return self.darray.rank_offsets
+    
+    @property
+    def rank_n_elements(self):
+        return self.darray.rank_n_elements
+
+
 libnrm.dstm_darray_create.restype = ct.c_int
 libnrm.dstm_darray_create.argtypes = [
     # ct.POINTER(ct.c_void_p),
-    ct.POINTER(ct.POINTER(Darray)),
+    ct.POINTER(ct.POINTER(_Darray)),
     ct.c_size_t,
     ct.c_size_t,
 ]
@@ -139,12 +167,11 @@ def _check(rc, name):
 
 def darray_create(dtype, local_elements):
     dtype = np.dtype(dtype)
-    # handle = ct.c_void_p()
-    handle = ct.POINTER(Darray)()
+    handle = ct.POINTER(_Darray)()
     rc = libnrm.dstm_darray_create(ct.byref(handle), dtype.itemsize, local_elements)
-
     _check(rc, "dstm_darray_create")
-    return handle.contents
+    darray = Darray(handle, dtype)
+    return darray
 
 
 def darray_put(darray, global_index, value, time, delta):
@@ -155,13 +182,11 @@ def darray_put(darray, global_index, value, time, delta):
     _check(rc, "dstm_darray_put")
 
 
-def darray_get(darray, global_index, time, delta):
-    out = np.empty((), dtype=darray.dtype)
+def darray_get(darray, global_index, dst, time, delta):
     rc = libnrm.dstm_darray_get(
-        darray.handle, global_index, out.ctypes.data, time, delta
+        darray.handle, global_index, dst.ctypes.data, time, delta
     )
     _check(rc, "dstm_darray_get")
-    return out
 
 
 def darray_allgatherv(darray, src, dst, time, deltas):
