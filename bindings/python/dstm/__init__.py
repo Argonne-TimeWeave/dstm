@@ -28,6 +28,7 @@ from .dstm import (
     distance_create_complete,
     distance_destroy,
     start,
+    distance_get
 )
 
 __all__ = [
@@ -51,5 +52,6 @@ __all__ = [
     "distance_create_ring",
     "distance_create_complete",
     "distance_destroy",
+    "distance_get",
     "start",
 ]

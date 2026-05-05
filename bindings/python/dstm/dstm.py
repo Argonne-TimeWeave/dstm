@@ -14,7 +14,7 @@ import numpy as np
 import numpy.typing as npt
 
 if os.environ.get("LIBDSTM_SO_"):
-    libnrm = ct.cdll.LoadLibrary(os.environ.get("LIBDSTM_SO_"))
+    libnrm = ct.cdll.LoadLibrary(os.environ.get("LIBDSTM_SO_"))  # type: ignore
 else:
     if platform.uname()[0] == "Linux":
         libnrm = ct.cdll.LoadLibrary("libdstm.so")
@@ -137,6 +137,9 @@ libnrm.dstm_log_setlevel.argtypes = [ct.c_int]
 libnrm.dstm_distance_create_ring.restype = ct.c_int
 libnrm.dstm_distance_create_ring.argtypes = [ct.POINTER(ct.c_void_p), ct.c_size_t]
 
+libnrm.dstm_distance_get.restype = ct.c_int
+libnrm.dstm_distance_get.argtypes = [ct.c_void_p, ct.c_int, ct.c_int]
+
 libnrm.dstm_distance_create_complete.restype = ct.c_int
 libnrm.dstm_distance_create_complete.argtypes = [ct.POINTER(ct.c_void_p), ct.c_size_t]
 
@@ -229,6 +232,11 @@ def fini():
 def log_setlevel(level):
     rc = libnrm.dstm_log_setlevel(level)
     _check(rc, "dstm_log_setlevel")
+
+
+def distance_get(dist: Distance, i: int, j: int) -> int:
+    distance = libnrm.dstm_distance_get(dist.handle, i, j)
+    return distance
 
 
 def distance_create_ring(size):
