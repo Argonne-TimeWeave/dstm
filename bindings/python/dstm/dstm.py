@@ -129,7 +129,7 @@ libnrm.dstm_finalize.restype = ct.c_int
 libnrm.dstm_finalize.argtypes = []
 
 libnrm.dstm_fini.restype = ct.c_int
-libnrm.dstm_fini.argtypes = []
+libnrm.dstm_fini.argtypes = [ct.c_int64]
 
 libnrm.dstm_log_setlevel.restype = ct.c_int
 libnrm.dstm_log_setlevel.argtypes = [ct.c_int]
@@ -224,8 +224,8 @@ def finalize():
     _check(rc, "dstm_finalize")
 
 
-def fini():
-    rc = libnrm.dstm_fini()
+def fini(last_time: int):
+    rc = libnrm.dstm_fini(last_time)
     _check(rc, "dstm_fini")
 
 
