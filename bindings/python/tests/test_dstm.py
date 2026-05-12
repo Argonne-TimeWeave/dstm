@@ -102,11 +102,15 @@ def test_darray_allgather():
     dstm.darray_allgatherv(darray, data[rank] * 2, dst, 3, deltas[rank])
     print(rank, dst)
     dstm.darray_allgatherv(darray, data[rank] * 3, dst, 4, deltas[rank])
+    dstm.darray_allgatherv(darray, data[rank] * 4, dst, 5, deltas[rank])
+    print(rank, dst)
  
     # ?? Changes in src, don't seem to be reflected in dst on other ranks.
     # rank 1 dst is [1 2 3 4 0 0]
     # rank 0 dst is [0 0 0 0 5 6]
     
-    dstm.fini(1)
+    # fini should take the
+    # last timestamp
+    dstm.fini(6)
     dstm.distance_destroy(dist)
     dstm.finalize()
