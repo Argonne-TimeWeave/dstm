@@ -210,6 +210,35 @@ int dstm_distance_create_hypercube(dstm_distance_t **ret, size_t size);
 int dstm_distance_create_dragonfly(dstm_distance_t **ret, size_t size);
 
 /**
+ * Create a distance matrix from a user-provided matrix.
+ *
+ * Allows applications to define arbitrary topologies (e.g. derived from
+ * a partitioned application graph) instead of using the built-in
+ * topology constructors.
+ *
+ * The matrix must be a flattened size*size array of non-negative
+ * integers stored in row-major order, with all diagonal entries equal
+ * to zero (distance from a node to itself is 0).  Entries do not need
+ * to be symmetric, but they must satisfy the triangle inequality if
+ * they are to be used as DSTM lookahead values; this function does NOT
+ * enforce the triangle inequality.  Callers can use other distance
+ * helpers (e.g. Floyd-Warshall on an adjacency matrix) before passing
+ * the result here.
+ *
+ * The contents of @p matrix are copied; the caller retains ownership of
+ * the input buffer.
+ *
+ * @param[out] ret    pointer to distance structure pointer (must be non-NULL)
+ * @param[in]  size   number of nodes (must be >= 1 and <= DSTM_DISTANCE_MAX_SIZE)
+ * @param[in]  matrix flattened size*size matrix of non-negative ints
+ * @return DSTM_SUCCESS on success, -DSTM_EINVAL for invalid parameters
+ *         (NULL pointers, out-of-range size, negative entries, non-zero
+ *         diagonal), -DSTM_ENOMEM for allocation failures
+ */
+int dstm_distance_create_from_matrix(dstm_distance_t **ret, size_t size,
+                                     const int *matrix);
+
+/**
  * Destroy a distance matrix and free all associated resources.
  *
  * This function safely deallocates a distance matrix created by any of

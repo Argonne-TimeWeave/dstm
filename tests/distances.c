@@ -879,6 +879,140 @@ START_TEST(test_dragonfly_minimal)
 END_TEST
 
 /*******************************************************************************
+ * From-Matrix Tests
+ ******************************************************************************/
+
+START_TEST(test_from_matrix_null_ret)
+{
+	int m[1] = {0};
+	int rc = dstm_distance_create_from_matrix(NULL, 1, m);
+	ck_assert_int_eq(rc, -DSTM_EINVAL);
+}
+END_TEST
+
+START_TEST(test_from_matrix_null_matrix)
+{
+	dstm_distance_t *dist = NULL;
+	int rc = dstm_distance_create_from_matrix(&dist, 1, NULL);
+	ck_assert_int_eq(rc, -DSTM_EINVAL);
+	ck_assert_ptr_null(dist);
+}
+END_TEST
+
+START_TEST(test_from_matrix_invalid_size_zero)
+{
+	dstm_distance_t *dist = NULL;
+	int m[1] = {0};
+	int rc = dstm_distance_create_from_matrix(&dist, 0, m);
+	ck_assert_int_eq(rc, -DSTM_EINVAL);
+	ck_assert_ptr_null(dist);
+}
+END_TEST
+
+START_TEST(test_from_matrix_invalid_size_too_large)
+{
+	dstm_distance_t *dist = NULL;
+	int m[1] = {0};
+	int rc = dstm_distance_create_from_matrix(
+	    &dist, DSTM_DISTANCE_MAX_SIZE + 1, m);
+	ck_assert_int_eq(rc, -DSTM_EINVAL);
+	ck_assert_ptr_null(dist);
+}
+END_TEST
+
+START_TEST(test_from_matrix_nonzero_diagonal)
+{
+	dstm_distance_t *dist = NULL;
+	/* 2x2 with non-zero diagonal at (1,1) */
+	int m[4] = {0, 1, 1, 5};
+	int rc = dstm_distance_create_from_matrix(&dist, 2, m);
+	ck_assert_int_eq(rc, -DSTM_EINVAL);
+	ck_assert_ptr_null(dist);
+}
+END_TEST
+
+START_TEST(test_from_matrix_negative_entry)
+{
+	dstm_distance_t *dist = NULL;
+	int m[4] = {0, -1, 1, 0};
+	int rc = dstm_distance_create_from_matrix(&dist, 2, m);
+	ck_assert_int_eq(rc, -DSTM_EINVAL);
+	ck_assert_ptr_null(dist);
+}
+END_TEST
+
+START_TEST(test_from_matrix_create_destroy)
+{
+	dstm_distance_t *dist = NULL;
+	/* Custom 3x3 distance matrix:
+	 *     0 1 2
+	 *   0[0,2,3]
+	 *   1[2,0,1]
+	 *   2[3,1,0]
+	 */
+	int m[9] = {0, 2, 3, 2, 0, 1, 3, 1, 0};
+	int rc = dstm_distance_create_from_matrix(&dist, 3, m);
+	ck_assert_int_eq(rc, DSTM_SUCCESS);
+	ck_assert_ptr_nonnull(dist);
+	ck_assert_int_eq(dstm_distance_size(dist), 3);
+
+	ck_assert_int_eq(diagonal_is_zero(dist), 1);
+	ck_assert_int_eq(all_nonnegative(dist), 1);
+	ck_assert_int_eq(is_symmetric(dist), 1);
+
+	ck_assert_int_eq(dstm_distance_get(dist, 0, 1), 2);
+	ck_assert_int_eq(dstm_distance_get(dist, 0, 2), 3);
+	ck_assert_int_eq(dstm_distance_get(dist, 1, 2), 1);
+	ck_assert_int_eq(dstm_distance_get(dist, 2, 1), 1);
+
+	dstm_distance_destroy(&dist);
+	ck_assert_ptr_null(dist);
+}
+END_TEST
+
+START_TEST(test_from_matrix_input_is_copied)
+{
+	dstm_distance_t *dist = NULL;
+	int m[4] = {0, 7, 7, 0};
+	int rc = dstm_distance_create_from_matrix(&dist, 2, m);
+	ck_assert_int_eq(rc, DSTM_SUCCESS);
+
+	/* Mutate input after creation; structure must remain unchanged. */
+	m[1] = 99;
+	m[2] = 99;
+	ck_assert_int_eq(dstm_distance_get(dist, 0, 1), 7);
+	ck_assert_int_eq(dstm_distance_get(dist, 1, 0), 7);
+
+	dstm_distance_destroy(&dist);
+}
+END_TEST
+
+START_TEST(test_from_matrix_asymmetric)
+{
+	/* Asymmetric matrices are allowed (e.g. directed-graph-derived). */
+	dstm_distance_t *dist = NULL;
+	int m[4] = {0, 1, 5, 0};
+	int rc = dstm_distance_create_from_matrix(&dist, 2, m);
+	ck_assert_int_eq(rc, DSTM_SUCCESS);
+	ck_assert_int_eq(dstm_distance_get(dist, 0, 1), 1);
+	ck_assert_int_eq(dstm_distance_get(dist, 1, 0), 5);
+	dstm_distance_destroy(&dist);
+}
+END_TEST
+
+START_TEST(test_from_matrix_single_node)
+{
+	dstm_distance_t *dist = NULL;
+	int m[1] = {0};
+	int rc = dstm_distance_create_from_matrix(&dist, 1, m);
+	ck_assert_int_eq(rc, DSTM_SUCCESS);
+	ck_assert_int_eq(dstm_distance_size(dist), 1);
+	ck_assert_int_eq(dstm_distance_get(dist, 0, 0), 0);
+	dstm_distance_destroy(&dist);
+}
+END_TEST
+
+/*******************************************************************************
  * Test Suite Setup
  ******************************************************************************/
 
@@ -887,6 +1021,7 @@ Suite *distances_suite(void)
 	Suite *s;
 	TCase *tc_ring, *tc_complete, *tc_star, *tc_line;
 	TCase *tc_mesh, *tc_torus, *tc_tree, *tc_hypercube, *tc_dragonfly;
+	TCase *tc_from_matrix;
 
 	s = suite_create("distances");
 
@@ -982,6 +1117,20 @@ Suite *distances_suite(void)
 	tcase_add_test(tc_dragonfly, test_dragonfly_properties);
 	tcase_add_test(tc_dragonfly, test_dragonfly_minimal);
 	suite_add_tcase(s, tc_dragonfly);
+
+	/* From-matrix tests */
+	tc_from_matrix = tcase_create("from_matrix");
+	tcase_add_test(tc_from_matrix, test_from_matrix_null_ret);
+	tcase_add_test(tc_from_matrix, test_from_matrix_null_matrix);
+	tcase_add_test(tc_from_matrix, test_from_matrix_invalid_size_zero);
+	tcase_add_test(tc_from_matrix, test_from_matrix_invalid_size_too_large);
+	tcase_add_test(tc_from_matrix, test_from_matrix_nonzero_diagonal);
+	tcase_add_test(tc_from_matrix, test_from_matrix_negative_entry);
+	tcase_add_test(tc_from_matrix, test_from_matrix_create_destroy);
+	tcase_add_test(tc_from_matrix, test_from_matrix_input_is_copied);
+	tcase_add_test(tc_from_matrix, test_from_matrix_asymmetric);
+	tcase_add_test(tc_from_matrix, test_from_matrix_single_node);
+	suite_add_tcase(s, tc_from_matrix);
 
 	return s;
 }
