@@ -103,6 +103,8 @@ AC_CONFIG_HEADERS([src/config.h])
 AC_CONFIG_FILES([Makefile
 		 bindings/python/Makefile
 		 dstm.pc
+		 examples/Makefile
+		 examples/traffic/Makefile
 		 include/dstm/version.h
 		 tests/mpi/bats-driver.sh
 		 tests/mpi/Makefile])
