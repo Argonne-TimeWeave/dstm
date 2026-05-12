@@ -12,6 +12,7 @@
 
 #include <mpi.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "dstm.h"
 
@@ -280,6 +281,24 @@ int dstm_darray_allgatherv(dstm_darray_t *darray,
 	}
 
 	return DSTM_SUCCESS;
+}
+
+int dstm_darray_get_or_default(dstm_darray_t *darray,
+                               size_t global_index,
+                               void *dst,
+                               dstm_time_t time,
+                               dstm_time_t delta,
+                               const void *default_value)
+{
+	if (darray == NULL || dst == NULL || default_value == NULL)
+		return -DSTM_EINVAL;
+
+	if (time + delta < 0) {
+		memcpy(dst, default_value, darray->element_size);
+		return DSTM_SUCCESS;
+	}
+
+	return dstm_darray_get(darray, global_index, dst, time, delta);
 }
 
 /*******************************************************************************

@@ -350,6 +350,29 @@ int dstm_darray_allgatherv(dstm_darray_t *darray,
                            dstm_time_t time,
                            const dstm_time_t *deltas);
 
+/**
+ * Like dstm_darray_get, but if the effective target time
+ * (time + delta) is strictly negative, copies element_size bytes from
+ * @p default_value into @p dst and returns DSTM_SUCCESS without
+ * contacting the owning rank.
+ *
+ * Useful for early ticks of a simulation where the target version
+ * predates the start of history and would otherwise block forever.
+ *
+ * @param default_value  pointer to element_size bytes used as the
+ *                       fallback value.  MUST be non-NULL.
+ *
+ * @return DSTM_SUCCESS on success, -DSTM_EINVAL if @p default_value is
+ *         NULL or other arguments are invalid.  For non-negative target
+ *         times, behaves exactly like dstm_darray_get.
+ */
+int dstm_darray_get_or_default(dstm_darray_t *darray,
+                               size_t global_index,
+                               void *dst,
+                               dstm_time_t time,
+                               dstm_time_t delta,
+                               const void *default_value);
+
 /* opaque type for pointers into regions */
 #define DSTM_REGIONID_INVALID -1
 #define DSTM_REGIONID_LOCAL -2
@@ -384,6 +407,30 @@ int dstm_get(int rank,
              void *dst,
              dstm_ptr_t src,
              size_t size);
+
+/**
+ * Like dstm_get, but if the effective target time (time + delta) is
+ * strictly negative, copies @p size bytes from @p default_value into
+ * @p dst and returns DSTM_SUCCESS without contacting the owning rank.
+ *
+ * Useful for early ticks of a simulation where the target version
+ * predates the start of history and would otherwise block forever.
+ *
+ * @param default_value  pointer to @p size bytes used as the fallback
+ *                       value.  MUST be non-NULL.
+ *
+ * @return DSTM_SUCCESS on success, -DSTM_EINVAL if @p default_value
+ *         is NULL or other arguments are invalid.  For non-negative
+ *         target times, behaves exactly like dstm_get.
+ */
+int dstm_get_or_default(int rank,
+                        int region_id,
+                        dstm_time_t time,
+                        dstm_time_t delta,
+                        void *dst,
+                        dstm_ptr_t src,
+                        size_t size,
+                        const void *default_value);
 
 #ifdef __cplusplus
 }

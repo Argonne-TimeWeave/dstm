@@ -22,6 +22,7 @@ COMPILED_TESTS = \
 		allgatherv \
 		darray \
 		distances \
+		get_or_default \
 		msg
 
 check_PROGRAMS = $(COMPILED_TESTS)

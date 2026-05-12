@@ -667,3 +667,23 @@ int dstm_get(int rank,
 	dstm_request_destroy(&req);
 	return 0;
 }
+
+int dstm_get_or_default(int rank,
+                        int region_id,
+                        dstm_time_t time,
+                        dstm_time_t delta,
+                        void *dst,
+                        dstm_ptr_t src,
+                        size_t size,
+                        const void *default_value)
+{
+	if (default_value == NULL || dst == NULL || size == 0)
+		return -DSTM_EINVAL;
+
+	if (time + delta < 0) {
+		memcpy(dst, default_value, size);
+		return DSTM_SUCCESS;
+	}
+
+	return dstm_get(rank, region_id, time, delta, dst, src, size);
+}

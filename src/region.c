@@ -531,7 +531,11 @@ dstm_region_version_find_or_create(dstm_region_t *region, dstm_time_t time)
 
 	v->time = time;
 	v->status = DSTM_REGION_STATUS_WRITABLE;
-	v->buffer = malloc(region->size);
+	/* Zero-initialise so that offsets which are never put-targeted at
+	 * this timestamp read as zero rather than uninitialised garbage.
+	 * Applications relying on the "publish only what you change"
+	 * pattern (e.g. partial inbox slots) depend on this guarantee. */
+	v->buffer = calloc(1, region->size);
 	if (v->buffer == NULL) {
 		free(v);
 		return NULL;
