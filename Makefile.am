@@ -92,6 +92,9 @@ endif
 # mpi tests use a different driver (bats), so we configure them in a subdir
 SUBDIRS += tests/mpi
 
+# examples
+SUBDIRS += examples
+
 AM_COLOR_TESTS = yes
 AM_CPPFLAGS += $(CHECK_CFLAGS)
 AM_CFLAGS += $(CHECK_CFLAGS)
