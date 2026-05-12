@@ -38,3 +38,8 @@ bats_require_minimum_version 1.5.0
 @test "mpirun -n 4 get_or_default" {
 	run -0 --separate-stderr timeout --preserve-status 5 mpirun -n 4 $LOG_COMPILER $LOG_FLAGS $ABS_TOP_BUILDDIR/tests/mpi/get_or_default
 }
+
+@test "mpirun -n 5 traffic smoke" {
+	run -0 --separate-stderr timeout --preserve-status 30 mpirun -n 5 $LOG_COMPILER $LOG_FLAGS $ABS_TOP_BUILDDIR/examples/traffic/traffic --steps 20 --vehicles 50 --quiet
+	[[ "$output" == *"Per-rank simulation stats"* ]]
+}
