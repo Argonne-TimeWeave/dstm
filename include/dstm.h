@@ -334,16 +334,81 @@ void *dstm_darray_get_local_ptr(dstm_darray_t *darray);
 size_t dstm_darray_local_count(dstm_darray_t *darray);
 size_t dstm_darray_global_offset(dstm_darray_t *darray);
 
+/**
+ * Read the element at @p global_index from the distributed array into
+ * @p dst at effective time (time + delta).
+ *
+ * The owning rank for @p global_index is computed internally from the
+ * darray partitioning and forwarded to dstm_get.  The same delta/rank
+ * invariants as dstm_get apply: @p delta must be <= 0, and if
+ * @p delta == 0 the element must be owned by the local rank
+ * (otherwise -DSTM_EDOM is returned by the underlying dstm_get).
+ *
+ * @param[in]  darray        the distributed array
+ * @param[in]  global_index  global element index to read
+ * @param[out] dst           destination buffer of element_size bytes
+ * @param[in]  time          base logical timestamp
+ * @param[in]  delta         non-positive offset added to @p time
+ * @return DSTM_SUCCESS on success, -DSTM_EINVAL if @p dst is NULL or
+ *         @p delta is positive, -DSTM_EDOM if @p delta == 0 and the
+ *         owning rank is not the local rank.
+ */
 int dstm_darray_get(dstm_darray_t *darray,
                     size_t global_index,
                     void *dst,
                     dstm_time_t time,
                     dstm_time_t delta);
+
+/**
+ * Write @p src into the element at @p global_index of the distributed
+ * array, taking effect at time (time + delta).
+ *
+ * The owning rank for @p global_index is computed internally from the
+ * darray partitioning and forwarded to dstm_put.  The same delta/rank
+ * invariants as dstm_put apply: @p delta must be >= 0, and if
+ * @p delta == 0 the element must be owned by the local rank
+ * (otherwise -DSTM_EDOM is returned by the underlying dstm_put).
+ *
+ * @param[in] darray        the distributed array
+ * @param[in] global_index  global element index to write
+ * @param[in] src           source buffer of element_size bytes
+ * @param[in] time          base logical timestamp
+ * @param[in] delta         non-negative offset added to @p time
+ * @return DSTM_SUCCESS on success, -DSTM_EINVAL if @p src is NULL or
+ *         @p delta is negative, -DSTM_EDOM if @p delta == 0 and the
+ *         owning rank is not the local rank.
+ */
 int dstm_darray_put(dstm_darray_t *darray,
                     size_t global_index,
                     void *src,
                     dstm_time_t time,
                     dstm_time_t delta);
+
+/**
+ * All-to-all gather: every rank publishes its full local slice via a
+ * put at time (time + deltas[self]) and reads every other rank's full
+ * slice via a get at time (time + deltas[r]).
+ *
+ * The @p deltas array must contain exactly world_size entries.  Each
+ * entry must be strictly signed according to its role:
+ *   - deltas[self] > 0 : the local put strictly advances logical time;
+ *   - deltas[r]    < 0 : every remote get strictly looks into the past.
+ * Zero is not allowed in any slot of @p deltas; this preserves the
+ * invariant that delta == 0 is only meaningful for the local rank, but
+ * the local slot is itself a put that requires a strictly positive
+ * delta.
+ *
+ * @param[in]  darray  the distributed array
+ * @param[in]  src     local source buffer (local_count * element_size bytes)
+ * @param[out] dst     destination buffer for the gathered global array
+ *                     (total_count * element_size bytes)
+ * @param[in]  time    base logical timestamp shared by all participants
+ * @param[in]  deltas  array of world_size signed offsets; deltas[self]
+ *                     must be > 0 and deltas[r] must be < 0 for r != self
+ * @return DSTM_SUCCESS on success, -DSTM_EINVAL if any of @p darray,
+ *         @p src, @p dst or @p deltas is NULL, -DSTM_EDOM if any
+ *         @p deltas entry violates the sign rule above.
+ */
 int dstm_darray_allgatherv(dstm_darray_t *darray,
                            void *src,
                            void *dst,
@@ -364,7 +429,9 @@ int dstm_darray_allgatherv(dstm_darray_t *darray,
  *
  * @return DSTM_SUCCESS on success, -DSTM_EINVAL if @p default_value is
  *         NULL or other arguments are invalid.  For non-negative target
- *         times, behaves exactly like dstm_darray_get.
+ *         times, behaves exactly like dstm_darray_get and may return
+ *         -DSTM_EDOM if @p delta == 0 and the owning rank is not the
+ *         local rank.
  */
 int dstm_darray_get_or_default(dstm_darray_t *darray,
                                size_t global_index,
@@ -393,6 +460,40 @@ dstm_region_t *dstm_get_local_region(void);
  * DSTM BASIC OPERATIONS
  ******************************************************************************/
 
+/**
+ * Write @p size bytes from @p src into the region identified by
+ * @p region_id, hosted on @p rank, at the location @p dst, taking
+ * effect at logical time (time + delta).
+ *
+ * The triple (rank, region_id, dst.region) must be consistent: each
+ * rank's region id is equal to its rank.  @p delta must be >= 0 (a
+ * put cannot target the past).
+ *
+ * Local-rank invariant for delta == 0: when @p delta is zero, the
+ * effective target time equals @p time and only the local rank can
+ * meaningfully observe its own current state.  Therefore @p rank MUST
+ * equal the local rank id (see dstm_get_local_region_id) when
+ * @p delta == 0; remote puts with @p delta == 0 are rejected with
+ * -DSTM_EDOM.  Non-zero @p delta permits any @p rank.
+ *
+ * Put-before-get phase rule: local rank access with delta == 0 requires us to
+ * enforce additional restrictions. Once a get at same time and delta == 0 has
+ * been issued, a put at same time and delta == 0 is not allowed. The dstm will
+ * enforce this and abort the program with a contract-violation message logged
+ * via dstm_log_error.
+ *
+ * @param[in] rank       target MPI rank (must be == @p region_id)
+ * @param[in] region_id  region identifier (must be == @p rank)
+ * @param[in] time       base logical timestamp
+ * @param[in] delta      non-negative offset added to @p time
+ * @param[in] dst        opaque pointer into the target region
+ * @param[in] src        source buffer of @p size bytes (must be non-NULL)
+ * @param[in] size       number of bytes to copy
+ * @return DSTM_SUCCESS on success, -DSTM_EINVAL if @p src is NULL or
+ *         @p delta is negative, -DSTM_EDOM if @p delta == 0 and @p rank
+ *         is not the local rank.  Aborts the program if the put
+ *         violates the put-before-get phase rule above.
+ */
 int dstm_put(int rank,
              int region_id,
              dstm_time_t time,
@@ -400,6 +501,41 @@ int dstm_put(int rank,
              dstm_ptr_t dst,
              void *src,
              size_t size);
+
+/**
+ * Read @p size bytes from the region identified by @p region_id,
+ * hosted on @p rank, at the location @p src, into the local buffer
+ * @p dst, observing the version at logical time (time + delta).
+ *
+ * The triple (rank, region_id, src.region) must be consistent: each
+ * rank's region id is equal to its rank.  @p delta must be <= 0 (a
+ * get cannot target the future).
+ *
+ * Local-rank invariant for delta == 0: when @p delta is zero, the
+ * effective target time equals @p time and only the local rank can
+ * meaningfully observe its own current state.  Therefore @p rank MUST
+ * equal the local rank id (see dstm_get_local_region_id) when
+ * @p delta == 0; remote gets with @p delta == 0 are rejected with
+ * -DSTM_EDOM.  Non-zero @p delta permits any @p rank.
+ *
+ * Put-before-get phase rule: local rank access with delta == 0 requires
+ * us to enforce additional restrictions. A local get with delta == 0 
+ * is only allowed after all local put with delta == 0 with the same time.
+ * 
+ * This call is blocking: it drives the progress loop until the
+ * requested version is available locally.
+ *
+ * @param[in]  rank       target MPI rank (must be == @p region_id)
+ * @param[in]  region_id  region identifier (must be == @p rank)
+ * @param[in]  time       base logical timestamp
+ * @param[in]  delta      non-positive offset added to @p time
+ * @param[out] dst        destination buffer of @p size bytes (non-NULL)
+ * @param[in]  src        opaque pointer into the source region
+ * @param[in]  size       number of bytes to copy
+ * @return DSTM_SUCCESS on success, -DSTM_EINVAL if @p dst is NULL or
+ *         @p delta is positive, -DSTM_EDOM if @p delta == 0 and @p rank
+ *         is not the local rank.
+ */
 int dstm_get(int rank,
              int region_id,
              dstm_time_t time,
@@ -421,7 +557,9 @@ int dstm_get(int rank,
  *
  * @return DSTM_SUCCESS on success, -DSTM_EINVAL if @p default_value
  *         is NULL or other arguments are invalid.  For non-negative
- *         target times, behaves exactly like dstm_get.
+ *         target times, behaves exactly like dstm_get and may return
+ *         -DSTM_EDOM if @p delta == 0 and @p rank is not the local
+ *         rank.
  */
 int dstm_get_or_default(int rank,
                         int region_id,

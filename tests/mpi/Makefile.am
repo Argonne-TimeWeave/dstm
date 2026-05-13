@@ -23,7 +23,9 @@ COMPILED_TESTS = \
 		darray \
 		distances \
 		get_or_default \
-		msg
+		local_delta \
+		msg \
+		put_after_get
 
 check_PROGRAMS = $(COMPILED_TESTS)
 

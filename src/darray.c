@@ -247,13 +247,17 @@ int dstm_darray_allgatherv(dstm_darray_t *darray,
 	int self = dstm_global_context.rank;
 	int world_size = dstm_global_context.world_size;
 
-	/* Validate deltas: local rank must have delta >= 0 (put constraint),
-	 * all remote ranks must have delta <= 0 (get constraint). */
-	if (deltas[self] < 0)
-		return -DSTM_EINVAL;
+	/* Validate deltas: local rank must have delta > 0 (put constraint),
+	 * all remote ranks must have delta < 0 (get constraint).  Zero is
+	 * not allowed in any slot: delta == 0 is only meaningful for the
+	 * local rank, but the local slot is itself a put that requires a
+	 * strictly positive delta, so the local-rank rule that would
+	 * otherwise permit delta == 0 cannot apply here. */
+	if (deltas[self] <= 0)
+		return -DSTM_EDOM;
 	for (int r = 0; r < world_size; r++) {
-		if (r != self && deltas[r] > 0)
-			return -DSTM_EINVAL;
+		if (r != self && deltas[r] >= 0)
+			return -DSTM_EDOM;
 	}
 
 	/* Local put: write src into this rank's own darray partition. */

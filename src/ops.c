@@ -212,6 +212,14 @@ static int dstm_request_progress_local_put(dstm_request_t *req)
 	 * - starts in INIT state, with payload buffered in req->buf.
 	 *
 	 * Applied immediately by finding or creating the target version.
+	 *
+	 * Put-before-get phase rule enforcement: the target version MUST
+	 * still be WRITABLE when the put applies.  If a get on the same
+	 * effective time has already driven the version to READABLE (or
+	 * beyond), this put is a contract violation: the caller issued a
+	 * put after a get on the same (rank, region, effective time).
+	 * We abort the program loudly rather than silently overwriting a
+	 * buffer that has already been observed.
 	 */
 	dstm_region_t *rg = dstm_get_local_region();
 	assert(req->status == DSTM_REQUEST_STATUS_INIT);
@@ -219,6 +227,16 @@ static int dstm_request_progress_local_put(dstm_request_t *req)
 	dstm_region_version_t *v = dstm_region_version_find_or_create(rg,
 	                                                              target);
 	assert(v != NULL);
+	if (v->status != DSTM_REGION_STATUS_WRITABLE) {
+		dstm_log_error(
+		        "dstm_put contract violation: rank %d, effective "
+		        "time %" PRId64 ": target version is no longer "
+		        "WRITABLE (status=%d).  All puts to a given "
+		        "effective time must be issued before any get on "
+		        "that time.\n",
+		        dstm_global_context.rank, target, v->status);
+		abort();
+	}
 	void *dptr = (char *)v->buffer + req->dst.offset;
 	memcpy(dptr, req->buf, req->size);
 	req->status = DSTM_REQUEST_STATUS_DONE;
@@ -252,6 +270,13 @@ static int dstm_request_progress_in_put(dstm_request_t *req)
 	/* logic:
 	 * - init: payload already buffered in req->buf (copied on receipt).
 	 * - done: payload applied immediately to the target version.
+	 *
+	 * Put-before-get phase rule enforcement: same as
+	 * dstm_request_progress_local_put.  An incoming PUT from a
+	 * remote rank that targets an effective time we have already
+	 * promoted to READABLE is a global contract violation -- the
+	 * sender issued a put after a get had been observed against
+	 * this rank's region for that time.  Abort loudly.
 	 */
 	dstm_region_t *rg = dstm_get_local_region();
 	assert(req->status == DSTM_REQUEST_STATUS_INIT);
@@ -259,6 +284,16 @@ static int dstm_request_progress_in_put(dstm_request_t *req)
 	dstm_region_version_t *v = dstm_region_version_find_or_create(rg,
 	                                                              target);
 	assert(v != NULL);
+	if (v->status != DSTM_REGION_STATUS_WRITABLE) {
+		dstm_log_error(
+		        "incoming put contract violation on rank %d at "
+		        "effective time %" PRId64 ": target version is no "
+		        "longer WRITABLE (status=%d).  All puts to a given "
+		        "effective time must be issued before any get on "
+		        "that time.\n",
+		        dstm_global_context.rank, target, v->status);
+		abort();
+	}
 	void *dptr = (char *)v->buffer + req->dst.offset;
 	memcpy(dptr, req->buf, req->size);
 	req->status = DSTM_REQUEST_STATUS_DONE;
@@ -546,6 +581,12 @@ int dstm_put(int rank,
 	if (delta < 0)
 		return -DSTM_EINVAL;
 
+	/* delta == 0 means "right now"; only the local rank can
+	 * meaningfully observe its own current state, so a remote put
+	 * with delta == 0 has no well-defined ordering semantics. */
+	if (delta == 0 && rank != dstm_global_context.rank)
+		return -DSTM_EDOM;
+
 	/* did we increase our local time */
 	if (dstm_local_heartbeat_time < time) {
 		dstm_region_send_heartbeat_to_all(time);
@@ -607,6 +648,12 @@ int dstm_get(int rank,
 	/* no idea what the semantic of a get in the future would be for now */
 	if (delta > 0)
 		return -DSTM_EINVAL;
+
+	/* delta == 0 means "right now"; only the local rank can
+	 * meaningfully observe its own current state, so a remote get
+	 * with delta == 0 has no well-defined ordering semantics. */
+	if (delta == 0 && rank != dstm_global_context.rank)
+		return -DSTM_EDOM;
 
 	/* did we increase our local time */
 	if (dstm_local_heartbeat_time < time) {
