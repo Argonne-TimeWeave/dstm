@@ -21,7 +21,7 @@ int main(int argc, char *argv[])
 {
 	MPI_Init(&argc, &argv);
 	dstm_init(&argc, &argv);
-	dstm_log_setlevel(DSTM_LOG_INFO);
+	dstm_log_setlevel(DSTM_LOG_NORMAL);
 
 	int world_size, rank;
 	MPI_Comm_size(MPI_COMM_WORLD, &world_size);
@@ -367,7 +367,13 @@ int main(int argc, char *argv[])
 		    assert(d == expected);
 		}
 
-		/* Test with dstm_start */
+		// This barrier saves us from a stall
+		// 	It seems like dstm_start has some sync expectations
+		// 	that other topologies do not expose. 
+		// TODO if we want to fix this possibility
+		MPI_Barrier(MPI_COMM_WORLD); 
+
+		/* Test with dstm_start */ 
 		rc = dstm_start(dragonfly_dist);
 		assert(rc == DSTM_SUCCESS);
 
