@@ -21,16 +21,31 @@ int main(int argc, char *argv[])
 {
 	MPI_Init(&argc, &argv);
 	dstm_init(&argc, &argv);
-	dstm_log_setlevel(DSTM_LOG_NORMAL);
+	dstm_log_setlevel(DSTM_LOG_DEBUG);
 
 	int world_size, rank;
 	MPI_Comm_size(MPI_COMM_WORLD, &world_size);
 	MPI_Comm_rank(MPI_COMM_WORLD, &rank);
 
+	/* Parse which tests to run */
+        int test_mask = 0xFF;  /* Default: all tests (bits 0-7 set) */
+        if (argc > 1) {
+                char *endptr;
+                long val = strtol(argv[1], &endptr, 2);  /* Parse as binary (base 2) */
+                if (endptr != argv[1] && val >= 0 && val <= 0xFF) {
+                        test_mask = (int)val;
+                        if (rank == 0)
+                                printf("Running tests with mask: %s (0x%02x)\n", argv[1], test_mask);
+                } else {
+                        if (rank == 0)
+                                printf("Invalid test mask. Must be an 8-bit binary string (e.g., 00000011).\n");
+                }
+        }
+
 	/*
 	 * Test 1: Ring topology with actual world_size
 	 */
-	if (world_size >= 3) {
+	if ((test_mask & 0x01) && world_size >= 3) {
 		dstm_distance_t *ring_dist = NULL;
 		int rc = dstm_distance_create_ring(&ring_dist, world_size);
 		assert(rc == DSTM_SUCCESS);
@@ -68,7 +83,7 @@ int main(int argc, char *argv[])
 	/*
 	 * Test 2: Complete graph topology
 	 */
-	{
+	if (test_mask & 0x02) {
 		dstm_distance_t *complete_dist = NULL;
 		int rc = dstm_distance_create_complete(&complete_dist,
 		                                       world_size);
@@ -95,12 +110,15 @@ int main(int argc, char *argv[])
 		if (rank == 0)
 			printf("Complete graph topology test passed (size=%d)\n",
 			       world_size);
+	} else {
+		if (rank == 0)
+			printf("Skipping complete graph test\n");
 	}
 
 	/*
 	 * Test 3: Star topology (if we have at least 2 nodes)
 	 */
-	if (world_size >= 2) {
+	if ((test_mask & 0x04) && world_size >= 2) {
 		dstm_distance_t *star_dist = NULL;
 		int rc = dstm_distance_create_star(&star_dist, world_size);
 		assert(rc == DSTM_SUCCESS);
@@ -138,12 +156,15 @@ int main(int argc, char *argv[])
 		if (rank == 0)
 			printf("Star topology test passed (size=%d)\n",
 			       world_size);
+	} else {
+		if (rank == 0)
+			printf("Skipping complete graph test\n");
 	}
 
 	/*
 	 * Test 4: Line topology
 	 */
-	{
+	if (test_mask & 0x08){
 		dstm_distance_t *line_dist = NULL;
 		int rc = dstm_distance_create_line(&line_dist, world_size);
 		assert(rc == DSTM_SUCCESS);
@@ -167,12 +188,15 @@ int main(int argc, char *argv[])
 		if (rank == 0)
 			printf("Line topology test passed (size=%d)\n",
 			       world_size);
+	} else {
+		if (rank == 0)
+			printf("Skipping line test\n");
 	}
 
 	/*
         * Test 5: Mesh/2D grid topology
         */
-        {
+        if (test_mask & 0x10) {
 		dstm_distance_t *mesh_dist = NULL;
 		int rc = dstm_distance_create_mesh(&mesh_dist, world_size);
 		assert(rc == DSTM_SUCCESS);
@@ -213,12 +237,15 @@ int main(int argc, char *argv[])
 		if (rank == 0)
 		    printf("Mesh topology test passed (size=%d, %ld x %ld grid)\n",
 			   world_size, rows, cols);
-        }
+        } else {
+		if (rank == 0)
+			printf("Skipping mesh test\n");
+	}
 
         /*
         * Test 6: Torus/2D toroidal topology
         */
-        {
+        if (test_mask & 0x20){
 		dstm_distance_t *torus_dist = NULL;
 		int rc = dstm_distance_create_torus(&torus_dist, world_size);
 		assert(rc == DSTM_SUCCESS);
@@ -274,12 +301,15 @@ int main(int argc, char *argv[])
 		if (rank == 0)
 		    printf("Torus topology test passed (size=%d, %ld x %ld torus)\n",
 			   world_size, rows, cols);
-	}
+	} else {
+		if (rank == 0)
+			printf("Skipping torus test\n");
+	} 
 
 	/*
 	 * Test 7: Hypercube topology
 	 */
-	        if ((world_size & (world_size - 1)) == 0) {  /* Check if power of 2 */
+	  if ((test_mask & 0x40) && (world_size & (world_size - 1)) == 0) {  /* Check if power of 2 */
 			dstm_distance_t *hypercube_dist = NULL;
 			int rc = dstm_distance_create_hypercube(&hypercube_dist, world_size);
 			assert(rc == DSTM_SUCCESS);
@@ -330,7 +360,7 @@ int main(int argc, char *argv[])
 	/*
 	* Test 8: Dragonfly topology
 	*/
-	{
+	if (test_mask & 0x80) {
 		dstm_distance_t *dragonfly_dist = NULL;
 		int rc = dstm_distance_create_dragonfly(&dragonfly_dist, world_size);
 		assert(rc == DSTM_SUCCESS);
@@ -371,7 +401,7 @@ int main(int argc, char *argv[])
 		// 	It seems like dstm_start has some sync expectations
 		// 	that other topologies do not expose. 
 		// TODO if we want to fix this possibility
-		MPI_Barrier(MPI_COMM_WORLD); 
+		//MPI_Barrier(MPI_COMM_WORLD); 
 
 		/* Test with dstm_start */ 
 		rc = dstm_start(dragonfly_dist);
@@ -383,7 +413,10 @@ int main(int argc, char *argv[])
 		if (rank == 0)
 		    printf("Dragonfly topology test passed (size=%d, %ld groups of %ld nodes)\n",
 			   world_size, num_groups, group_size);
-	}
+	} else {
+		if (rank == 0)
+			printf("Skipping dragonfly test\n");
+	} 
 
 
 	if (rank == 0)
