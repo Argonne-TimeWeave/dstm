@@ -105,6 +105,7 @@ AC_CONFIG_FILES([Makefile
 		 dstm.pc
 		 examples/Makefile
 		 examples/traffic/Makefile
+		 examples/minimal/Makefile
 		 include/dstm/version.h
 		 tests/mpi/bats-driver.sh
 		 tests/mpi/Makefile])
