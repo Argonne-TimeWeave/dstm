@@ -1,1 +1,1 @@
-SUBDIRS = traffic
+SUBDIRS = traffic minimal
