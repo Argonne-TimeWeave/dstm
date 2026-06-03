@@ -50,9 +50,11 @@ int main(int argc, char *argv[]) {
     dstm_distance_t *topology;
     dstm_darray_t *packet_buffer;
     network_packet_t *local_packets;
-    network_packet_t recv_packet;
     dstm_time_t current_time;
     int status;
+
+    network_packet_t recv_packet;
+    network_packet_t default_packet = { .source_rank = -1 };
 
     /* Initialize MPI */
     MPI_Init(&argc, &argv);
@@ -66,7 +68,7 @@ int main(int argc, char *argv[]) {
     if (quiet)
 	dstm_log_setlevel(DSTM_LOG_QUIET);
     else
-	dstm_log_setlevel(DSTM_LOG_DEBUG);
+	dstm_log_setlevel(DSTM_LOG_INFO);
 
     /* Create network topology (ring in this example) */
     if (rank == 0) {
@@ -100,26 +102,29 @@ int main(int argc, char *argv[]) {
 
     /* Simulation main loop */
     for (current_time = 0; current_time < NUM_TIME_STEPS; current_time++) {
-        dstm_log_info("Rank %d: Time step %ld", rank, current_time);
+        dstm_log_info("Rank %d: Time step %ld\n", rank, current_time);
 
         /* Each rank creates a packet to send to its ring neighbor */
         int next_rank = (rank + 1) % num_ranks;
-	size_t slot = current_time % LOCAL_PACKET_SLOTS;
+
+	size_t send_slot = current_time % LOCAL_PACKET_SLOTS;
+	// be careful; we recv from one timestep ago; and therefore one slot prior
+	size_t recv_slot = (current_time + LOCAL_PACKET_SLOTS - 1) % LOCAL_PACKET_SLOTS;
 
         /* Prepare packet */
-	local_packets[slot].source_rank = rank;
-        local_packets[slot].dest_rank = next_rank;
-        local_packets[slot].timestamp = current_time;
-        snprintf(local_packets[slot].payload, sizeof(local_packets[slot].payload),
+	local_packets[send_slot].source_rank = rank;
+        local_packets[send_slot].dest_rank = next_rank;
+        local_packets[send_slot].timestamp = current_time;
+        snprintf(local_packets[send_slot].payload, sizeof(local_packets[send_slot].payload),
              "Packet from rank %d at time %ld", rank, current_time);
 
-        size_t send_index = next_rank * LOCAL_PACKET_SLOTS + slot;
-        size_t recv_index = rank * LOCAL_PACKET_SLOTS + slot;
+        size_t send_index = next_rank * LOCAL_PACKET_SLOTS + send_slot;
+        size_t recv_index = rank * LOCAL_PACKET_SLOTS + recv_slot;
 
         /* PUT: Send packet to next rank's buffer (lookahead = 1 time step) */
         status = dstm_darray_put(packet_buffer,
                                 send_index,
-                                &local_packets[slot],
+                                &local_packets[send_slot],
                                 current_time,
                                 1);  /* delta = 1: packet arrives next time step */
         
@@ -128,20 +133,20 @@ int main(int argc, char *argv[]) {
             continue;
         }
 
-        dstm_log_info("Rank %d sent packet to rank %d", rank, next_rank);
+        dstm_log_info("Rank %d sent packet to rank %d\n", rank, next_rank);
 
         /* GET: Receive packet from previous rank (if available) */
 	if (current_time > 0) {
 	    status = dstm_darray_get_or_default(packet_buffer,
 					   recv_index,
-					   &local_packets[slot],
+					   &recv_packet,
 					   current_time,
 					   0,  /* delta = 0: get current version */
-					   (const void *)&local_packets[slot]);
+					   &default_packet);
 	
 	    if (status == DSTM_SUCCESS) {
-	        if (local_packets[slot].source_rank >= 0) {
-		    dstm_log_info("Rank %d received: %s",
+	        if (recv_packet.source_rank >= 0) {
+		    dstm_log_info("Rank %d received: %s\n",
 			    rank, recv_packet.payload);
 	        }
 	    }
