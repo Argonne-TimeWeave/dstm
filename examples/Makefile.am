@@ -1,1 +1,1 @@
-SUBDIRS = traffic minimal
+SUBDIRS = traffic minimal airports
