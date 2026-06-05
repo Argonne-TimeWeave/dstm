@@ -266,6 +266,22 @@ typedef int64_t dstm_time_t;
 int dstm_start(dstm_distance_t *dist);
 
 /**
+ * Initialize DSTM with a custom region size.
+ *
+ * Like dstm_start(), but allows specifying the size of the local memory
+ * region instead of using the default DSTM_DEFAULT_REGION_SIZE.
+ *
+ * @param dist         Distance matrix defining the network topology.
+ *                     Must have size equal to world_size.
+ * @param region_size  Size in bytes for the local region. Will be
+ *                     rounded up to the next power of 2. Must be at
+ *                     least DSTM_REGION_MIN_BLOCK_SIZE (64 bytes).
+ *
+ * @return 0 if successful; an error code otherwise.
+ */
+int dstm_start_with_size(dstm_distance_t *dist, size_t region_size);
+
+/**
  * Flush all in-flight requests and shut down the local region.
  *
  * Spins the progress loop until every pending request (IN_PUT, LOCAL_PUT,
