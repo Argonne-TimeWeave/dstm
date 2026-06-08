@@ -73,7 +73,7 @@ int main(int argc, char *argv[])
     if (rank == 0) {
         printf("Mesh topology: %d airports (%dx%d grid), "
                         "%d gates/airport, layover threshold=%d\n",
-                        num_ranks, rows, cols, num_ranks, LAYOVER_THRESHOLD);
+                        num_ranks, rows, cols, NUM_GATES, LAYOVER_THRESHOLD);
         for (int i = 0; i < num_ranks; i++)
             printf("  Airport %d: %s\n", i, tier_name[tiers[i]]);
     }
@@ -89,7 +89,7 @@ int main(int argc, char *argv[])
     dstm_darray_t *gates;
     status = dstm_darray_create_equal(&gates,
                                       sizeof(gate_slot_t),
-                                      (size_t)num_ranks * num_ranks);
+                                      (size_t)num_ranks * NUM_GATES);
     if (status != DSTM_SUCCESS) {
         dstm_log_error("Failed to create gates array");
         free(tiers);
