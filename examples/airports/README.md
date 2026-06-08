@@ -14,6 +14,8 @@ Upon mesh creation airports are created with this distribution:
 **Local airports** - 50% 
 ```
 
+Now each node contains (--block-rows * --block-cols) number of airports. communication only occurs when a plane flies across nodes. 
+
 ## departures and arrivals
 
 Each airport has 24 gates. These gates have slots that can hold incoming flights. In the rare occurrance that a gate is full, it is handled as an edge case and delayed. Flights can only travel a darray distance of 3 before having to *stop for fuel*. We only have 24 gates because that is how many airports can reach us via a 3 distance hop. We make sure that each gate can only be written to by one airport (right now just a simple hash function)  
@@ -39,7 +41,15 @@ Could implement weather delays to add some congestion / randomization in the fut
 ## Running the simulation:
 
 ```
-mpirun -n 16 ./airport_sim --time 20 --seed 42
+# Weak scaling: each rank gets 8x8 = 64 airports, total grows with ranks
+mpirun -n 4  ./airports --block-rows 8 --block-cols 8 --time 64
+mpirun -n 16 ./airports --block-rows 8 --block-cols 8 --time 64
+
+# Strong scaling: fix total at, say, 32x32 = 1024 airports
+mpirun -n 1  ./airports --block-rows 32 --block-cols 32 --time 64   # 1 rank, 32x32 block
+mpirun -n 4  ./airports --block-rows 16 --block-cols 16 --time 64   # 2x2 ranks, 16x16 blocks
+mpirun -n 16 ./airports --block-rows 8  --block-cols 8  --time 64   # 4x4 ranks, 8x8 blocks
+mpirun -n 64 ./airports --block-rows 4  --block-cols 4  --time 64   # 8x8 ranks, 4x4 blocks
 ```
 
 ### Please note
