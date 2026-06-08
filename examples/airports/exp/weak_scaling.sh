@@ -9,10 +9,11 @@ MPIRUN=${MPIRUN:-mpirun}
 EXE=${EXE:-./airports}
 
 BLOCK_ROWS=${BLOCK_ROWS:-16}
-BLOCK_COLS=${BLOCK_COLS:-16}
-TIMESTEPS=${TIMESTEPS:-128}
+BLOCK_COLS=${BLOCK_COLS:-8}
+TIMESTEPS=${TIMESTEPS:-64}
 SEED=${SEED:-42}
 REPS=${REPS:-1}
+WORK=${WORK:-0}
 
 RANK_COUNTS=(1 2 4 8 16 32)
 
@@ -37,6 +38,7 @@ for n in "${RANK_COUNTS[@]}"; do
             --block-cols "$BLOCK_COLS" \
             --time "$TIMESTEPS" \
             --seed "$SEED" \
+            --work "$WORK" \
             --quiet \
             > "$log" 2>&1
 

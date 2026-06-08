@@ -23,6 +23,7 @@ int main(int argc, char *argv[])
     int timesteps  = 16;
     int block_rows = 8;
     int block_cols = 8;
+    int work = 0; 
 
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--seed") && i + 1 < argc)
@@ -35,11 +36,15 @@ int main(int argc, char *argv[])
             block_cols = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--quiet"))
             quiet = 1;
+        else if (!strcmp(argv[i], "--work") && i + 1 < argc)
+            work = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h")) {
             usage(argv[0]);
             return 0;
         }
     }
+
+    g_work_iterations = work;
 
     if (block_rows <= 0 || block_cols <= 0) {
         fprintf(stderr, "Error: --block-rows and --block-cols must be positive\n");
