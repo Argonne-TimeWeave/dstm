@@ -122,7 +122,7 @@ void airport_timestep(airport_state_t *state, dstm_time_t t, int quiet)
 
     /* STEP 1 — sentinel PUT */
     {
-        size_t idx = (size_t)rank * num_ranks + rank;
+        size_t idx = gate_index(rank, rank);
         dstm_darray_put(state->gates, idx, &empty_gate, t, 0);
     }
 
@@ -132,8 +132,8 @@ void airport_timestep(airport_state_t *state, dstm_time_t t, int quiet)
 
     gate_slot_t recv_gate;
 
-    for (int g = 0; g < num_ranks; g++) {
-        size_t idx = (size_t)rank * num_ranks + g;
+    for (int g = 0; g < NUM_GATES; g++) {
+        size_t idx = (size_t)rank * NUM_GATES + g;
 
         status = dstm_darray_get_or_default(state->gates, idx,
                                             &recv_gate, t, 0,
@@ -248,7 +248,7 @@ void airport_timestep(airport_state_t *state, dstm_time_t t, int quiet)
         if (state->outbox[dest].n_flights == 0)
             continue;
 
-        size_t idx = (size_t)dest * num_ranks + rank;
+        size_t idx = gate_index(dest, rank);
         int delta = dstm_distance_get(state->topology, rank, dest);
 
         status = dstm_darray_put(state->gates, idx,

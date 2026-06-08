@@ -16,7 +16,7 @@ Upon mesh creation airports are created with this distribution:
 
 ## departures and arrivals
 
-Each airport has n (number of ranks) gates. These gates have slots that can hold incoming flights. In the rare occurrance that a gate is full, it is handled as an edge case and delayed. Flights can only travel a darray distance of 3 before having to *stop for fuel*. Therefore, realistically airports do not need n number of gates but only a fixed amount (the number of ranks that can reach this airport; 24 by my rough math). We handle each gate at a time (get\_or\_default each gate) and we only put to gates that we are actually sending a flight to.  
+Each airport has 24 gates. These gates have slots that can hold incoming flights. In the rare occurrance that a gate is full, it is handled as an edge case and delayed. Flights can only travel a darray distance of 3 before having to *stop for fuel*. We only have 24 gates because that is how many airports can reach us via a 3 distance hop. We make sure that each gate can only be written to by one airport (right now just a simple hash function)  
 
 ## layovers
 
