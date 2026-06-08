@@ -8,10 +8,6 @@
 #define LAYOVER_THRESHOLD    3
 #define NUM_GATES            24
 
-#define GRID_ROWS 16
-#define GRID_COLS 16
-#define NUM_AIRPORTS (GRID_ROWS * GRID_COLS)
-
 typedef enum {
     TIER_HUB      = 0,
     TIER_REGIONAL = 1,
@@ -48,38 +44,40 @@ typedef struct {
     int              arrivals;
     int              connections;
     gate_slot_t      *outbox;
+    int              num_airports;
 } airport_state_t;
 
-/* Compute Manhattan distance between two airports on the grid */
-static inline int airport_distance(int airport_a, int airport_b)
+static inline int airport_distance(int airport_a, int airport_b, int grid_cols)
 {
-    int row_a = airport_a / GRID_COLS;
-    int col_a = airport_a % GRID_COLS;
-    int row_b = airport_b / GRID_COLS;
-    int col_b = airport_b % GRID_COLS;
+    int row_a = airport_a / grid_cols;
+    int col_a = airport_a % grid_cols;
+    int row_b = airport_b / grid_cols;
+    int col_b = airport_b % grid_cols;
     return abs(row_a - row_b) + abs(col_a - col_b);
 }
 
-/* Map source airport to a gate index at destination airport */
 static inline size_t gate_index(int dest_airport, int source_airport)
 {
     int gate = (source_airport * 49) % NUM_GATES;
     return (size_t)dest_airport * NUM_GATES + gate;
 }
 
-void airport_init(airport_state_t *state, int airport_id);
+void airport_init(airport_state_t *state, int airport_id, int num_airports);
 void airport_destroy(airport_state_t *state);
 void airport_clear_outbox(airport_state_t *state);
 
 int airport_pick_dest(int origin, int num_airports, airport_tier_t *tiers);
-int airport_find_next_hop(int origin, int dest, airport_tier_t *tiers);
+int airport_find_next_hop(int origin, int dest, int num_airports,
+                          int grid_cols, airport_tier_t *tiers);
 
 void airport_process_incoming(airport_state_t *state,
                               gate_slot_t *recv_gate,
+                              int grid_cols,
                               airport_tier_t *tiers,
                               dstm_time_t t);
 
 void airport_inject_flight(airport_state_t *state,
+                           int grid_cols,
                            airport_tier_t *tiers,
                            dstm_time_t t);
 
