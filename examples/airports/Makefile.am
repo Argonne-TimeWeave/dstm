@@ -11,8 +11,10 @@ LDADD = $(top_builddir)/libdstm.la
 noinst_PROGRAMS = airports
 
 airports_SOURCES = \
-	airports.c \
-    airports.h \
+	airport.c \
+    airport.h \
+    simulation.c \
+    simulation.h \
     main.c
 
 EXTRA_DIST = README.md

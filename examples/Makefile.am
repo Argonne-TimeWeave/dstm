@@ -1,1 +1,1 @@
-SUBDIRS = traffic minimal airports strong_airports
+SUBDIRS = traffic minimal airports

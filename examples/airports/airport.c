@@ -8,14 +8,15 @@ const int tier_send_prob[] = { 80, 40, 15 };
 const int tier_recv_weight[] = { 8, 3, 1 };
 const gate_slot_t empty_gate = { .n_flights = 0 };
 
-void airport_init(airport_state_t *state, int airport_id)
+void airport_init(airport_state_t *state, int airport_id, int num_airports)
 {
     state->airport_id     = airport_id;
+    state->num_airports   = num_airports;
     state->flight_counter = 0;
     state->departures     = 0;
     state->arrivals       = 0;
     state->connections    = 0;
-    state->outbox         = calloc(NUM_AIRPORTS, sizeof(gate_slot_t));
+    state->outbox         = calloc(num_airports, sizeof(gate_slot_t));
     airport_clear_outbox(state);
 }
 
@@ -26,7 +27,7 @@ void airport_destroy(airport_state_t *state) {
 
 void airport_clear_outbox(airport_state_t *state)
 {
-    for (int i = 0; i < NUM_AIRPORTS; i++) {
+    for (int i = 0; i < state->num_airports; i++) {
         state->outbox[i] = empty_gate;
     }
 }
@@ -53,11 +54,11 @@ int airport_pick_dest(int origin, int num_airports, airport_tier_t *tiers)
     return (origin + 1) % num_airports;
 }
 
-int airport_find_next_hop(int origin, int dest, airport_tier_t *tiers)
+int airport_find_next_hop(int origin, int dest, int num_airports,
+                          int grid_cols, airport_tier_t *tiers)
 {
-    int dist_to_dest = airport_distance(origin, dest);
+    int dist_to_dest = airport_distance(origin, dest, grid_cols);
 
-    /* Direct flight if within range */
     if (dist_to_dest <= LAYOVER_THRESHOLD)
         return dest;
 
@@ -65,15 +66,15 @@ int airport_find_next_hop(int origin, int dest, airport_tier_t *tiers)
     int best_remaining = dist_to_dest;
     int best_is_hub = 0;
 
-    for (int i = 0; i < NUM_AIRPORTS; i++) {
+    for (int i = 0; i < num_airports; i++) {
         if (i == origin || i == dest)
             continue;
 
-        int dist_to_hop = airport_distance(origin, i);
+        int dist_to_hop = airport_distance(origin, i, grid_cols);
         if (dist_to_hop > LAYOVER_THRESHOLD)
             continue;
 
-        int remaining = airport_distance(i, dest);
+        int remaining = airport_distance(i, dest, grid_cols);
         if (remaining >= dist_to_dest)
             continue;
 
@@ -96,16 +97,17 @@ int airport_find_next_hop(int origin, int dest, airport_tier_t *tiers)
 
 void airport_process_incoming(airport_state_t *state,
                               gate_slot_t *recv_gate,
+                              int grid_cols,
                               airport_tier_t *tiers,
                               dstm_time_t t)
 {
     int airport_id = state->airport_id;
+    int num_airports = state->num_airports;
 
     for (int f = 0; f < recv_gate->n_flights; f++) {
         flight_t flt = recv_gate->flights[f];
 
         if (flt.dest_airport == airport_id) {
-            /* Final destination reached */
             state->arrivals++;
             dstm_log_normal("Airport %d [t=%ld]: LANDED flight %d — "
                             "origin=%d (%s) dep_t=%ld legs=%d \"%s\"\n",
@@ -116,11 +118,11 @@ void airport_process_incoming(airport_state_t *state,
                             flt.legs_completed + 1,
                             flt.payload);
         } else {
-            /* Connecting flight */
             state->connections++;
             flt.legs_completed++;
 
-            int next_hop = airport_find_next_hop(airport_id, flt.dest_airport, tiers);
+            int next_hop = airport_find_next_hop(airport_id, flt.dest_airport,
+                                                 num_airports, grid_cols, tiers);
 
             gate_slot_t *ob = &state->outbox[next_hop];
             if (ob->n_flights < GATE_CAPACITY) {
@@ -140,16 +142,19 @@ void airport_process_incoming(airport_state_t *state,
 }
 
 void airport_inject_flight(airport_state_t *state,
+                           int grid_cols,
                            airport_tier_t *tiers,
                            dstm_time_t t)
 {
     int airport_id = state->airport_id;
+    int num_airports = state->num_airports;
 
     if ((rand() % 100) >= tier_send_prob[tiers[airport_id]])
         return;
 
-    int dest = airport_pick_dest(airport_id, NUM_AIRPORTS, tiers);
-    int next_hop = airport_find_next_hop(airport_id, dest, tiers);
+    int dest = airport_pick_dest(airport_id, num_airports, tiers);
+    int next_hop = airport_find_next_hop(airport_id, dest, num_airports,
+                                         grid_cols, tiers);
 
     gate_slot_t *ob = &state->outbox[next_hop];
     if (ob->n_flights >= GATE_CAPACITY)
