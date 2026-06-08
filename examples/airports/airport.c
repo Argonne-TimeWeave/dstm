@@ -165,6 +165,20 @@ void airport_inject_flight(airport_state_t *state,
         return;
 
     int dest = airport_pick_dest(airport_id, num_airports, tiers);
+
+    /* Experiment with making travel more local  
+            Seems to have no effects
+                After small amounts of testing
+
+    int dist_to_dest = airport_distance(airport_id, dest, grid_cols);
+
+    while (dist_to_dest > 2) {
+        dest = airport_pick_dest(airport_id, num_airports, tiers);
+        dist_to_dest = airport_distance(airport_id, dest, grid_cols);
+    }   
+
+     End Experiment */
+
     int next_hop = airport_find_next_hop(airport_id, dest, num_airports,
                                          grid_cols, tiers);
 
