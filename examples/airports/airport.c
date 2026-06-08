@@ -8,6 +8,15 @@ const int tier_send_prob[] = { 80, 40, 15 };
 const int tier_recv_weight[] = { 8, 3, 1 };
 const gate_slot_t empty_gate = { .n_flights = 0 };
 
+int g_work_iterations = 0;
+
+void do_synthetic_work(void) {
+    volatile double x = 1.0;
+    for (int i = 0; i < g_work_iterations; i++) {
+        x = x * 1.0007 + 0.0002;
+    }
+}
+
 void airport_init(airport_state_t *state, int airport_id, int num_airports)
 {
     state->airport_id     = airport_id;
@@ -106,6 +115,9 @@ void airport_process_incoming(airport_state_t *state,
 
     for (int f = 0; f < recv_gate->n_flights; f++) {
         flight_t flt = recv_gate->flights[f];
+
+        //fake work; to see how it affects strong/weak scaling results
+        do_synthetic_work();
 
         if (flt.dest_airport == airport_id) {
             state->arrivals++;

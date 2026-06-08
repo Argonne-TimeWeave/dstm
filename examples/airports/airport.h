@@ -62,6 +62,9 @@ static inline size_t gate_index(int dest_airport, int source_airport)
     return (size_t)dest_airport * NUM_GATES + gate;
 }
 
+extern int g_work_iterations;
+void do_synthetic_work(void);
+
 void airport_init(airport_state_t *state, int airport_id, int num_airports);
 void airport_destroy(airport_state_t *state);
 void airport_clear_outbox(airport_state_t *state);
