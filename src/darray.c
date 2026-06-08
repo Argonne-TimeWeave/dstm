@@ -50,6 +50,22 @@ static int darray_find_rank(dstm_darray_t *darray, size_t global_index)
 	return lo;
 }
 
+/* Resolve a global index to the owning (rank, dstm_ptr_t) pair: rank is
+ * the MPI rank that owns the element, and ptr is the dstm_ptr_t that
+ * addresses that element inside the owning rank's local partition. */
+static void darray_resolve(dstm_darray_t *darray,
+                           size_t global_index,
+                           int *out_rank,
+                           dstm_ptr_t *out_ptr)
+{
+	int rank = darray_find_rank(darray, global_index);
+	size_t local_offset = global_index - darray->rank_offsets[rank];
+	dstm_ptr_t ptr = darray->rank_ptrs[rank];
+	ptr.offset += (intptr_t)(local_offset * darray->element_size);
+	*out_rank = rank;
+	*out_ptr = ptr;
+}
+
 int dstm_darray_create(dstm_darray_t **ret,
                        size_t element_size,
                        size_t local_elements)
@@ -202,13 +218,11 @@ int dstm_darray_get(dstm_darray_t *darray,
 	dstm_log_debug("darray: %p, index: %zu, dst: %p, time: %" PRId64
 	               ", delta: %" PRId64 "\n",
 	               darray, global_index, dst, time, delta);
-	int rank = darray_find_rank(darray, global_index);
-	int local_offset =
-	        (int)(global_index - (size_t)darray->rank_offsets[rank]);
-	dstm_ptr_t src = darray->rank_ptrs[rank];
-	dstm_log_debug("rank: %d, local_offset: %d, src: %d:%td\n", rank,
-	               local_offset, src.region, src.offset);
-	src.offset += local_offset * darray->element_size;
+	int rank;
+	dstm_ptr_t src;
+	darray_resolve(darray, global_index, &rank, &src);
+	dstm_log_debug("rank: %d, src: %d:%td\n", rank, src.region,
+	               src.offset);
 
 	return dstm_get(rank, src.region, time, delta, dst, src,
 	                darray->element_size);
@@ -223,14 +237,134 @@ int dstm_darray_put(dstm_darray_t *darray,
 	dstm_log_debug("darray: %p, index: %zu, src: %p, time: %" PRId64
 	               ", delta: %" PRId64 "\n",
 	               darray, global_index, src, time, delta);
-	int rank = darray_find_rank(darray, global_index);
-	int local_offset =
-	        (int)(global_index - (size_t)darray->rank_offsets[rank]);
-	dstm_ptr_t dst = darray->rank_ptrs[rank];
-	dst.offset += local_offset * darray->element_size;
+	int rank;
+	dstm_ptr_t dst;
+	darray_resolve(darray, global_index, &rank, &dst);
 
 	return dstm_put(rank, dst.region, time, delta, dst, src,
 	                darray->element_size);
+}
+
+int dstm_darray_get_range(dstm_darray_t *darray,
+                          const size_t *indices,
+                          size_t count,
+                          void *dst,
+                          dstm_time_t time,
+                          dstm_time_t delta)
+{
+	dstm_log_debug("darray: %p, count: %zu, dst: %p, time: %" PRId64
+	               ", delta: %" PRId64 "\n",
+	               darray, count, dst, time, delta);
+	if (darray == NULL)
+		return -DSTM_EINVAL;
+	if (count == 0)
+		return DSTM_SUCCESS;
+	if (indices == NULL || dst == NULL)
+		return -DSTM_EINVAL;
+
+	size_t esize = darray->element_size;
+	for (size_t i = 0; i < count; i++) {
+		int rank;
+		dstm_ptr_t src;
+		darray_resolve(darray, indices[i], &rank, &src);
+		void *out = (char *)dst + i * esize;
+		int rc = dstm_get(rank, src.region, time, delta, out, src,
+		                  esize);
+		if (rc != DSTM_SUCCESS)
+			return rc;
+	}
+	return DSTM_SUCCESS;
+}
+
+int dstm_darray_put_range(dstm_darray_t *darray,
+                          const size_t *indices,
+                          size_t count,
+                          const void *src,
+                          dstm_time_t time,
+                          dstm_time_t delta)
+{
+	dstm_log_debug("darray: %p, count: %zu, src: %p, time: %" PRId64
+	               ", delta: %" PRId64 "\n",
+	               darray, count, src, time, delta);
+	if (darray == NULL)
+		return -DSTM_EINVAL;
+	if (count == 0)
+		return DSTM_SUCCESS;
+	if (indices == NULL || src == NULL)
+		return -DSTM_EINVAL;
+
+	size_t esize = darray->element_size;
+	for (size_t i = 0; i < count; i++) {
+		int rank;
+		dstm_ptr_t dst;
+		darray_resolve(darray, indices[i], &rank, &dst);
+		void *in = (void *)((const char *)src + i * esize);
+		int rc = dstm_put(rank, dst.region, time, delta, dst, in,
+		                  esize);
+		if (rc != DSTM_SUCCESS)
+			return rc;
+	}
+	return DSTM_SUCCESS;
+}
+
+int dstm_darray_get_rangev(dstm_darray_t *darray,
+                           const size_t *indices,
+                           size_t count,
+                           void *const *dsts,
+                           dstm_time_t time,
+                           dstm_time_t delta)
+{
+	dstm_log_debug("darray: %p, count: %zu, dsts: %p, time: %" PRId64
+	               ", delta: %" PRId64 "\n",
+	               darray, count, (const void *)dsts, time, delta);
+	if (darray == NULL)
+		return -DSTM_EINVAL;
+	if (count == 0)
+		return DSTM_SUCCESS;
+	if (indices == NULL || dsts == NULL)
+		return -DSTM_EINVAL;
+
+	size_t esize = darray->element_size;
+	for (size_t i = 0; i < count; i++) {
+		int rank;
+		dstm_ptr_t src;
+		darray_resolve(darray, indices[i], &rank, &src);
+		int rc = dstm_get(rank, src.region, time, delta, dsts[i], src,
+		                  esize);
+		if (rc != DSTM_SUCCESS)
+			return rc;
+	}
+	return DSTM_SUCCESS;
+}
+
+int dstm_darray_put_rangev(dstm_darray_t *darray,
+                           const size_t *indices,
+                           size_t count,
+                           const void *const *srcs,
+                           dstm_time_t time,
+                           dstm_time_t delta)
+{
+	dstm_log_debug("darray: %p, count: %zu, srcs: %p, time: %" PRId64
+	               ", delta: %" PRId64 "\n",
+	               darray, count, (const void *)srcs, time, delta);
+	if (darray == NULL)
+		return -DSTM_EINVAL;
+	if (count == 0)
+		return DSTM_SUCCESS;
+	if (indices == NULL || srcs == NULL)
+		return -DSTM_EINVAL;
+
+	size_t esize = darray->element_size;
+	for (size_t i = 0; i < count; i++) {
+		int rank;
+		dstm_ptr_t dst;
+		darray_resolve(darray, indices[i], &rank, &dst);
+		int rc = dstm_put(rank, dst.region, time, delta, dst,
+		                  (void *)srcs[i], esize);
+		if (rc != DSTM_SUCCESS)
+			return rc;
+	}
+	return DSTM_SUCCESS;
 }
 
 int dstm_darray_allgatherv(dstm_darray_t *darray,
