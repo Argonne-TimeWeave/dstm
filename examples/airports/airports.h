@@ -7,6 +7,8 @@
 #define GATE_CAPACITY        4
 #define LAYOVER_THRESHOLD    3
 
+#define NUM_GATES 24
+
 typedef enum {
     TIER_HUB      = 0,
     TIER_REGIONAL = 1,
@@ -35,6 +37,11 @@ typedef struct {
 } gate_slot_t;
 
 extern const gate_slot_t empty_gate;
+
+static inline size_t gate_index(int dest_airport, int source_airport) {
+    int gate = (source_airport* 49) % NUM_GATES;
+    return (size_t)dest_airport * NUM_GATES + gate;
+}
 
 typedef struct {
     int              rank;
