@@ -385,6 +385,113 @@ int dstm_darray_put(dstm_darray_t *darray,
                     dstm_time_t delta);
 
 /**
+ * Read @p count elements from the distributed array at the global
+ * indices given in @p indices, into the contiguous destination buffer
+ * @p dst.  Element i is written to dst + i * element_size in the order
+ * the indices appear.
+ *
+ * Indices may be in any order and target any combination of owning
+ * ranks, including fully discontinuous ranges.  Internally each index
+ * is resolved to its owning rank and a single dstm_get is issued for
+ * it; there is no batching at the wire level.
+ *
+ * The same delta/rank invariants as dstm_darray_get apply to every
+ * index in the call.  Iteration stops at the first underlying error and
+ * that error code is returned; previously-issued gets are not rolled
+ * back.
+ *
+ * @p count == 0 is a successful no-op; in that case @p indices and
+ * @p dst may be NULL.
+ *
+ * @param[in]  darray   the distributed array
+ * @param[in]  indices  array of @p count global indices
+ * @param[in]  count    number of indices (and elements in @p dst)
+ * @param[out] dst      destination buffer of count * element_size bytes
+ * @param[in]  time     base logical timestamp
+ * @param[in]  delta    non-positive offset added to @p time
+ * @return DSTM_SUCCESS on success, -DSTM_EINVAL if @p darray is NULL
+ *         or if @p count > 0 and @p indices or @p dst is NULL, or the
+ *         first underlying dstm_get error code encountered.
+ */
+int dstm_darray_get_range(dstm_darray_t *darray,
+                          const size_t *indices,
+                          size_t count,
+                          void *dst,
+                          dstm_time_t time,
+                          dstm_time_t delta);
+
+/**
+ * Write @p count elements into the distributed array at the global
+ * indices given in @p indices, taken from the contiguous source buffer
+ * @p src.  Element i is read from src + i * element_size.
+ *
+ * Semantics, ordering, partial-failure behavior, and delta/rank
+ * invariants mirror dstm_darray_get_range, but for dstm_darray_put.
+ *
+ * @return DSTM_SUCCESS on success, -DSTM_EINVAL if @p darray is NULL
+ *         or if @p count > 0 and @p indices or @p src is NULL, or the
+ *         first underlying dstm_put error code encountered.
+ */
+int dstm_darray_put_range(dstm_darray_t *darray,
+                          const size_t *indices,
+                          size_t count,
+                          const void *src,
+                          dstm_time_t time,
+                          dstm_time_t delta);
+
+/**
+ * Scattered-destination variant of dstm_darray_get_range: each element
+ * i is written to the per-element user buffer @p dsts[i] (each pointing
+ * to element_size bytes) instead of a contiguous output buffer.
+ *
+ * Same semantics, ordering, partial-failure behavior, and delta/rank
+ * invariants as dstm_darray_get_range.
+ *
+ * @p count == 0 is a successful no-op; in that case @p indices and
+ * @p dsts may be NULL.
+ *
+ * @param[in]  darray   the distributed array
+ * @param[in]  indices  array of @p count global indices
+ * @param[in]  count    number of indices
+ * @param[out] dsts     array of @p count destination pointers, each to
+ *                      element_size bytes of writable memory
+ * @param[in]  time     base logical timestamp
+ * @param[in]  delta    non-positive offset added to @p time
+ * @return DSTM_SUCCESS on success, -DSTM_EINVAL if @p darray is NULL
+ *         or if @p count > 0 and @p indices or @p dsts is NULL, or the
+ *         first underlying dstm_get error code encountered.  A NULL
+ *         entry in @p dsts is forwarded to dstm_get and surfaces as
+ *         -DSTM_EINVAL from that call.
+ */
+int dstm_darray_get_rangev(dstm_darray_t *darray,
+                           const size_t *indices,
+                           size_t count,
+                           void *const *dsts,
+                           dstm_time_t time,
+                           dstm_time_t delta);
+
+/**
+ * Scattered-source variant of dstm_darray_put_range: each element i is
+ * read from the per-element user buffer @p srcs[i] (each pointing to
+ * element_size bytes) instead of a contiguous input buffer.
+ *
+ * Same semantics, ordering, partial-failure behavior, and delta/rank
+ * invariants as dstm_darray_put_range.
+ *
+ * @return DSTM_SUCCESS on success, -DSTM_EINVAL if @p darray is NULL
+ *         or if @p count > 0 and @p indices or @p srcs is NULL, or the
+ *         first underlying dstm_put error code encountered.  A NULL
+ *         entry in @p srcs is forwarded to dstm_put and surfaces as
+ *         -DSTM_EINVAL from that call.
+ */
+int dstm_darray_put_rangev(dstm_darray_t *darray,
+                           const size_t *indices,
+                           size_t count,
+                           const void *const *srcs,
+                           dstm_time_t time,
+                           dstm_time_t delta);
+
+/**
  * All-to-all gather: every rank publishes its full local slice via a
  * put at time (time + deltas[self]) and reads every other rank's full
  * slice via a get at time (time + deltas[r]).
