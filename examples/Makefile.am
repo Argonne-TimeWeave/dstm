@@ -1,1 +1,1 @@
-SUBDIRS = traffic minimal airports
+SUBDIRS = traffic minimal airport_sim 
