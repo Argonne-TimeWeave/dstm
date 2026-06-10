@@ -24,12 +24,15 @@ int main(int argc, char *argv[])
     int block_rows = 8;
     int block_cols = 8;
     int work = 0; 
+    int logging = 0;
 
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--seed") && i + 1 < argc)
             seed = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--time") && i + 1 < argc)
             timesteps = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--logging"))
+            logging = 1;
         else if (!strcmp(argv[i], "--block-rows") && i + 1 < argc)
             block_rows = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--block-cols") && i + 1 < argc)
@@ -161,7 +164,7 @@ int main(int argc, char *argv[])
     double start_time = MPI_Wtime();
 
     for (dstm_time_t t = 0; t < timesteps; t++) {
-        simulation_timestep(&sim, t, quiet);
+        simulation_timestep(&sim, t, logging, quiet);
     }
 
     dstm_time_t last_time = timesteps + 1;

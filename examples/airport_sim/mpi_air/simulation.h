@@ -46,7 +46,7 @@ typedef struct {
 int  simulation_init(simulation_state_t *sim, int rank, int num_ranks,
                      int block_rows, int block_cols, int seed);
 void simulation_destroy(simulation_state_t *sim);
-void simulation_timestep(simulation_state_t *sim, dstm_time_t t, int quiet);
+void simulation_timestep(simulation_state_t *sim, dstm_time_t t, int logging, int quiet);
 
 void simulation_gather_stats(simulation_state_t *sim,
                              int *total_departures,
