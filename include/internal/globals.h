@@ -15,9 +15,8 @@
 #ifndef DSTM_INTERNAL_GLOBALS_H
 #define DSTM_INTERNAL_GLOBALS_H 1
 
-#include <stdio.h>
-
 #include <mpi.h>
+#include <stdio.h>
 
 #include "dstm.h"
 
@@ -26,7 +25,18 @@ extern "C" {
 #endif
 
 struct dstm_context_s {
+	/* Active communicator used by all session-level traffic
+	 * (dstm_msg_*, darray collectives, etc.).  During an active
+	 * session (between dstm_start and dstm_fini) this points to a
+	 * fresh per-session comm duplicated from `user_comm`.  Outside
+	 * any session it aliases `user_comm` so that data-structure
+	 * creations (e.g. dstm_darray_create) issued between
+	 * dstm_init/dstm_finalize still have a valid communicator. */
 	MPI_Comm comm;
+	/* Long-lived communicator duplicated from MPI_COMM_WORLD by
+	 * dstm_init and freed by dstm_finalize.  Acts as the parent
+	 * communicator from which each session's `comm` is duplicated. */
+	MPI_Comm user_comm;
 	int world_size;
 	int rank;
 	dstm_region_t *region;

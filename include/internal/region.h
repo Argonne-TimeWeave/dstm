@@ -19,10 +19,9 @@
 extern "C" {
 #endif
 
+#include <jansson.h>
 #include <stdint.h>
 #include <stdlib.h>
-
-#include <jansson.h>
 
 #include "dstm.h"
 
@@ -149,6 +148,14 @@ struct dstm_region_s {
 	 * skip ALL neighbor distance checks, since no rank can issue new
 	 * PUT/GET messages.  Reset to 0 when the barrier exits. */
 	int barrier_all_drained;
+
+	/* Highest logical timestamp for which we have already broadcast a
+	 * HEARTBEAT to all neighbors.  Used to suppress redundant
+	 * heartbeats: dstm_put/dstm_get only emit a heartbeat when the
+	 * caller's `time` strictly exceeds this watermark.  Per-region
+	 * (and therefore per-session) so it resets to 0 with each fresh
+	 * dstm_start. */
+	int local_heartbeat_time;
 };
 
 /*******************************************************************************
@@ -182,8 +189,8 @@ dstm_region_version_t *dstm_region_version_find(dstm_region_t *region,
 /* Find or create a version for the given timestamp.  New versions are
  * created with an uninitialized buffer and WRITABLE status, inserted in
  * sorted order.  Returns NULL on allocation failure. */
-dstm_region_version_t *
-dstm_region_version_find_or_create(dstm_region_t *region, dstm_time_t time);
+dstm_region_version_t *dstm_region_version_find_or_create(dstm_region_t *region,
+                                                          dstm_time_t time);
 
 /* Destroy a single version: free its buffer and remove it from the
  * region's version list. */

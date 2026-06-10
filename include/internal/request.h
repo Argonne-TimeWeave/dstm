@@ -130,6 +130,13 @@ int dstm_do_progress(dstm_time_t time);
 
 int dstm_request_new_tag(void);
 
+/* Reset the per-session monotonic tag counter back to its initial
+ * value.  Called from dstm_start so each session begins with a
+ * deterministic tag base.  With per-session communicators in place,
+ * tag uniqueness across sessions is no longer load-bearing for
+ * correctness; this reset is defense-in-depth. */
+void dstm_request_tag_reset(void);
+
 int dstm_request_cmp_departure(dstm_request_t *a, dstm_request_t *b);
 
 int dstm_request_create(dstm_request_t **r,

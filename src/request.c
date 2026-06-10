@@ -57,6 +57,11 @@ int dstm_request_new_tag(void)
 	return ret;
 }
 
+void dstm_request_tag_reset(void)
+{
+	dstm_request_tag_count = 1;
+}
+
 int dstm_request_create(dstm_request_t **r,
                         int type,
                         int tag,
@@ -92,7 +97,7 @@ int dstm_request_destroy(dstm_request_t **r)
 {
 	if (r == NULL || *r == NULL)
 		return 0;
-	
+
 	/* free the owned payload buffer, if any */
 	free((*r)->buf);
 	/* free any MPI pack buffer that is still outstanding */

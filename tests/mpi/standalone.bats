@@ -47,6 +47,14 @@ bats_require_minimum_version 1.5.0
 	run -0 --separate-stderr timeout --preserve-status 5 mpirun -n 4 $LOG_COMPILER $LOG_FLAGS $ABS_TOP_BUILDDIR/tests/mpi/local_delta
 }
 
+@test "mpirun -n 2 multi_session" {
+	run -0 --separate-stderr timeout --preserve-status 5 mpirun -n 2 $LOG_COMPILER $LOG_FLAGS $ABS_TOP_BUILDDIR/tests/mpi/multi_session
+}
+
+@test "mpirun -n 4 multi_session" {
+	run -0 --separate-stderr timeout --preserve-status 5 mpirun -n 4 $LOG_COMPILER $LOG_FLAGS $ABS_TOP_BUILDDIR/tests/mpi/multi_session
+}
+
 # put_after_get is a NEGATIVE test: it deliberately violates the
 # put-before-get phase rule and must abort.  We assert the mpirun exits
 # with non-zero status and stderr contains the contract-violation
