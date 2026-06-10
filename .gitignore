@@ -91,3 +91,4 @@ __pycache__
 
 # nic is generating csvs [srry can remove if u want]
 *.csv
+*.png
