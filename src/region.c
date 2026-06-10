@@ -325,6 +325,7 @@ static int dstm_region_init_allocator(dstm_region_t *r)
 	r->versions = NULL;
 	r->barrier_token_count = 0;
 	r->barrier_all_drained = 0;
+	r->local_heartbeat_time = 0;
 
 	return DSTM_SUCCESS;
 
@@ -514,14 +515,14 @@ dstm_region_version_t *dstm_region_version_find(dstm_region_t *region,
 	return NULL;
 }
 
-dstm_region_version_t *
-dstm_region_version_find_or_create(dstm_region_t *region, dstm_time_t time)
+dstm_region_version_t *dstm_region_version_find_or_create(dstm_region_t *region,
+                                                          dstm_time_t time)
 {
 	if (region == NULL)
 		return NULL;
 
-	dstm_region_version_t *existing = dstm_region_version_find(region,
-	                                                           time);
+	dstm_region_version_t *existing =
+	        dstm_region_version_find(region, time);
 	if (existing != NULL)
 		return existing;
 
@@ -686,6 +687,6 @@ json_t *dstm_region_to_json(dstm_region_t *r)
 	if (r == NULL)
 		return json_null();
 	json_t *buf = json_sprintf("%p", r->buffer);
-	return json_pack("{s:I, s:I, s:o}", "time", (json_int_t)r->time,
-	                 "size", (json_int_t)r->size, "buffer", buf);
+	return json_pack("{s:I, s:I, s:o}", "time", (json_int_t)r->time, "size",
+	                 (json_int_t)r->size, "buffer", buf);
 }

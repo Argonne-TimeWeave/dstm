@@ -25,6 +25,7 @@ COMPILED_TESTS = \
 		get_or_default \
 		local_delta \
 		msg \
+		multi_session \
 		put_after_get
 
 check_PROGRAMS = $(COMPILED_TESTS)

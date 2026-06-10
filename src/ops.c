@@ -52,8 +52,6 @@ static int dstm_region_send_heartbeat_to_all(dstm_time_t time)
 	return 0;
 }
 
-static int dstm_local_heartbeat_time = 0;
-
 /* Check whether a WRITABLE version can transition to READABLE.
  * Returns 1 if the transition should happen, 0 otherwise. */
 static int dstm_version_can_become_readable(dstm_region_version_t *v)
@@ -86,9 +84,9 @@ static int dstm_version_can_become_readable(dstm_region_version_t *v)
 	 * arrive, so skip all neighbor distance checks. */
 	if (!region->barrier_all_drained) {
 		for (int i = 0; i < dstm_global_context.world_size; i++) {
-			int dist = dstm_distance_get(
-			        dstm_global_context.distances,
-			        dstm_global_context.rank, i);
+			int dist =
+			        dstm_distance_get(dstm_global_context.distances,
+			                          dstm_global_context.rank, i);
 			if (dist <= 0)
 				continue;
 
@@ -138,9 +136,9 @@ static int dstm_version_can_become_discardable(dstm_region_version_t *v)
 	 * GET messages will arrive, so skip all neighbor distance checks. */
 	if (!region->barrier_all_drained) {
 		for (int i = 0; i < dstm_global_context.world_size; i++) {
-			int dist = dstm_distance_get(
-			        dstm_global_context.distances,
-			        dstm_global_context.rank, i);
+			int dist =
+			        dstm_distance_get(dstm_global_context.distances,
+			                          dstm_global_context.rank, i);
 			if (dist <= 0)
 				continue;
 
@@ -178,9 +176,10 @@ static int dstm_region_status_update(dstm_time_t time)
 		case DSTM_REGION_STATUS_READABLE:
 			if (dstm_version_can_become_discardable(v)) {
 				v->status = DSTM_REGION_STATUS_DISCARDABLE;
-				dstm_log_info("version discardable, time: %"
-				              PRId64 "\n",
-				              v->time);
+				dstm_log_info(
+				        "version discardable, time: %" PRId64
+				        "\n",
+				        v->time);
 			}
 			break;
 
@@ -224,8 +223,8 @@ static int dstm_request_progress_local_put(dstm_request_t *req)
 	dstm_region_t *rg = dstm_get_local_region();
 	assert(req->status == DSTM_REQUEST_STATUS_INIT);
 	dstm_time_t target = req->time + req->delta;
-	dstm_region_version_t *v = dstm_region_version_find_or_create(rg,
-	                                                              target);
+	dstm_region_version_t *v =
+	        dstm_region_version_find_or_create(rg, target);
 	assert(v != NULL);
 	if (v->status != DSTM_REGION_STATUS_WRITABLE) {
 		dstm_log_error(
@@ -281,8 +280,8 @@ static int dstm_request_progress_in_put(dstm_request_t *req)
 	dstm_region_t *rg = dstm_get_local_region();
 	assert(req->status == DSTM_REQUEST_STATUS_INIT);
 	dstm_time_t target = req->time + req->delta;
-	dstm_region_version_t *v = dstm_region_version_find_or_create(rg,
-	                                                              target);
+	dstm_region_version_t *v =
+	        dstm_region_version_find_or_create(rg, target);
 	assert(v != NULL);
 	if (v->status != DSTM_REGION_STATUS_WRITABLE) {
 		dstm_log_error(
@@ -311,10 +310,8 @@ static int dstm_request_progress_in_get(dstm_request_t *req)
 	dstm_region_t *rg = dstm_get_local_region();
 	if (req->status == DSTM_REQUEST_STATUS_INIT) {
 		dstm_time_t target = req->time + req->delta;
-		dstm_region_version_t *v = dstm_region_version_find(rg,
-		                                                    target);
-		if (v != NULL &&
-		    v->status == DSTM_REGION_STATUS_READABLE) {
+		dstm_region_version_t *v = dstm_region_version_find(rg, target);
+		if (v != NULL && v->status == DSTM_REGION_STATUS_READABLE) {
 			void *sptr = (char *)v->buffer + req->src.offset;
 
 			/* Free the packbuf from the original received GET_REQ
@@ -328,7 +325,7 @@ static int dstm_request_progress_in_get(dstm_request_t *req)
 
 			dstm_ptr_t null_ptr = {DSTM_REGIONID_INVALID, 0};
 			dstm_msg_fill_hdr(&req->msg, DSTM_MSG_TYPE_GET_REP,
-					  target, 0, req->rank,
+			                  target, 0, req->rank,
 			                  dstm_global_context.rank);
 			dstm_msg_fill_payload(&req->msg, null_ptr, req->buf,
 			                      req->size);
@@ -450,8 +447,7 @@ static void dstm_handle_incoming_msg(MPI_Status status)
 		dstm_request_create(&nr, DSTM_REQUEST_TYPE_IN_GET,
 		                    status.MPI_TAG, m.header.time,
 		                    m.header.delta, m.header.src_rank,
-		                    (dstm_ptr_t){0, 0}, sptr,
-		                    m.u.putget.size);
+		                    (dstm_ptr_t){0, 0}, sptr, m.u.putget.size);
 		nr->msg = m;
 		DL_INSERT_INORDER(requests, nr, dstm_request_cmp_departure);
 		break;
@@ -588,9 +584,10 @@ int dstm_put(int rank,
 		return -DSTM_EDOM;
 
 	/* did we increase our local time */
-	if (dstm_local_heartbeat_time < time) {
+	dstm_region_t *region = dstm_global_context.region;
+	if (region->local_heartbeat_time < time) {
 		dstm_region_send_heartbeat_to_all(time);
-		dstm_local_heartbeat_time = time;
+		region->local_heartbeat_time = time;
 	}
 
 	/* first, figure out if this is a local request or a remote one */
@@ -656,9 +653,10 @@ int dstm_get(int rank,
 		return -DSTM_EDOM;
 
 	/* did we increase our local time */
-	if (dstm_local_heartbeat_time < time) {
+	dstm_region_t *region = dstm_global_context.region;
+	if (region->local_heartbeat_time < time) {
 		dstm_region_send_heartbeat_to_all(time);
-		dstm_local_heartbeat_time = time;
+		region->local_heartbeat_time = time;
 	}
 
 	/* first, figure out if this is a local request or a remote one */
