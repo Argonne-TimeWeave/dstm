@@ -177,7 +177,7 @@ static void ensure_recv_cap(simulation_state_t *sim, int needed)
     sim->recv_buf_cap = cap;
 }
 
-void simulation_timestep(simulation_state_t *sim, dstm_time_t t, int quiet)
+void simulation_timestep(simulation_state_t *sim, dstm_time_t t, int logging, int quiet)
 {
     int grid_cols = sim->grid_cols;
     int num_airports = sim->num_airports;
@@ -260,6 +260,11 @@ void simulation_timestep(simulation_state_t *sim, dstm_time_t t, int quiet)
         }
     }
     free(cursor);
+    
+    double start, end;
+
+    if (logging)
+        start = MPI_Wtime();
 
     /* 5. Exchange counts, then payload */
     MPI_Alltoall(sim->send_counts, 1, MPI_INT,
@@ -275,6 +280,11 @@ void simulation_timestep(simulation_state_t *sim, dstm_time_t t, int quiet)
     MPI_Alltoallv(sim->send_buf, sim->send_counts, sim->send_displs, sim->flight_type,
                   sim->recv_buf, sim->recv_counts, sim->recv_displs, sim->flight_type,
                   MPI_COMM_WORLD);
+    
+    if (logging) {
+        end = MPI_Wtime();
+        printf("all_to_allv: %.7f\n", end - start);
+    }
 
     /* 6. Deposit received flights into local_inbox to be processed next step.
           Bucket by destination airport's gate (using origin airport id, same

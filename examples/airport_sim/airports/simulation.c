@@ -148,12 +148,13 @@ static void merge_into_gate(gate_slot_t *dest, gate_slot_t *src)
     }
 }
 
-void simulation_timestep(simulation_state_t *sim, dstm_time_t t, int quiet)
+void simulation_timestep(simulation_state_t *sim, dstm_time_t t, int logging, int quiet)
 {
     int status;
     int grid_cols = sim->grid_cols;
     int num_airports = sim->num_airports;
     (void)quiet;
+    double start, end, sum_get, sum_put = 0.0;
 
     for (int i = 0; i < sim->num_my_airports; i++) {
         int airport_id = sim->my_airports[i];
@@ -166,6 +167,9 @@ void simulation_timestep(simulation_state_t *sim, dstm_time_t t, int quiet)
         airport_clear_outbox(&sim->airports[airport_id]);
     }
 
+    if (logging)
+        sum_get = 0.0;
+
     for (int i = 0; i < sim->num_my_airports; i++) {
         int airport_id = sim->my_airports[i];
         gate_slot_t recv_gate;
@@ -173,9 +177,17 @@ void simulation_timestep(simulation_state_t *sim, dstm_time_t t, int quiet)
         for (int g = 0; g < NUM_GATES; g++) {
             size_t idx = (size_t)airport_id * NUM_GATES + g;
 
+            if (logging)
+                start = MPI_Wtime();
+
             status = dstm_darray_get_or_default(sim->gates, idx,
                                                 &recv_gate, t, 0,
                                                 &empty_gate);
+            if (logging) {
+                end = MPI_Wtime();
+                sum_get += end - start;
+            }
+
             if (status != DSTM_SUCCESS) {
                 dstm_log_error("GET failed on airport %d gate %d", airport_id, g);
                 continue;
@@ -187,6 +199,8 @@ void simulation_timestep(simulation_state_t *sim, dstm_time_t t, int quiet)
             }
         }
     }
+    if (logging)
+        printf("get_or_default: %.7f\n", sum_get);
 
     for (int i = 0; i < sim->num_my_airports; i++) {
         int airport_id = sim->my_airports[i];
@@ -205,6 +219,9 @@ void simulation_timestep(simulation_state_t *sim, dstm_time_t t, int quiet)
         int airport_id = sim->my_airports[i];
         airport_inject_flight(&sim->airports[airport_id], grid_cols, sim->tiers, t);
     }
+
+    if (logging)
+        sum_put = 0.0;
 
     for (int i = 0; i < sim->num_my_airports; i++) {
         int airport_id = sim->my_airports[i];
@@ -228,12 +245,22 @@ void simulation_timestep(simulation_state_t *sim, dstm_time_t t, int quiet)
                 size_t idx = gate_index(dest, airport_id);
                 int delta = airport_distance(airport_id, dest, grid_cols);
 
+                if (logging)
+                    start = MPI_Wtime();
+
                 status = dstm_darray_put(sim->gates, idx,
                                          &ap->outbox[dest], t, delta);
+                if (logging) {
+                    end = MPI_Wtime();
+                    sum_put += end - start;
+                }   
+
                 if (status != DSTM_SUCCESS) {
                     dstm_log_error("PUT to airport %d failed", dest);
                 }
             }
         }
     }
+    if (logging)
+        printf("put: %.7f\n", sum_put);
 }
