@@ -17,8 +17,8 @@ set -u  # don't use -e: we want to keep going past individual failures
 # ---------- Config ----------
 RANKS=(1 2 4 8 16 32 64 128 256)
 NODES=8                       # number of nodes in the allocation
-BLOCK_ROWS=16
-BLOCK_COLS=16
+BLOCK_ROWS=4
+BLOCK_COLS=4
 TIMESTEPS=32
 TRIALS=2
 WORK=100000
