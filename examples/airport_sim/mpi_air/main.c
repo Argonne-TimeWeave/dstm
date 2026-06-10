@@ -13,7 +13,7 @@ static void usage(const char *prog)
 int main(int argc, char *argv[])
 {
     int seed = 42, quiet = 0, timesteps = 16;
-    int block_rows = 8, block_cols = 8, work = 0;
+    int block_rows = 8, block_cols = 8, work = 0, logging;
 
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--seed") && i + 1 < argc)       seed = atoi(argv[++i]);
@@ -21,6 +21,7 @@ int main(int argc, char *argv[])
         else if (!strcmp(argv[i], "--block-rows") && i+1<argc) block_rows = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--block-cols") && i+1<argc) block_cols = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--quiet"))                  quiet = 1;
+        else if (!strcmp(argv[i], "--logging"))                  logging = 1;
         else if (!strcmp(argv[i], "--work") && i + 1 < argc)   work = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h")) {
             usage(argv[0]); return 0;
@@ -76,7 +77,7 @@ int main(int argc, char *argv[])
     double start_time = MPI_Wtime();
 
     for (dstm_time_t t = 0; t < timesteps; t++) {
-        simulation_timestep(&sim, t, quiet);
+        simulation_timestep(&sim, t, logging, quiet);
     }
 
     MPI_Barrier(MPI_COMM_WORLD);
