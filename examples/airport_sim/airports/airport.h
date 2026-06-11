@@ -6,7 +6,8 @@
 #define FLIGHT_PAYLOAD_SIZE  200
 #define GATE_CAPACITY        4
 #define LAYOVER_THRESHOLD    3
-#define NUM_GATES            24
+
+#define NUM_GATES 24
 
 typedef enum {
     TIER_HUB      = 0,
@@ -37,51 +38,42 @@ typedef struct {
 
 extern const gate_slot_t empty_gate;
 
+static inline size_t gate_index(int dest_airport, int source_airport) {
+    int gate = (source_airport* 49) % NUM_GATES;
+    return (size_t)dest_airport * NUM_GATES + gate;
+}
+
 typedef struct {
-    int              airport_id;
+    int              rank;
+    int              num_ranks;
+    airport_tier_t  *tiers;
+    dstm_distance_t *topology;
+    dstm_darray_t   *gates;
+    gate_slot_t     *outbox;
     int              flight_counter;
     int              departures;
     int              arrivals;
     int              connections;
-    gate_slot_t      *outbox;
-    int              num_airports;
 } airport_state_t;
 
-static inline int airport_distance(int airport_a, int airport_b, int grid_cols)
-{
-    int row_a = airport_a / grid_cols;
-    int col_a = airport_a % grid_cols;
-    int row_b = airport_b / grid_cols;
-    int col_b = airport_b % grid_cols;
-    return abs(row_a - row_b) + abs(col_a - col_b);
-}
+void airport_init(airport_state_t *state,
+                  int rank,
+                  int num_ranks,
+                  airport_tier_t *tiers,
+                  dstm_distance_t *topology,
+                  dstm_darray_t *gates);
 
-static inline size_t gate_index(int dest_airport, int source_airport)
-{
-    int gate = (source_airport * 49) % NUM_GATES;
-    return (size_t)dest_airport * NUM_GATES + gate;
-}
-
-extern int g_work_iterations;
-void do_synthetic_work(void);
-
-void airport_init(airport_state_t *state, int airport_id, int num_airports);
 void airport_destroy(airport_state_t *state);
-void airport_clear_outbox(airport_state_t *state);
 
-int airport_pick_dest(int origin, int num_airports, airport_tier_t *tiers);
-int airport_find_next_hop(int origin, int dest, int num_airports,
-                          int grid_cols, airport_tier_t *tiers);
+int airport_pick_dest(airport_state_t *state);
 
-void airport_process_incoming(airport_state_t *state,
-                              gate_slot_t *recv_gate,
-                              int grid_cols,
-                              airport_tier_t *tiers,
-                              dstm_time_t t);
+/*
+ * Find next hop from current position toward dest.
+ * Always returns an airport within LAYOVER_THRESHOLD distance.
+ * Prefers hubs when making progress toward destination.
+ */
+int airport_find_next_hop(airport_state_t *state, int origin, int dest);
 
-void airport_inject_flight(airport_state_t *state,
-                           int grid_cols,
-                           airport_tier_t *tiers,
-                           dstm_time_t t);
+void airport_timestep(airport_state_t *state, dstm_time_t t, int quiet);
 
 #endif /* AIRPORT_H */

@@ -13,8 +13,6 @@ noinst_PROGRAMS = airports
 airports_SOURCES = \
 	airport.c \
     airport.h \
-    simulation.c \
-    simulation.h \
     main.c
 
 EXTRA_DIST = README.md
