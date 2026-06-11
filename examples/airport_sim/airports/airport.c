@@ -11,102 +11,134 @@ const gate_slot_t empty_gate = { .n_flights = 0 };
 void airport_init(airport_state_t *state,
                   int rank,
                   int num_ranks,
+                  int na,
                   airport_tier_t *tiers,
                   dstm_distance_t *topology,
                   dstm_darray_t *gates)
 {
     state->rank           = rank;
     state->num_ranks      = num_ranks;
+    state->na             = na;
     state->tiers          = tiers;
     state->topology       = topology;
     state->gates          = gates;
     state->outbox         = calloc(num_ranks, sizeof(gate_slot_t));
     state->flight_counter = 0;
-    state->departures     = 0;
-    state->arrivals       = 0;
-    state->connections    = 0;
+    state->departures     = calloc(na, sizeof(int));
+    state->arrivals       = calloc(na, sizeof(int));
+    state->connections    = calloc(na, sizeof(int));
 }
 
 void airport_destroy(airport_state_t *state)
 {
     free(state->outbox);
-    state->outbox = NULL;
-}
-
-int airport_pick_dest(airport_state_t *state)
-{
-    int total_weight = 0;
-    for (int i = 0; i < state->num_ranks; i++) {
-        if (i == state->rank)
-            continue;
-        total_weight += tier_recv_weight[state->tiers[i]];
-    }
-
-    int r = rand() % total_weight;
-    int accum = 0;
-    for (int i = 0; i < state->num_ranks; i++) {
-        if (i == state->rank)
-            continue;
-        accum += tier_recv_weight[state->tiers[i]];
-        if (r < accum)
-            return i;
-    }
-
-    return (state->rank + 1) % state->num_ranks;
+    free(state->departures);
+    free(state->arrivals);
+    free(state->connections);
+    state->outbox      = NULL;
+    state->departures  = NULL;
+    state->arrivals    = NULL;
+    state->connections = NULL;
 }
 
 /*
- * Find next hop from 'origin' toward 'dest', respecting LAYOVER_THRESHOLD.
- *
- * Strategy:
- *   1. If dest is within range, go direct.
- *   2. Otherwise, find the best intermediate airport (prefer hubs) that:
- *      - Is within LAYOVER_THRESHOLD distance from origin
- *      - Makes progress toward dest (reduces remaining distance)
- *   3. If no hub found, pick any airport within range that makes progress.
- *
- * Returns the next hop airport, or dest if reachable directly.
+ * Pick a destination airport, biased by the tier of the candidate.
+ * Destination must not live on origin_rank (no local-to-local flights).
  */
-int airport_find_next_hop(airport_state_t *state, int origin, int dest)
+void airport_pick_dest(airport_state_t *state,
+                       int origin_rank,
+                       int *dest_rank,
+                       int *dest_local)
 {
-    int dist_to_dest = dstm_distance_get(state->topology, origin, dest);
+    int na = state->na;
+    int total_weight = 0;
 
-    /* Direct flight if within range */
+    for (int r = 0; r < state->num_ranks; r++) {
+        if (r == origin_rank)
+            continue;
+        for (int l = 0; l < na; l++) {
+            int g = airport_global(r, l, na);
+            total_weight += tier_recv_weight[state->tiers[g]];
+        }
+    }
+
+    if (total_weight <= 0) {
+        /* Degenerate (only one rank); caller should have guarded. */
+        *dest_rank  = (origin_rank + 1) % state->num_ranks;
+        *dest_local = 0;
+        return;
+    }
+
+    int rnd = rand() % total_weight;
+    int accum = 0;
+    for (int r = 0; r < state->num_ranks; r++) {
+        if (r == origin_rank)
+            continue;
+        for (int l = 0; l < na; l++) {
+            int g = airport_global(r, l, na);
+            accum += tier_recv_weight[state->tiers[g]];
+            if (rnd < accum) {
+                *dest_rank  = r;
+                *dest_local = l;
+                return;
+            }
+        }
+    }
+
+    /* Fallback */
+    *dest_rank  = (origin_rank + 1) % state->num_ranks;
+    *dest_local = 0;
+}
+
+/*
+ * Find next-hop RANK from origin_rank toward dest_rank.
+ * Distance is per-rank (node-level). Prefers ranks that host at least
+ * one HUB-tier airport when picking a layover.
+ */
+int airport_find_next_hop(airport_state_t *state, int origin_rank, int dest_rank)
+{
+    int dist_to_dest = dstm_distance_get(state->topology, origin_rank, dest_rank);
+
     if (dist_to_dest <= LAYOVER_THRESHOLD)
-        return dest;
+        return dest_rank;
 
     int best_hop = -1;
     int best_remaining = dist_to_dest;
     int best_is_hub = 0;
+    int na = state->na;
 
-    for (int i = 0; i < state->num_ranks; i++) {
-        if (i == origin || i == dest)
+    for (int r = 0; r < state->num_ranks; r++) {
+        if (r == origin_rank || r == dest_rank)
             continue;
 
-        int dist_to_hop = dstm_distance_get(state->topology, origin, i);
+        int dist_to_hop = dstm_distance_get(state->topology, origin_rank, r);
         if (dist_to_hop > LAYOVER_THRESHOLD)
-            continue;  /* too far */
+            continue;
 
-        int remaining = dstm_distance_get(state->topology, i, dest);
+        int remaining = dstm_distance_get(state->topology, r, dest_rank);
         if (remaining >= dist_to_dest)
-            continue;  /* no progress */
+            continue;
 
-        int is_hub = (state->tiers[i] == TIER_HUB);
+        /* Rank "is a hub" if any of its local airports is a HUB tier */
+        int is_hub = 0;
+        for (int l = 0; l < na; l++) {
+            if (state->tiers[airport_global(r, l, na)] == TIER_HUB) {
+                is_hub = 1;
+                break;
+            }
+        }
 
-        /* Prefer hubs, then prefer closer to dest */
         if (best_hop == -1 ||
             (is_hub && !best_is_hub) ||
             (is_hub == best_is_hub && remaining < best_remaining)) {
-            best_hop = i;
+            best_hop = r;
             best_remaining = remaining;
             best_is_hub = is_hub;
         }
     }
 
-    /* Fallback: if no good hop found, just go direct (shouldn't happen
-     * in a connected mesh, but safety first) */
     if (best_hop == -1)
-        return dest;
+        return dest_rank;
 
     return best_hop;
 }
@@ -115,20 +147,20 @@ void airport_timestep(airport_state_t *state, dstm_time_t t, int quiet)
 {
     int rank = state->rank;
     int num_ranks = state->num_ranks;
+    int na = state->na;
     int status;
 
-    dstm_log_normal("Airport %d (%s) [t=%ld]: === timestep ===\n",
-                    rank, tier_name[state->tiers[rank]], t);
+    dstm_log_normal("Rank %d [t=%ld]: === timestep ===\n", rank, t);
 
-    /* STEP 1 — sentinel PUT */
+    /* STEP 1 — sentinel PUT (one per source rank gate slot we own) */
     {
         size_t idx = gate_index(rank, rank);
         dstm_darray_put(state->gates, idx, &empty_gate, t, 0);
     }
 
     /* STEP 2 — clear outbox and receive */
-    for (int g = 0; g < num_ranks; g++)
-        state->outbox[g] = empty_gate;
+    for (int r = 0; r < num_ranks; r++)
+        state->outbox[r] = empty_gate;
 
     gate_slot_t recv_gate;
 
@@ -146,102 +178,135 @@ void airport_timestep(airport_state_t *state, dstm_time_t t, int quiet)
         if (recv_gate.n_flights == 0)
             continue;
 
-        dstm_log_normal("Airport %d [t=%ld]: gate %d has %d flight(s)\n",
+        dstm_log_normal("Rank %d [t=%ld]: gate %d has %d flight(s)\n",
                         rank, t, g, recv_gate.n_flights);
 
         /* STEP 3 — process flights */
         for (int f = 0; f < recv_gate.n_flights; f++) {
             flight_t flt = recv_gate.flights[f];
 
-            if (flt.dest_airport == rank) {
-                /* Final destination reached */
-                state->arrivals++;
-                dstm_log_normal("Airport %d [t=%ld]: LANDED flight %d — "
-                                "origin=%d (%s) dep_t=%ld legs=%d \"%s\"\n",
+            if (flt.dest_rank == rank) {
+                /* Final destination is on this rank — deliver to local airport */
+                int dl = flt.dest_local;
+                if (dl < 0 || dl >= na) {
+                    dstm_log_error("Bad dest_local=%d on flight %d", dl, flt.flight_id);
+                    continue;
+                }
+                state->arrivals[dl]++;
+                int og = airport_global(flt.origin_rank, flt.origin_local, na);
+                dstm_log_normal("Rank %d [t=%ld]: LANDED flight %d at airport "
+                                "%d.%d — origin=%d.%d (%s) dep_t=%ld legs=%d \"%s\"\n",
                                 rank, t, flt.flight_id,
-                                flt.origin_airport,
-                                tier_name[state->tiers[flt.origin_airport]],
+                                rank, dl,
+                                flt.origin_rank, flt.origin_local,
+                                tier_name[state->tiers[og]],
                                 flt.departure_time,
                                 flt.legs_completed + 1,
                                 flt.payload);
             } else {
-                /* Connecting flight — find next hop toward destination */
-                state->connections++;
+                /* Connecting flight — find next hop RANK toward dest_rank.
+                 * Attribute the connection to whichever local airport hashed
+                 * to this gate (use gate-hash-style: any local airport on
+                 * this rank acts as the connecting hub; pick local 0 for
+                 * the counter to keep things simple, or distribute round-robin). */
+                int local_hub = g % na;  /* spread connection credit */
+                state->connections[local_hub]++;
                 flt.legs_completed++;
 
-                int next_hop = airport_find_next_hop(state, rank, flt.dest_airport);
+                int next_hop = airport_find_next_hop(state, rank, flt.dest_rank);
                 int delta = dstm_distance_get(state->topology, rank, next_hop);
 
                 gate_slot_t *ob = &state->outbox[next_hop];
                 if (ob->n_flights < GATE_CAPACITY) {
+                    flt.next_hop_rank = next_hop;
                     ob->flights[ob->n_flights++] = flt;
 
-                    if (next_hop == flt.dest_airport) {
-                        dstm_log_normal("Airport %d [t=%ld]: CONNECTING flight %d "
-                                        "-> final dst=%d delta=%d (leg %d)\n",
+                    if (next_hop == flt.dest_rank) {
+                        dstm_log_normal("Rank %d [t=%ld]: CONNECTING flight %d "
+                                        "-> final dst rank=%d (airport %d.%d) "
+                                        "delta=%d (leg %d)\n",
                                         rank, t, flt.flight_id,
-                                        next_hop, delta, flt.legs_completed);
+                                        next_hop, flt.dest_rank, flt.dest_local,
+                                        delta, flt.legs_completed);
                     } else {
-                        dstm_log_normal("Airport %d [t=%ld]: CONNECTING flight %d "
-                                        "-> hop=%d (%s) toward dst=%d delta=%d (leg %d)\n",
+                        dstm_log_normal("Rank %d [t=%ld]: CONNECTING flight %d "
+                                        "-> hop rank=%d toward dst=%d.%d delta=%d (leg %d)\n",
                                         rank, t, flt.flight_id,
-                                        next_hop, tier_name[state->tiers[next_hop]],
-                                        flt.dest_airport, delta, flt.legs_completed);
+                                        next_hop, flt.dest_rank, flt.dest_local,
+                                        delta, flt.legs_completed);
                     }
                 } else {
-                    dstm_log_warning("Airport %d [t=%ld]: CONNECTION DELAYED "
-                                     "flight %d — gate full\n",
-                                     rank, t, flt.flight_id);
+                    dstm_log_warning("Rank %d [t=%ld]: CONNECTION DELAYED "
+                                     "flight %d — outbox to rank %d full\n",
+                                     rank, t, flt.flight_id, next_hop);
                 }
             }
         }
     }
 
-    /* STEP 4 — inject new flight */
-    if (num_ranks > 1 && (rand() % 100) < tier_send_prob[state->tiers[rank]]) {
-        int dest = airport_pick_dest(state);
-        int next_hop = airport_find_next_hop(state, rank, dest);
-        int delta = dstm_distance_get(state->topology, rank, next_hop);
+    /* STEP 4 — each local airport independently decides to inject a flight */
+    if (num_ranks > 1) {
+        for (int l = 0; l < na; l++) {
+            int og = airport_global(rank, l, na);
+            airport_tier_t my_tier = state->tiers[og];
 
-        gate_slot_t *ob = &state->outbox[next_hop];
-        if (ob->n_flights < GATE_CAPACITY) {
+            if ((rand() % 100) >= tier_send_prob[my_tier])
+                continue;
+
+            int dest_rank, dest_local;
+            airport_pick_dest(state, rank, &dest_rank, &dest_local);
+
+            int next_hop = airport_find_next_hop(state, rank, dest_rank);
+            int delta = dstm_distance_get(state->topology, rank, next_hop);
+
+            gate_slot_t *ob = &state->outbox[next_hop];
+            if (ob->n_flights >= GATE_CAPACITY) {
+                dstm_log_warning("Rank %d [t=%ld]: DEPART DROPPED from %d.%d "
+                                 "— outbox to rank %d full\n",
+                                 rank, t, rank, l, next_hop);
+                continue;
+            }
+
+            int dg = airport_global(dest_rank, dest_local, na);
             flight_t flt = {
                 .valid          = 1,
-                .origin_airport = rank,
-                .dest_airport   = dest,
-                .next_hop       = next_hop,
+                .origin_rank    = rank,
+                .origin_local   = l,
+                .dest_rank      = dest_rank,
+                .dest_local     = dest_local,
+                .next_hop_rank  = next_hop,
                 .legs_completed = 0,
                 .departure_time = t,
-                .flight_id      = rank * 10000 + state->flight_counter++,
+                .flight_id      = (rank * na + l) * 100000 + state->flight_counter++,
             };
 
-            int is_direct = (next_hop == dest);
+            int is_direct = (next_hop == dest_rank);
             snprintf(flt.payload, sizeof(flt.payload),
-                     "%s(%d)->%s(%d)%s t=%ld",
-                     tier_name[state->tiers[rank]], rank,
-                     tier_name[state->tiers[dest]], dest,
+                     "%s(%d.%d)->%s(%d.%d)%s t=%ld",
+                     tier_name[my_tier], rank, l,
+                     tier_name[state->tiers[dg]], dest_rank, dest_local,
                      is_direct ? "" : " [LAYOVER]",
                      t);
             ob->flights[ob->n_flights++] = flt;
 
-            state->departures++;
+            state->departures[l]++;
 
             if (is_direct) {
-                dstm_log_normal("Airport %d [t=%ld]: DEPART flight %d "
-                                "dst=%d (%s) DIRECT delta=%d\n",
-                                rank, t, flt.flight_id,
-                                dest, tier_name[state->tiers[dest]], delta);
+                dstm_log_normal("Rank %d [t=%ld]: DEPART flight %d from %d.%d "
+                                "dst=%d.%d (%s) DIRECT delta=%d\n",
+                                rank, t, flt.flight_id, rank, l,
+                                dest_rank, dest_local,
+                                tier_name[state->tiers[dg]], delta);
             } else {
-                dstm_log_normal("Airport %d [t=%ld]: DEPART flight %d "
-                                "dst=%d via %s(%d) delta=%d\n",
-                                rank, t, flt.flight_id,
-                                dest, tier_name[state->tiers[next_hop]],
-                                next_hop, delta);
+                dstm_log_normal("Rank %d [t=%ld]: DEPART flight %d from %d.%d "
+                                "dst=%d.%d via rank %d delta=%d\n",
+                                rank, t, flt.flight_id, rank, l,
+                                dest_rank, dest_local, next_hop, delta);
             }
         }
     }
 
-    /* STEP 5 — send outbox */
+    /* STEP 5 — send outbox (one PUT per remote rank that has flights) */
     for (int dest = 0; dest < num_ranks; dest++) {
         if (dest == rank)
             continue;
@@ -254,6 +319,6 @@ void airport_timestep(airport_state_t *state, dstm_time_t t, int quiet)
         status = dstm_darray_put(state->gates, idx,
                                  &state->outbox[dest], t, delta);
         if (status != DSTM_SUCCESS)
-            dstm_log_error("PUT to airport %d gate %d failed", dest, rank);
+            dstm_log_error("PUT to rank %d gate failed", dest);
     }
 }  
