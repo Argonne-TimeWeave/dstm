@@ -19,15 +19,9 @@ Could implement weather delays to add some congestion / randomization in the fut
 ## Running the simulation:
 
 ```
-# Weak scaling: each rank gets 8x8 = 64 airports, total grows with ranks
-mpirun -n 4  ./airports --block-rows 8 --block-cols 8 --time 64
-mpirun -n 16 ./airports --block-rows 8 --block-cols 8 --time 64
-
-# Strong scaling: fix total at, say, 32x32 = 1024 airports
-mpirun -n 1  ./airports --block-rows 32 --block-cols 32 --time 64   # 1 rank, 32x32 block
-mpirun -n 4  ./airports --block-rows 16 --block-cols 16 --time 64   # 2x2 ranks, 16x16 blocks
-mpirun -n 16 ./airports --block-rows 8  --block-cols 8  --time 64   # 4x4 ranks, 8x8 blocks
-mpirun -n 64 ./airports --block-rows 4  --block-cols 4  --time 64   # 8x8 ranks, 4x4 blocks
+each rank has 8 airports
+mpirun -n 4  ./airports --na 8 --time 64
+mpirun -n 16 ./airports --na 8 --time 64
 ```
 
 ### Please note

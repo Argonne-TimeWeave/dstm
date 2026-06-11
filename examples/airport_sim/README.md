@@ -16,7 +16,9 @@ Upon mesh creation airports are created with this distribution:
 **Local airports** - 50% 
 ```
 
-Now each node contains (--block-rows * --block-cols) number of airports. communication only occurs when a plane flies across nodes. 
+Now each node contains --na number of airports. airplanes do not travel locally, layover distance is calculated by node not by local airport. 
+
+Ranks represent airport regions with this notation (\<rank or region>.\<local airport index>)
 
 ## departures and arrivals
 
