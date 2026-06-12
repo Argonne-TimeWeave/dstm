@@ -6,12 +6,13 @@ Usage:
     python plot_scaling.py <csv_file> [--out-prefix OUT]
 
 Produces:
-    <prefix>_elapsed.png   — elapsed time vs ranks (log-log)
-    <prefix>_throughput.png — timesteps/sec vs ranks (log-log)
+    <prefix>_elapsed.png      — elapsed time vs ranks
+    <prefix>_throughput.png   — timesteps/sec vs ranks (log-log)
 """
 
 import argparse
 import csv
+import os
 import sys
 from collections import defaultdict
 
@@ -19,15 +20,13 @@ import matplotlib.pyplot as plt
 
 # Consistent styling per build
 STYLE = {
-    "dstm":         {"color": "#d62728", "marker": "o", "label": "DSTM"},
-    "mpi_alltoall": {"color": "#1f77b4", "marker": "s", "label": "MPI Alltoallv"},
-    "mpi_sendrecv": {"color": "#2ca02c", "marker": "^", "label": "MPI Sendrecv (per-pair)"},
+    "dstm": {"color": "#d62728", "marker": "o", "label": "DSTM"},
+    "mpi":  {"color": "#1f77b4", "marker": "s", "label": "MPI (Isend/Irecv)"},
 }
 
 
 def load_csv(path):
     """Return {build: [(ranks, elapsed_mean, sps_mean), ...]} sorted by ranks."""
-    # builds[build][ranks] = list of (elapsed, sps)
     builds = defaultdict(lambda: defaultdict(list))
     with open(path, newline="") as f:
         reader = csv.DictReader(f)
@@ -43,7 +42,6 @@ def load_csv(path):
                 continue
             builds[build][ranks].append((elapsed, sps))
 
-    # Average across trials
     result = {}
     for build, by_rank in builds.items():
         series = []
@@ -57,7 +55,7 @@ def load_csv(path):
     return result
 
 
-def plot_series(data, ycol, ylabel, title, outfile):
+def plot_series(data, ycol, ylabel, title, outfile, yscale_log=True):
     fig, ax = plt.subplots(figsize=(8, 5.5))
 
     for build, series in data.items():
@@ -74,13 +72,13 @@ def plot_series(data, ycol, ylabel, title, outfile):
                 label=style["label"])
 
     ax.set_xscale("log", base=2)
-    ax.set_yscale("log")
+    if yscale_log:
+        ax.set_yscale("log")
     ax.set_xlabel("MPI Ranks (P)", fontsize=12)
     ax.set_ylabel(ylabel, fontsize=12)
     ax.set_title(title, fontsize=13)
     ax.grid(True, which="both", linestyle="--", alpha=0.4)
 
-    # Show actual rank values on x-axis (not powers like 2^4)
     all_ranks = sorted({s[0] for series in data.values() for s in series})
     ax.set_xticks(all_ranks)
     ax.set_xticklabels([str(r) for r in all_ranks])
@@ -104,17 +102,19 @@ def main():
         print(f"No usable rows in {args.csv}", file=sys.stderr)
         sys.exit(1)
 
-    prefix = args.out_prefix or args.csv.rsplit(".", 1)[0]
+    prefix = args.out_prefix or os.path.splitext(args.csv)[0]
 
     plot_series(data, ycol=1,
                 ylabel="Elapsed time (s)",
                 title="Scaling: elapsed time vs ranks",
-                outfile=f"{prefix}_elapsed.png")
+                outfile=f"{prefix}_elapsed.png",
+                yscale_log=False)
 
     plot_series(data, ycol=2,
                 ylabel="Throughput (timesteps / sec)",
                 title="Scaling: throughput vs ranks",
-                outfile=f"{prefix}_throughput.png")
+                outfile=f"{prefix}_throughput.png",
+                yscale_log=True)
 
 
 if __name__ == "__main__":

@@ -1,27 +1,28 @@
 #!/usr/bin/env bash
-# Multi-node weak-scaling sweep for the three airport simulator builds.
-# Each rank owns a BLOCK_ROWS x BLOCK_COLS block of airports; total airports = block * P.
+# Weak-scaling sweep comparing the DSTM and MPI airport simulators.
 #
-# Assumes a Cobalt allocation of 4 nodes (qsub -I -n 4 -q skylake_8180 ...).
-# Ranks are distributed evenly across all 4 nodes once P >= 4.
+# Per-rank problem size is held constant across all P. Total airport count
+# grows linearly with P:
+#     NA           = AIRPORTS_PER_RANK  (constant)
+#     total        = AIRPORTS_PER_RANK * P
+#
+# Ideal weak-scaling: elapsed time stays flat as P grows.
 #
 # Builds expected at:
-#   ../airports/airports          (DSTM)
-#   ../mpi_air/airports           (MPI Alltoallv)
-#   ../single_mpi_air/airports    (MPI Sendrecv per-pair)
+#   ../airports/airports     (DSTM)
+#   ../mpi_air/airports      (MPI send/recv)
 #
-# Output: weak_scaling_<timestamp>.csv in this scripts/ directory.
+# Output: weak_scaling_<timestamp>.csv next to this script.
 
-set -u  # don't use -e: we want to keep going past individual failures
+set -u
 
 # ---------- Config ----------
 RANKS=(1 2 4 8 16 32 64 128 256)
-NODES=8                       # number of nodes in the allocation
-BLOCK_ROWS=4
-BLOCK_COLS=4
-TIMESTEPS=32
+NODES=8
+AIRPORTS_PER_RANK=32     # fixed per-rank workload
+TIMESTEPS=8
 TRIALS=2
-WORK=100000
+WORK=1000
 SEED=42
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -29,9 +30,11 @@ EXAMPLES_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 declare -A BUILDS=(
     [dstm]="$EXAMPLES_DIR/airports/airports"
-    [mpi_alltoall]="$EXAMPLES_DIR/mpi_air/airports"
-    [mpi_sendrecv]="$EXAMPLES_DIR/single_mpi_air/airports"
+    [mpi]="$EXAMPLES_DIR/mpi_air/airports"
 )
+
+# Order to iterate the builds in (associative arrays don't preserve order).
+BUILD_ORDER=(dstm mpi)
 
 # ---------- Sanity checks ----------
 if [[ -z "${COBALT_NODEFILE:-}" ]]; then
@@ -49,7 +52,7 @@ echo "Allocation: $ALLOCATED_NODES nodes"
 cat "$COBALT_NODEFILE"
 echo
 
-for name in "${!BUILDS[@]}"; do
+for name in "${BUILD_ORDER[@]}"; do
     bin="${BUILDS[$name]}"
     if [[ ! -x "$bin" ]]; then
         echo "ERROR: missing or non-executable build: $name -> $bin" >&2
@@ -59,20 +62,17 @@ done
 
 MPI_PREFIX="$(dirname "$(dirname "$(which mpirun)")")"
 echo "MPI prefix: $MPI_PREFIX"
+echo "Airports per rank (fixed): $AIRPORTS_PER_RANK"
+echo "Largest run total airports: $(( AIRPORTS_PER_RANK * ${RANKS[-1]} ))"
 echo
 
 TS="$(date +%Y%m%d_%H%M%S)"
 CSV="$SCRIPT_DIR/weak_scaling_${TS}.csv"
-LOG_DIR="$SCRIPT_DIR/logs_${TS}"
-mkdir -p "$LOG_DIR"
 
 # ---------- CSV header ----------
-echo "build,ranks,ppn,nodes_used,block_rows,block_cols,total_airports,timesteps,work,trial,elapsed_s,steps_per_s,departures,arrivals,connections,status" > "$CSV"
+echo "build,ranks,ppn,nodes_used,na,total_airports,timesteps,work,trial,elapsed_s,steps_per_s,departures,arrivals,connections,status" > "$CSV"
 
 # Compute ranks-per-node and nodes-used for a given total rank count.
-# Strategy: spread evenly across all $NODES whenever possible.
-#   P  <  NODES -> 1 ppn, P nodes
-#   P >=  NODES -> ceil(P/NODES) ppn, NODES nodes (requires P % NODES == 0 for ppr)
 compute_placement() {
     local p="$1"
     if (( p < NODES )); then
@@ -95,31 +95,30 @@ run_one() {
 
     compute_placement "$p"
 
-    local total_airports=$(( BLOCK_ROWS * BLOCK_COLS * p ))
-    local logf="$LOG_DIR/${name}_p${p}_t${trial}.log"
+    local na=$AIRPORTS_PER_RANK
+    local total=$(( na * p ))
 
-    echo ">>> [$name] ranks=$p ppn=$PPN nodes=$NODES_USED trial=$trial  (airports=$total_airports)"
+    echo ">>> [$name] ranks=$p ppn=$PPN nodes=$NODES_USED trial=$trial  (na=$na, total=$total)"
 
-    # Build mpirun command. Only use --map-by ppr when it makes sense:
-    #   * P > 1 (ppr:1:node with P=1 is fine but pointless)
-    #   * P is divisible by NODES_USED (ppr requires exact fit)
     local map_arg=""
     if (( p > 1 )) && (( p % NODES_USED == 0 )); then
         map_arg="--map-by ppr:${PPN}:node"
     fi
+
+    local tmpf
+    tmpf=$(mktemp)
 
     mpirun -n "$p" --hostfile "$COBALT_NODEFILE" \
         --prefix "$MPI_PREFIX" \
         $map_arg \
         -x LD_LIBRARY_PATH -x PATH \
         "$bin" \
-        --block-rows "$BLOCK_ROWS" \
-        --block-cols "$BLOCK_COLS" \
+        --na "$na" \
         --time "$TIMESTEPS" \
         --seed "$SEED" \
         --work "$WORK" \
         --quiet \
-        > "$logf" 2>&1
+        > "$tmpf" 2>&1
     local rc=$?
 
     local elapsed="" sps="" dep="" arr="" conn="" status="ok"
@@ -127,24 +126,24 @@ run_one() {
     if [[ $rc -ne 0 ]]; then
         status="exit_${rc}"
     else
-        elapsed=$(grep -E '^Elapsed time:'      "$logf" | awk '{print $3}')
-        sps=$(    grep -E '^Timesteps/second:'  "$logf" | awk '{print $2}')
-        dep=$(    grep -E '^Total departures:'  "$logf" | awk '{print $3}')
-        arr=$(    grep -E '^Total arrivals:'    "$logf" | awk '{print $3}')
-        conn=$(   grep -E '^Total connections:' "$logf" | awk '{print $3}')
+        elapsed=$(grep -E '^Elapsed time:'      "$tmpf" | awk '{print $3}')
+        sps=$(    grep -E '^Timesteps/second:'  "$tmpf" | awk '{print $2}')
+        dep=$(    grep -E '^Total departures:'  "$tmpf" | awk '{print $3}')
+        arr=$(    grep -E '^Total arrivals:'    "$tmpf" | awk '{print $3}')
+        conn=$(   grep -E '^Total connections:' "$tmpf" | awk '{print $3}')
         if [[ -z "$elapsed" ]]; then
             status="parse_fail"
         fi
     fi
 
-    echo "${name},${p},${PPN},${NODES_USED},${BLOCK_ROWS},${BLOCK_COLS},${total_airports},${TIMESTEPS},${WORK},${trial},${elapsed},${sps},${dep},${arr},${conn},${status}" >> "$CSV"
+    rm -f "$tmpf"
+
+    echo "${name},${p},${PPN},${NODES_USED},${na},${total},${TIMESTEPS},${WORK},${trial},${elapsed},${sps},${dep},${arr},${conn},${status}" >> "$CSV"
 }
 
 # ---------- Sweep ----------
-# Order: for each rank count, run all builds back-to-back, all trials.
-# Keeps node/cache/network state more comparable within a rank-count group.
 for p in "${RANKS[@]}"; do
-    for name in dstm mpi_alltoall mpi_sendrecv; do
+    for name in "${BUILD_ORDER[@]}"; do
         bin="${BUILDS[$name]}"
         for trial in $(seq 1 "$TRIALS"); do
             run_one "$name" "$bin" "$p" "$trial"
@@ -155,4 +154,3 @@ done
 echo
 echo "Done."
 echo "CSV : $CSV"
-echo "Logs: $LOG_DIR"
