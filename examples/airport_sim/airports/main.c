@@ -17,6 +17,7 @@ int main(int argc, char *argv[])
     int quiet     = 0;
     int timesteps = 16;
     int na        = 1;   /* airports per rank */
+    int work      = 0;
 
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--seed") && i + 1 < argc)
@@ -25,6 +26,8 @@ int main(int argc, char *argv[])
             timesteps = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--na") && i + 1 < argc)
             na = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--work") && i + 1 < argc)
+            work = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--quiet"))
             quiet = 1;
         else if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h")) {
@@ -34,6 +37,7 @@ int main(int argc, char *argv[])
     }
 
     if (na < 1) na = 1;
+    if (work < 0) work = 0;
 
     int rank, num_ranks;
     MPI_Init(&argc, &argv);
@@ -80,15 +84,17 @@ int main(int argc, char *argv[])
 
     if (rank == 0) {
         printf("Mesh topology: %d ranks (%dx%d grid), %d airports/rank "
-               "(%d total), %d gates/rank, layover threshold=%d\n",
+               "(%d total), %d gates/rank, layover threshold=%d, work=%d\n",
                num_ranks, rows, cols, na, total_airports,
-               NUM_GATES, LAYOVER_THRESHOLD);
+               NUM_GATES, LAYOVER_THRESHOLD, work);
+        /*
         for (int r = 0; r < num_ranks; r++) {
             for (int l = 0; l < na; l++) {
                 int g = airport_global(r, l, na);
                 printf("  Airport %d.%d: %s\n", r, l, tier_name[tiers[g]]);
             }
         }
+        */
     }
 
     status = dstm_start(topology);
@@ -114,7 +120,7 @@ int main(int argc, char *argv[])
     srand(seed + rank);
 
     airport_state_t state;
-    airport_init(&state, rank, num_ranks, na, tiers, topology, gates);
+    airport_init(&state, rank, num_ranks, na, work, tiers, topology, gates);
 
     /* Sync all ranks before timing the simulation loop */
     MPI_Barrier(MPI_COMM_WORLD);
@@ -166,12 +172,14 @@ int main(int argc, char *argv[])
             for (int l = 0; l < na; l++) {
                 int g = airport_global(r, l, na);
                 char label[16];
+                /*
                 snprintf(label, sizeof(label), "%d.%d", r, l);
                 fprintf(stdout, "%-10s %-10s %10d %10d %12d\n",
                         label, tier_name[tiers[g]],
                         all_departures[g],
                         all_arrivals[g],
                         all_connections[g]);
+                */
                 total_dep  += all_departures[g];
                 total_arr  += all_arrivals[g];
                 total_conn += all_connections[g];

@@ -4,7 +4,7 @@
 #include <dstm.h>
 
 #define FLIGHT_PAYLOAD_SIZE  200
-#define GATE_CAPACITY        16
+#define GATE_CAPACITY        128
 #define LAYOVER_THRESHOLD    3
 
 #define NUM_GATES 24
@@ -41,6 +41,13 @@ typedef struct {
 extern const gate_slot_t empty_gate;
 
 /*
+ * Burn some CPU cycles to simulate per-arrival processing work.
+ * `iterations` is taken from the --work CLI flag. Returns a value
+ * derived from the computation so the compiler can't optimize it away.
+ */
+double airport_do_work(int iterations);
+
+/*
  * Per-rank inbox layout: gates indexed by destination rank, with NUM_GATES
  * slots per rank (sender hashes into one of them). Local airport within
  * the rank is resolved on receive (from flight_t.dest_local).
@@ -59,6 +66,7 @@ typedef struct {
     dstm_darray_t   *gates;
     gate_slot_t     *outbox;         /* size: num_ranks (one slot per dest rank) */
     int              flight_counter;
+    int              work;
     /* Per-local-airport counters, each of size na */
     int             *departures;
     int             *arrivals;
@@ -74,6 +82,7 @@ void airport_init(airport_state_t *state,
                   int rank,
                   int num_ranks,
                   int na,
+                  int work,
                   airport_tier_t *tiers,
                   dstm_distance_t *topology,
                   dstm_darray_t *gates);
