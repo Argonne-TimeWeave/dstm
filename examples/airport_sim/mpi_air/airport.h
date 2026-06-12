@@ -1,15 +1,13 @@
 #ifndef AIRPORT_H
 #define AIRPORT_H
 
-#include <stdio.h>
-#include <stdlib.h>
+#include <dstm.h>
 
 #define FLIGHT_PAYLOAD_SIZE  200
-#define GATE_CAPACITY        4
+#define GATE_CAPACITY        128
 #define LAYOVER_THRESHOLD    3
-#define NUM_GATES            24
 
-typedef long dstm_time_t;  /* keep the name for minimal diff */
+#define NUM_GATES 24
 
 typedef enum {
     TIER_HUB      = 0,
@@ -24,9 +22,11 @@ extern const int tier_recv_weight[];
 
 typedef struct {
     int         valid;
-    int         origin_airport;
-    int         dest_airport;
-    int         next_hop;
+    int         origin_rank;
+    int         origin_local;
+    int         dest_rank;
+    int         dest_local;
+    int         next_hop_rank;   /* next rank toward dest_rank */
     int         legs_completed;
     dstm_time_t departure_time;
     int         flight_id;
@@ -40,55 +40,71 @@ typedef struct {
 
 extern const gate_slot_t empty_gate;
 
+/*
+ * Burn some CPU cycles to simulate per-arrival processing work.
+ * `iterations` is taken from the --work CLI flag. Returns a value
+ * derived from the computation so the compiler can't optimize it away.
+ */
+double airport_do_work(int iterations);
+
+/*
+ * Per-rank inbox layout: gates indexed by destination rank, with NUM_GATES
+ * slots per rank (sender hashes into one of them). Local airport within
+ * the rank is resolved on receive (from flight_t.dest_local).
+ */
+static inline size_t gate_index(int dest_rank, int source_rank) {
+    int gate = (source_rank * 49) % NUM_GATES;
+    return (size_t)dest_rank * NUM_GATES + gate;
+}
+
 typedef struct {
-    int              airport_id;
+    int              rank;
+    int              num_ranks;
+    int              na;             /* airports per rank */
+    airport_tier_t  *tiers;          /* size: num_ranks * na (global) */
+    dstm_distance_t *topology;       /* per-rank distance */
+    dstm_darray_t   *gates;
+    gate_slot_t     *outbox;         /* size: num_ranks (one slot per dest rank) */
     int              flight_counter;
-    int              departures;
-    int              arrivals;
-    int              connections;
-    gate_slot_t      *outbox;       /* indexed by destination airport */
-    int              num_airports;
+    int              work;
+    /* Per-local-airport counters, each of size na */
+    int             *departures;
+    int             *arrivals;
+    int             *connections;
 } airport_state_t;
 
-static inline int airport_distance(int a, int b, int grid_cols)
-{
-    int ra = a / grid_cols, ca = a % grid_cols;
-    int rb = b / grid_cols, cb = b % grid_cols;
-    return abs(ra - rb) + abs(ca - cb);
+/* Helpers for global <-> (rank, local) addressing */
+static inline int airport_global(int rank, int local, int na) {
+    return rank * na + local;
 }
 
-static inline size_t gate_index(int dest_airport, int source_airport)
-{
-    int gate = (source_airport * 49) % NUM_GATES;
-    return (size_t)dest_airport * NUM_GATES + gate;
-}
+void airport_init(airport_state_t *state,
+                  int rank,
+                  int num_ranks,
+                  int na,
+                  int work,
+                  airport_tier_t *tiers,
+                  dstm_distance_t *topology,
+                  dstm_darray_t *gates);
 
-/* Logging shims so airport.c needs almost no edits */
-extern int g_log_quiet;
-#define dstm_log_normal(...)  do { if (!g_log_quiet) fprintf(stdout, __VA_ARGS__); } while (0)
-#define dstm_log_warning(...) do { if (!g_log_quiet) fprintf(stderr, __VA_ARGS__); } while (0)
-#define dstm_log_error(...)   do { fprintf(stderr, __VA_ARGS__); fputc('\n', stderr); } while (0)
-
-extern int g_work_iterations;
-void do_synthetic_work(void);
-
-void airport_init(airport_state_t *state, int airport_id, int num_airports);
 void airport_destroy(airport_state_t *state);
-void airport_clear_outbox(airport_state_t *state);
 
-int airport_pick_dest(int origin, int num_airports, airport_tier_t *tiers);
-int airport_find_next_hop(int origin, int dest, int num_airports,
-                          int grid_cols, airport_tier_t *tiers);
+/*
+ * Pick a destination (dest_rank, dest_local) from the perspective of
+ * an airport on `origin_rank`. The destination must NOT live on
+ * origin_rank (no local-to-local flights allowed).
+ */
+void airport_pick_dest(airport_state_t *state,
+                       int origin_rank,
+                       int *dest_rank,
+                       int *dest_local);
 
-void airport_process_incoming(airport_state_t *state,
-                              gate_slot_t *recv_gate,
-                              int grid_cols,
-                              airport_tier_t *tiers,
-                              dstm_time_t t);
+/*
+ * Find next hop RANK from origin_rank toward dest_rank, respecting
+ * LAYOVER_THRESHOLD. Distance is measured per-rank only.
+ */
+int airport_find_next_hop(airport_state_t *state, int origin_rank, int dest_rank);
 
-void airport_inject_flight(airport_state_t *state,
-                           int grid_cols,
-                           airport_tier_t *tiers,
-                           dstm_time_t t);
+void airport_timestep(airport_state_t *state, dstm_time_t t, int quiet);
 
-#endif
+#endif /* AIRPORT_H */
