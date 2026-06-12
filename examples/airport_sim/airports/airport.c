@@ -1,6 +1,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h> 
+
 #include "airport.h"
 
 const char *tier_name[] = { "HUB", "REGIONAL", "LOCAL" };
@@ -8,10 +10,30 @@ const int tier_send_prob[] = { 80, 40, 15 };
 const int tier_recv_weight[] = { 8, 3, 1 };
 const gate_slot_t empty_gate = { .n_flights = 0 };
 
+/*
+ * Synthetic per-arrival workload. Does `iterations` of a cheap floating-point
+ * computation. We mark the accumulator volatile and return it so the
+ * compiler can't optimize the loop away.
+ */
+double airport_do_work(int iterations)
+{
+    if (iterations <= 0)
+        return 0.0;
+
+    volatile double acc = 1.0;
+    for (int i = 1; i <= iterations; i++) {
+        /* Mix of mul/add/sqrt — keeps the FPU honest without allocating. */
+        acc = acc + sqrt((double)i) * 1.0000001;
+        acc = acc - (acc * 0.5);
+    }
+    return acc;
+}
+
 void airport_init(airport_state_t *state,
                   int rank,
                   int num_ranks,
                   int na,
+                  int work,
                   airport_tier_t *tiers,
                   dstm_distance_t *topology,
                   dstm_darray_t *gates)
@@ -19,6 +41,7 @@ void airport_init(airport_state_t *state,
     state->rank           = rank;
     state->num_ranks      = num_ranks;
     state->na             = na;
+    state->work           = work;
     state->tiers          = tiers;
     state->topology       = topology;
     state->gates          = gates;
@@ -192,7 +215,12 @@ void airport_timestep(airport_state_t *state, dstm_time_t t, int quiet)
                     dstm_log_error("Bad dest_local=%d on flight %d", dl, flt.flight_id);
                     continue;
                 }
+
                 state->arrivals[dl]++;
+
+                volatile double sink = airport_do_work(state->work);
+                (void)sink;
+
                 int og = airport_global(flt.origin_rank, flt.origin_local, na);
                 dstm_log_normal("Rank %d [t=%ld]: LANDED flight %d at airport "
                                 "%d.%d — origin=%d.%d (%s) dep_t=%ld legs=%d \"%s\"\n",
