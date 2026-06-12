@@ -206,43 +206,38 @@ void airport_timestep(airport_state_t *state, dstm_time_t t, int quiet)
 
     dstm_log_normal("Rank %d [t=%ld]: === timestep ===\n", rank, t);
 
-    /* Per-rank persistent state. Single-threaded per rank, so static is fine. */
+    /* Per-rank persistent state. */
     static pending_queue_t pending = { NULL, 0, 0 };
     static gate_slot_t    *saved_inbox = NULL;
+    static int            *saved_recv_counts = NULL;  /* who sent us data last step */
 
-    if (saved_inbox == NULL)
+    if (saved_inbox == NULL) {
         saved_inbox = calloc(num_ranks, sizeof(gate_slot_t));
+        saved_recv_counts = calloc(num_ranks, sizeof(int));
+    }
 
-    /* Drain saved_inbox from previous timestep's exchange into pending,
-     * preserving each flight's arrive_time stamped by the sender. */
+    /* Drain saved_inbox from previous timestep's exchange into pending. */
     for (int src = 0; src < num_ranks; src++) {
         if (src == rank) continue;
+        if (saved_recv_counts[src] == 0) continue;
         gate_slot_t *gs = &saved_inbox[src];
         for (int f = 0; f < gs->n_flights; f++)
             pending_push(&pending, &gs->flights[f]);
         gs->n_flights = 0;
+        saved_recv_counts[src] = 0;
     }
 
     /* Clear outbox; we'll rebuild it from this timestep's processing. */
     for (int r = 0; r < num_ranks; r++)
         state->outbox[r] = empty_gate;
 
-    /* Allocate a fresh inbox for this step's exchange. */
-    gate_slot_t *inbox = malloc(sizeof(gate_slot_t) * num_ranks);
-    for (int r = 0; r < num_ranks; r++)
-        inbox[r] = empty_gate;
-
     /* ---------- STEP 3: process pending flights due at time t ---------- */
     int i = 0;
     while (i < pending.n) {
         flight_t *flt_p = &pending.flights[i];
-        if (flt_p->arrive_time != t) {
-            i++;
-            continue;
-        }
+        if (flt_p->arrive_time != t) { i++; continue; }
         flight_t flt = *flt_p;
         pending_remove_at(&pending, i);
-        /* Don't increment i; the swap put a new element at position i. */
 
         if (flt.dest_rank == rank) {
             int dl = flt.dest_local;
@@ -263,14 +258,13 @@ void airport_timestep(airport_state_t *state, dstm_time_t t, int quiet)
                             flt.departure_time, flt.legs_completed + 1,
                             flt.payload);
         } else {
-            /* Connecting flight — forward to next hop with its own delta. */
             int local_hub = (flt.origin_rank * 49) % NUM_GATES % na;
             state->connections[local_hub]++;
             flt.legs_completed++;
 
             int next_hop = airport_find_next_hop(state, rank, flt.dest_rank);
             int delta = dstm_distance_get(state->topology, rank, next_hop);
-            if (delta < 1) delta = 1;  /* never schedule into the past */
+            if (delta < 1) delta = 1;
 
             gate_slot_t *ob = &state->outbox[next_hop];
             if (ob->n_flights < GATE_CAPACITY) {
@@ -328,7 +322,7 @@ void airport_timestep(airport_state_t *state, dstm_time_t t, int quiet)
                 .dest_rank = dest_rank, .dest_local = dest_local,
                 .next_hop_rank = next_hop, .legs_completed = 0,
                 .departure_time = t,
-                .arrive_time = t + delta,   /* NEW */
+                .arrive_time = t + delta,
                 .flight_id = (rank * na + l) * 100000 + state->flight_counter++,
             };
             int is_direct = (next_hop == dest_rank);
@@ -357,31 +351,78 @@ void airport_timestep(airport_state_t *state, dstm_time_t t, int quiet)
         }
     }
 
-    /* ---------- STEP 5: exchange (always one round-trip per step) ---------- */
+    /* ====================================================================
+     * STEP 5: sparsity-aware two-phase exchange.
+     *
+     * Phase A: every rank sends a small "n_flights" header to every other
+     *          rank. This is unavoidable (the receiver has to know whether
+     *          to expect a payload), but each header is just one int.
+     *
+     * Phase B: only the (src, dst) pairs where n_flights > 0 exchange
+     *          full gate_slot_t payloads. Most pairs skip this entirely,
+     *          dramatically cutting wire traffic and Waitall list length.
+     * ==================================================================== */
+
+    /* ---- Phase A: header exchange (one int per peer, both directions) ---- */
+    int *send_counts = malloc(sizeof(int) * num_ranks);
+    int *recv_counts = malloc(sizeof(int) * num_ranks);
+    for (int r = 0; r < num_ranks; r++) {
+        send_counts[r] = state->outbox[r].n_flights;
+        recv_counts[r] = 0;
+    }
+
+    /* MPI_Alltoall on a single int is cheap and library-tuned. We use the
+     * collective here rather than per-pair sendrecv because for fixed-size
+     * one-int messages the collective is essentially free and avoids any
+     * progress-engine pitfalls. The expensive thing we're avoiding is the
+     * per-pair PAYLOAD exchange, not the per-pair header. */
+    MPI_Alltoall(send_counts, 1, MPI_INT,
+                 recv_counts, 1, MPI_INT,
+                 MPI_COMM_WORLD);
+
+    /* ---- Phase B: payload exchange only where headers are nonzero ---- */
+    /* Allocate fresh inbox; only entries with recv_counts[src] > 0 get
+     * populated. Others stay at empty_gate. */
+    gate_slot_t *inbox = malloc(sizeof(gate_slot_t) * num_ranks);
+    for (int r = 0; r < num_ranks; r++)
+        inbox[r] = empty_gate;
+
+    /* Worst case we'd need (P-1) reqs each direction, but typically far
+     * fewer. Allocate the bound and track actuals. */
     MPI_Request *recv_reqs = malloc(sizeof(MPI_Request) * num_ranks);
     MPI_Request *send_reqs = malloc(sizeof(MPI_Request) * num_ranks);
     int n_recv = 0, n_send = 0;
 
     for (int src = 0; src < num_ranks; src++) {
         if (src == rank) continue;
+        if (recv_counts[src] == 0) continue;
         MPI_Irecv(&inbox[src], (int)sizeof(gate_slot_t), MPI_BYTE,
                   src, AIRPORT_MPI_TAG_BASE + (int)t,
                   MPI_COMM_WORLD, &recv_reqs[n_recv++]);
     }
     for (int dest = 0; dest < num_ranks; dest++) {
         if (dest == rank) continue;
+        if (send_counts[dest] == 0) continue;
         MPI_Isend(&state->outbox[dest], (int)sizeof(gate_slot_t), MPI_BYTE,
                   dest, AIRPORT_MPI_TAG_BASE + (int)t,
                   MPI_COMM_WORLD, &send_reqs[n_send++]);
     }
+
     if (n_recv > 0) MPI_Waitall(n_recv, recv_reqs, MPI_STATUSES_IGNORE);
     if (n_send > 0) MPI_Waitall(n_send, send_reqs, MPI_STATUSES_IGNORE);
+
     free(recv_reqs);
     free(send_reqs);
 
-    /* Stash this step's received gates for next step's pending-queue ingest. */
+    /* Stash this step's received gates AND the per-source nonzero counts
+     * so next step's drain loop can skip empty senders entirely. */
     memcpy(saved_inbox, inbox, sizeof(gate_slot_t) * num_ranks);
+    memcpy(saved_recv_counts, recv_counts, sizeof(int) * num_ranks);
 
+    free(send_counts);
+    free(recv_counts);
     free(inbox);
-    MPI_Barrier(MPI_COMM_WORLD);
+
+    /* No MPI_Barrier — the header Alltoall plus payload Waitalls already
+     * provide all the synchronization this step needs. */
 }  
