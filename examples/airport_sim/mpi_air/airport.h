@@ -29,6 +29,7 @@ typedef struct {
     int         next_hop_rank;   /* next rank toward dest_rank */
     int         legs_completed;
     dstm_time_t departure_time;
+    dstm_time_t arrive_time;
     int         flight_id;
     char        payload[FLIGHT_PAYLOAD_SIZE];
 } flight_t;

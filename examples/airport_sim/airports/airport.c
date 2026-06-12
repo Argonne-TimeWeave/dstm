@@ -218,9 +218,6 @@ void airport_timestep(airport_state_t *state, dstm_time_t t, int quiet)
 
                 state->arrivals[dl]++;
 
-                volatile double sink = airport_do_work(state->work);
-                (void)sink;
-
                 int og = airport_global(flt.origin_rank, flt.origin_local, na);
                 dstm_log_normal("Rank %d [t=%ld]: LANDED flight %d at airport "
                                 "%d.%d — origin=%d.%d (%s) dep_t=%ld legs=%d \"%s\"\n",
@@ -318,6 +315,9 @@ void airport_timestep(airport_state_t *state, dstm_time_t t, int quiet)
             ob->flights[ob->n_flights++] = flt;
 
             state->departures[l]++;
+
+            volatile double sink = airport_do_work(state->work);
+            (void)sink;
 
             if (is_direct) {
                 dstm_log_normal("Rank %d [t=%ld]: DEPART flight %d from %d.%d "
