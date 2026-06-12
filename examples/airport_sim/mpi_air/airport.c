@@ -11,6 +11,35 @@ const int tier_send_prob[] = { 80, 40, 15 };
 const int tier_recv_weight[] = { 8, 3, 1 };
 const gate_slot_t empty_gate = { .n_flights = 0 };
 
+/* ---------- Pending-flight queue (per-rank, in-transit storage) ----------
+ *
+ * Mirrors DSTM's delta semantics: a flight sent at time t with delta=d
+ * becomes visible at time t+d. We park flights here on the receiver
+ * side and only "land" them once their arrive_time matches the current
+ * timestep. */
+typedef struct {
+    flight_t *flights;
+    int       n;
+    int       cap;
+} pending_queue_t;
+
+static void pending_push(pending_queue_t *q, const flight_t *flt)
+{
+    if (q->n == q->cap) {
+        int new_cap = q->cap ? q->cap * 2 : 64;
+        q->flights = realloc(q->flights, sizeof(flight_t) * new_cap);
+        q->cap = new_cap;
+    }
+    q->flights[q->n++] = *flt;
+}
+
+/* Remove element at index i by swapping last element down. */
+static void pending_remove_at(pending_queue_t *q, int i)
+{
+    q->flights[i] = q->flights[q->n - 1];
+    q->n--;
+}
+
 /*
  * Synthetic per-arrival workload. Does `iterations` of a cheap floating-point
  * computation. We mark the accumulator volatile and return it so the
@@ -177,105 +206,102 @@ void airport_timestep(airport_state_t *state, dstm_time_t t, int quiet)
 
     dstm_log_normal("Rank %d [t=%ld]: === timestep ===\n", rank, t);
 
-    /* Allocate inbox. */
-    gate_slot_t *inbox = malloc(sizeof(gate_slot_t) * num_ranks);
-    if (!inbox) { dstm_log_error("alloc fail"); return; }
-    for (int r = 0; r < num_ranks; r++)
-        inbox[r] = empty_gate;
+    /* Per-rank persistent state. Single-threaded per rank, so static is fine. */
+    static pending_queue_t pending = { NULL, 0, 0 };
+    static gate_slot_t    *saved_inbox = NULL;
 
-    /* Clear outbox — we're going to rebuild it this timestep. */
+    if (saved_inbox == NULL)
+        saved_inbox = calloc(num_ranks, sizeof(gate_slot_t));
+
+    /* Drain saved_inbox from previous timestep's exchange into pending,
+     * preserving each flight's arrive_time stamped by the sender. */
+    for (int src = 0; src < num_ranks; src++) {
+        if (src == rank) continue;
+        gate_slot_t *gs = &saved_inbox[src];
+        for (int f = 0; f < gs->n_flights; f++)
+            pending_push(&pending, &gs->flights[f]);
+        gs->n_flights = 0;
+    }
+
+    /* Clear outbox; we'll rebuild it from this timestep's processing. */
     for (int r = 0; r < num_ranks; r++)
         state->outbox[r] = empty_gate;
 
-    /* ============================================================
-     * PHASE A: receive what was sent at end of previous timestep.
-     *
-     *   1. Process previous inbox  (saved from end of last step)
-     *   2. Inject new departures  → fills outbox
-     *   3. Exchange (Isend outbox, Irecv into new_inbox, Waitall)
-     *   4. Save new_inbox for next step
-     *
-     * This way the exchange is symmetric (everyone sends and recvs
-     * at the same point) and the data flow matches DSTM exactly:
-     * a flight queued at time t is received at time t+1.
-     * ============================================================ */
+    /* Allocate a fresh inbox for this step's exchange. */
+    gate_slot_t *inbox = malloc(sizeof(gate_slot_t) * num_ranks);
+    for (int r = 0; r < num_ranks; r++)
+        inbox[r] = empty_gate;
 
-    static gate_slot_t *saved_inbox = NULL;
-    static int saved_inbox_n = 0;
-    if (saved_inbox == NULL) {
-        saved_inbox = calloc(num_ranks, sizeof(gate_slot_t));
-        saved_inbox_n = num_ranks;
-    }
+    /* ---------- STEP 3: process pending flights due at time t ---------- */
+    int i = 0;
+    while (i < pending.n) {
+        flight_t *flt_p = &pending.flights[i];
+        if (flt_p->arrive_time != t) {
+            i++;
+            continue;
+        }
+        flight_t flt = *flt_p;
+        pending_remove_at(&pending, i);
+        /* Don't increment i; the swap put a new element at position i. */
 
-    /* STEP 3 — process saved inbox from previous exchange.
-     * On t=0 it's all zeros (calloc), matching DSTM where there's
-     * nothing to GET at t=0 either. */
-    for (int src = 0; src < num_ranks; src++) {
-        if (src == rank) continue;
-        gate_slot_t *recv_gate = &saved_inbox[src];
-        if (recv_gate->n_flights == 0) continue;
+        if (flt.dest_rank == rank) {
+            int dl = flt.dest_local;
+            if (dl < 0 || dl >= na) {
+                dstm_log_error("Bad dest_local=%d on flight %d", dl, flt.flight_id);
+                continue;
+            }
+            state->arrivals[dl]++;
+            volatile double sink = airport_do_work(state->work);
+            (void)sink;
 
-        int g = (int)(gate_index(rank, src) - (size_t)rank * NUM_GATES);
-        dstm_log_normal("Rank %d [t=%ld]: gate %d has %d flight(s)\n",
-                        rank, t, g, recv_gate->n_flights);
+            int og = airport_global(flt.origin_rank, flt.origin_local, na);
+            dstm_log_normal("Rank %d [t=%ld]: LANDED flight %d at airport "
+                            "%d.%d — origin=%d.%d (%s) dep_t=%ld legs=%d \"%s\"\n",
+                            rank, t, flt.flight_id, rank, dl,
+                            flt.origin_rank, flt.origin_local,
+                            tier_name[state->tiers[og]],
+                            flt.departure_time, flt.legs_completed + 1,
+                            flt.payload);
+        } else {
+            /* Connecting flight — forward to next hop with its own delta. */
+            int local_hub = (flt.origin_rank * 49) % NUM_GATES % na;
+            state->connections[local_hub]++;
+            flt.legs_completed++;
 
-        for (int f = 0; f < recv_gate->n_flights; f++) {
-            flight_t flt = recv_gate->flights[f];
+            int next_hop = airport_find_next_hop(state, rank, flt.dest_rank);
+            int delta = dstm_distance_get(state->topology, rank, next_hop);
+            if (delta < 1) delta = 1;  /* never schedule into the past */
 
-            if (flt.dest_rank == rank) {
-                int dl = flt.dest_local;
-                if (dl < 0 || dl >= na) {
-                    dstm_log_error("Bad dest_local=%d on flight %d", dl, flt.flight_id);
-                    continue;
-                }
-                state->arrivals[dl]++;
-                volatile double sink = airport_do_work(state->work);
-                (void)sink;
+            gate_slot_t *ob = &state->outbox[next_hop];
+            if (ob->n_flights < GATE_CAPACITY) {
+                flt.next_hop_rank = next_hop;
+                flt.arrive_time = t + delta;
+                ob->flights[ob->n_flights++] = flt;
 
-                int og = airport_global(flt.origin_rank, flt.origin_local, na);
-                dstm_log_normal("Rank %d [t=%ld]: LANDED flight %d at airport "
-                                "%d.%d — origin=%d.%d (%s) dep_t=%ld legs=%d \"%s\"\n",
-                                rank, t, flt.flight_id, rank, dl,
-                                flt.origin_rank, flt.origin_local,
-                                tier_name[state->tiers[og]],
-                                flt.departure_time, flt.legs_completed + 1,
-                                flt.payload);
-            } else {
-                int local_hub = g % na;
-                state->connections[local_hub]++;
-                flt.legs_completed++;
-
-                int next_hop = airport_find_next_hop(state, rank, flt.dest_rank);
-                int delta = dstm_distance_get(state->topology, rank, next_hop);
-
-                gate_slot_t *ob = &state->outbox[next_hop];
-                if (ob->n_flights < GATE_CAPACITY) {
-                    flt.next_hop_rank = next_hop;
-                    ob->flights[ob->n_flights++] = flt;
-                    if (next_hop == flt.dest_rank) {
-                        dstm_log_normal("Rank %d [t=%ld]: CONNECTING flight %d "
-                                        "-> final dst rank=%d (airport %d.%d) "
-                                        "delta=%d (leg %d)\n",
-                                        rank, t, flt.flight_id, next_hop,
-                                        flt.dest_rank, flt.dest_local, delta,
-                                        flt.legs_completed);
-                    } else {
-                        dstm_log_normal("Rank %d [t=%ld]: CONNECTING flight %d "
-                                        "-> hop rank=%d toward dst=%d.%d delta=%d (leg %d)\n",
-                                        rank, t, flt.flight_id, next_hop,
-                                        flt.dest_rank, flt.dest_local, delta,
-                                        flt.legs_completed);
-                    }
+                if (next_hop == flt.dest_rank) {
+                    dstm_log_normal("Rank %d [t=%ld]: CONNECTING flight %d "
+                                    "-> final dst rank=%d (airport %d.%d) "
+                                    "delta=%d arrive_t=%ld (leg %d)\n",
+                                    rank, t, flt.flight_id, next_hop,
+                                    flt.dest_rank, flt.dest_local, delta,
+                                    flt.arrive_time, flt.legs_completed);
                 } else {
-                    dstm_log_warning("Rank %d [t=%ld]: CONNECTION DELAYED "
-                                     "flight %d — outbox to rank %d full\n",
-                                     rank, t, flt.flight_id, next_hop);
+                    dstm_log_normal("Rank %d [t=%ld]: CONNECTING flight %d "
+                                    "-> hop rank=%d toward dst=%d.%d delta=%d "
+                                    "arrive_t=%ld (leg %d)\n",
+                                    rank, t, flt.flight_id, next_hop,
+                                    flt.dest_rank, flt.dest_local, delta,
+                                    flt.arrive_time, flt.legs_completed);
                 }
+            } else {
+                dstm_log_warning("Rank %d [t=%ld]: CONNECTION DELAYED "
+                                 "flight %d — outbox to rank %d full\n",
+                                 rank, t, flt.flight_id, next_hop);
             }
         }
     }
 
-    /* STEP 4 — inject new departures into outbox. */
+    /* ---------- STEP 4: inject new departures into outbox ---------- */
     if (num_ranks > 1) {
         for (int l = 0; l < na; l++) {
             int og = airport_global(rank, l, na);
@@ -286,6 +312,7 @@ void airport_timestep(airport_state_t *state, dstm_time_t t, int quiet)
             airport_pick_dest(state, rank, &dest_rank, &dest_local);
             int next_hop = airport_find_next_hop(state, rank, dest_rank);
             int delta = dstm_distance_get(state->topology, rank, next_hop);
+            if (delta < 1) delta = 1;
 
             gate_slot_t *ob = &state->outbox[next_hop];
             if (ob->n_flights >= GATE_CAPACITY) {
@@ -301,6 +328,7 @@ void airport_timestep(airport_state_t *state, dstm_time_t t, int quiet)
                 .dest_rank = dest_rank, .dest_local = dest_local,
                 .next_hop_rank = next_hop, .legs_completed = 0,
                 .departure_time = t,
+                .arrive_time = t + delta,   /* NEW */
                 .flight_id = (rank * na + l) * 100000 + state->flight_counter++,
             };
             int is_direct = (next_hop == dest_rank);
@@ -314,20 +342,22 @@ void airport_timestep(airport_state_t *state, dstm_time_t t, int quiet)
 
             if (is_direct) {
                 dstm_log_normal("Rank %d [t=%ld]: DEPART flight %d from %d.%d "
-                                "dst=%d.%d (%s) DIRECT delta=%d\n",
+                                "dst=%d.%d (%s) DIRECT delta=%d arrive_t=%ld\n",
                                 rank, t, flt.flight_id, rank, l,
                                 dest_rank, dest_local,
-                                tier_name[state->tiers[dg]], delta);
+                                tier_name[state->tiers[dg]], delta,
+                                flt.arrive_time);
             } else {
                 dstm_log_normal("Rank %d [t=%ld]: DEPART flight %d from %d.%d "
-                                "dst=%d.%d via rank %d delta=%d\n",
+                                "dst=%d.%d via rank %d delta=%d arrive_t=%ld\n",
                                 rank, t, flt.flight_id, rank, l,
-                                dest_rank, dest_local, next_hop, delta);
+                                dest_rank, dest_local, next_hop, delta,
+                                flt.arrive_time);
             }
         }
     }
 
-    /* STEP 5 — exchange: Isend our outbox, Irecv into inbox. */
+    /* ---------- STEP 5: exchange (always one round-trip per step) ---------- */
     MPI_Request *recv_reqs = malloc(sizeof(MPI_Request) * num_ranks);
     MPI_Request *send_reqs = malloc(sizeof(MPI_Request) * num_ranks);
     int n_recv = 0, n_send = 0;
@@ -344,13 +374,12 @@ void airport_timestep(airport_state_t *state, dstm_time_t t, int quiet)
                   dest, AIRPORT_MPI_TAG_BASE + (int)t,
                   MPI_COMM_WORLD, &send_reqs[n_send++]);
     }
-
     if (n_recv > 0) MPI_Waitall(n_recv, recv_reqs, MPI_STATUSES_IGNORE);
     if (n_send > 0) MPI_Waitall(n_send, send_reqs, MPI_STATUSES_IGNORE);
     free(recv_reqs);
     free(send_reqs);
 
-    /* Save inbox for NEXT timestep's processing. */
+    /* Stash this step's received gates for next step's pending-queue ingest. */
     memcpy(saved_inbox, inbox, sizeof(gate_slot_t) * num_ranks);
 
     free(inbox);
