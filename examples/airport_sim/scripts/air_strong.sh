@@ -1,28 +1,24 @@
 #!/usr/bin/env bash
-# Multi-node STRONG-scaling sweep for the three airport simulator builds.
+# Strong-scaling sweep comparing the DSTM and MPI airport simulators.
 #
-# Total problem size is held constant across all P. Per-rank block size
-# shrinks as P grows.
-#
-# Total airports = TOTAL_AIRPORTS (must be divisible by every P in RANKS).
-# Per-rank block = TOTAL_AIRPORTS / P, factored into rows x cols.
+# Total airport count is held constant across all P. Per-rank airport count
+# (--na) shrinks as P grows: NA = TOTAL_AIRPORTS / P.
 #
 # Builds expected at:
-#   ../airports/airports          (DSTM)
-#   ../mpi_air/airports           (MPI Alltoallv)
-#   ../single_mpi_air/airports    (MPI Sendrecv per-pair)
+#   ../airports/airports     (DSTM)
+#   ../mpi_air/airports      (MPI send/recv)
 #
-# Output: strong_scaling_<timestamp>.csv in this scripts/ directory.
+# Output: strong_scaling_<timestamp>.csv next to this script.
 
 set -u
 
 # ---------- Config ----------
 RANKS=(1 2 4 8 16 32 64 128 256)
 NODES=8
-TOTAL_AIRPORTS=8192
-TIMESTEPS=8
-TRIALS=2
-WORK=100000
+TOTAL_AIRPORTS=2048
+TIMESTEPS=16
+TRIALS=1
+WORK=10000
 SEED=42
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -30,9 +26,11 @@ EXAMPLES_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 declare -A BUILDS=(
     [dstm]="$EXAMPLES_DIR/airports/airports"
-    [mpi_alltoall]="$EXAMPLES_DIR/mpi_air/airports"
-    [mpi_sendrecv]="$EXAMPLES_DIR/single_mpi_air/airports"
+    [mpi]="$EXAMPLES_DIR/mpi_air/airports"
 )
+
+# Order to iterate the builds in (associative arrays don't preserve order).
+BUILD_ORDER=(dstm mpi)
 
 # ---------- Sanity checks ----------
 if [[ -z "${COBALT_NODEFILE:-}" ]]; then
@@ -50,7 +48,7 @@ echo "Allocation: $ALLOCATED_NODES nodes"
 cat "$COBALT_NODEFILE"
 echo
 
-for name in "${!BUILDS[@]}"; do
+for name in "${BUILD_ORDER[@]}"; do
     bin="${BUILDS[$name]}"
     if [[ ! -x "$bin" ]]; then
         echo "ERROR: missing or non-executable build: $name -> $bin" >&2
@@ -75,7 +73,7 @@ TS="$(date +%Y%m%d_%H%M%S)"
 CSV="$SCRIPT_DIR/strong_scaling_${TS}.csv"
 
 # ---------- CSV header ----------
-echo "build,ranks,ppn,nodes_used,block_rows,block_cols,airports_per_rank,total_airports,timesteps,work,trial,elapsed_s,steps_per_s,departures,arrivals,connections,status" > "$CSV"
+echo "build,ranks,ppn,nodes_used,na,total_airports,timesteps,work,trial,elapsed_s,steps_per_s,departures,arrivals,connections,status" > "$CSV"
 
 # Compute ranks-per-node and nodes-used for a given total rank count.
 compute_placement() {
@@ -92,18 +90,6 @@ compute_placement() {
     fi
 }
 
-# Factor N into rows*cols, as square-ish as possible.
-# Sets globals BLOCK_ROWS, BLOCK_COLS.
-factor_block() {
-    local n="$1"
-    local r=1
-    for ((i = 1; i * i <= n; i++)); do
-        if (( n % i == 0 )); then r=$i; fi
-    done
-    BLOCK_ROWS=$r
-    BLOCK_COLS=$(( n / r ))
-}
-
 run_one() {
     local name="$1"
     local bin="$2"
@@ -112,17 +98,15 @@ run_one() {
 
     compute_placement "$p"
 
-    local airports_per_rank=$(( TOTAL_AIRPORTS / p ))
-    factor_block "$airports_per_rank"
+    local na=$(( TOTAL_AIRPORTS / p ))
 
-    echo ">>> [$name] ranks=$p ppn=$PPN nodes=$NODES_USED trial=$trial  (block=${BLOCK_ROWS}x${BLOCK_COLS}, ${airports_per_rank} airports/rank)"
+    echo ">>> [$name] ranks=$p ppn=$PPN nodes=$NODES_USED trial=$trial  (na=$na)"
 
     local map_arg=""
     if (( p > 1 )) && (( p % NODES_USED == 0 )); then
         map_arg="--map-by ppr:${PPN}:node"
     fi
 
-    # Capture output to a tmpfile we'll delete after parsing.
     local tmpf
     tmpf=$(mktemp)
 
@@ -131,8 +115,7 @@ run_one() {
         $map_arg \
         -x LD_LIBRARY_PATH -x PATH \
         "$bin" \
-        --block-rows "$BLOCK_ROWS" \
-        --block-cols "$BLOCK_COLS" \
+        --na "$na" \
         --time "$TIMESTEPS" \
         --seed "$SEED" \
         --work "$WORK" \
@@ -157,12 +140,12 @@ run_one() {
 
     rm -f "$tmpf"
 
-    echo "${name},${p},${PPN},${NODES_USED},${BLOCK_ROWS},${BLOCK_COLS},${airports_per_rank},${TOTAL_AIRPORTS},${TIMESTEPS},${WORK},${trial},${elapsed},${sps},${dep},${arr},${conn},${status}" >> "$CSV"
+    echo "${name},${p},${PPN},${NODES_USED},${na},${TOTAL_AIRPORTS},${TIMESTEPS},${WORK},${trial},${elapsed},${sps},${dep},${arr},${conn},${status}" >> "$CSV"
 }
 
 # ---------- Sweep ----------
 for p in "${RANKS[@]}"; do
-    for name in dstm mpi_alltoall mpi_sendrecv; do
+    for name in "${BUILD_ORDER[@]}"; do
         bin="${BUILDS[$name]}"
         for trial in $(seq 1 "$TRIALS"); do
             run_one "$name" "$bin" "$p" "$trial"
