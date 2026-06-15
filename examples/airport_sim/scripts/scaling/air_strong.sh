@@ -22,7 +22,7 @@ WORK=10000
 SEED=42
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-EXAMPLES_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+EXAMPLES_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 declare -A BUILDS=(
     [dstm]="$EXAMPLES_DIR/airports/airports"
