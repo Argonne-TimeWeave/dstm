@@ -48,9 +48,7 @@ typedef struct zombie_state_t {
     cell_slot_t       *outbox;        /* size num_ranks; only inter-rank used */
 
     /* Humans physically on this rank who DIDN'T arrive via the darray
-     * this hour (stayed put, or were home all along). Carried forward
-     * between hours by the rank itself — never crosses MPI. Sized to
-     * fit every human in the simulation worst-case. */
+     * this hour (stayed put, or were home all along).  */
     human_t           *carryover;
     int                n_carryover;
     int                carryover_cap;
@@ -69,7 +67,7 @@ void zombie_init(zombie_state_t *st,
 
 void zombie_destroy(zombie_state_t *st);
 
-void zombie_timestep(zombie_state_t *st, dstm_time_t t, int quiet);
+void zombie_timestep(zombie_state_t *st, dstm_time_t t);
 
 int    human_find_next_hop(zombie_state_t *st, int from_rank, int to_rank);
 void   pick_event_location(zombie_state_t *st, event_slot_t slot,
