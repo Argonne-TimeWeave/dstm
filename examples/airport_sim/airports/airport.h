@@ -2,12 +2,15 @@
 #define AIRPORT_H
 
 #include <dstm.h>
+#include <mpi.h>
 
 #define FLIGHT_PAYLOAD_SIZE  200
 #define GATE_CAPACITY        128
 #define LAYOVER_THRESHOLD    3
 
 #define NUM_GATES 24
+
+#define LOGGING 1 // lazy
 
 typedef enum {
     TIER_HUB      = 0,

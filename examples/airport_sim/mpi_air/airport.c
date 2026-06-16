@@ -203,6 +203,7 @@ void airport_timestep(airport_state_t *state, dstm_time_t t, int quiet)
     int rank = state->rank;
     int num_ranks = state->num_ranks;
     int na = state->na;
+    double start, end = 0.0;
 
     dstm_log_normal("Rank %d [t=%ld]: === timestep ===\n", rank, t);
 
@@ -376,9 +377,17 @@ void airport_timestep(airport_state_t *state, dstm_time_t t, int quiet)
      * one-int messages the collective is essentially free and avoids any
      * progress-engine pitfalls. The expensive thing we're avoiding is the
      * per-pair PAYLOAD exchange, not the per-pair header. */
+    //dstm_log_normal("alltoall\n");
+
+    if (LOGGING)
+        start = MPI_Wtime();        
+
     MPI_Alltoall(send_counts, 1, MPI_INT,
                  recv_counts, 1, MPI_INT,
                  MPI_COMM_WORLD);
+    
+    if (LOGGING)
+        end = MPI_Wtime(); dstm_log_normal("ALLTOALL %f\n", end - start);
 
     /* ---- Phase B: payload exchange only where headers are nonzero ---- */
     /* Allocate fresh inbox; only entries with recv_counts[src] > 0 get
@@ -396,6 +405,7 @@ void airport_timestep(airport_state_t *state, dstm_time_t t, int quiet)
     for (int src = 0; src < num_ranks; src++) {
         if (src == rank) continue;
         if (recv_counts[src] == 0) continue;
+        //dstm_log_normal("Irecv\n");
         MPI_Irecv(&inbox[src], (int)sizeof(gate_slot_t), MPI_BYTE,
                   src, AIRPORT_MPI_TAG_BASE + (int)t,
                   MPI_COMM_WORLD, &recv_reqs[n_recv++]);
@@ -403,13 +413,20 @@ void airport_timestep(airport_state_t *state, dstm_time_t t, int quiet)
     for (int dest = 0; dest < num_ranks; dest++) {
         if (dest == rank) continue;
         if (send_counts[dest] == 0) continue;
+        //dstm_log_normal("Isend\n");
         MPI_Isend(&state->outbox[dest], (int)sizeof(gate_slot_t), MPI_BYTE,
                   dest, AIRPORT_MPI_TAG_BASE + (int)t,
                   MPI_COMM_WORLD, &send_reqs[n_send++]);
     }
+        
+    if (LOGGING)
+        start = MPI_Wtime();
 
     if (n_recv > 0) MPI_Waitall(n_recv, recv_reqs, MPI_STATUSES_IGNORE);
     if (n_send > 0) MPI_Waitall(n_send, send_reqs, MPI_STATUSES_IGNORE);
+    
+    if (LOGGING)
+        end = MPI_Wtime(); dstm_log_normal("WAITALL %f\n", end - start);
 
     free(recv_reqs);
     free(send_reqs);
@@ -422,7 +439,4 @@ void airport_timestep(airport_state_t *state, dstm_time_t t, int quiet)
     free(send_counts);
     free(recv_counts);
     free(inbox);
-
-    /* No MPI_Barrier — the header Alltoall plus payload Waitalls already
-     * provide all the synchronization this step needs. */
 }  
