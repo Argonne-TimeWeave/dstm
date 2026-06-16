@@ -1,0 +1,11 @@
+figure out correct value for cell_capcity
+
+it would be cool if zombies moved randomly
+    and then people ran away?
+
+i think some people never actually make it to their events...
+    if someone's event is three hours away but the duration of the event is only two hours
+        this may occur frequently and ruins the idea of the simulation
+    we should consider having people only go to events that are local to them
+        local meaning within two hours or so
+        and making events longer

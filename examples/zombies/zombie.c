@@ -112,6 +112,12 @@ void zombie_init(zombie_state_t *st,
     st->arrivals   = calloc(nl,        sizeof(int));
     st->infections = calloc(nl,        sizeof(int));
 
+    /* Carryover sized for the worst case: every human in the entire
+     * simulation could end up resident on this rank. */
+    st->carryover_cap = num_ranks * nh;
+    st->carryover     = calloc(st->carryover_cap, sizeof(human_t));
+    st->n_carryover   = 0;
+
     srand((unsigned)seed);
 
     for (int i = 0; i < nh; i++) {
@@ -140,6 +146,7 @@ void zombie_destroy(zombie_state_t *st)
 {
     free(st->humans);
     free(st->outbox);
+    free(st->carryover);
     free(st->departures);
     free(st->arrivals);
     free(st->infections);
@@ -168,24 +175,27 @@ static void desired_cell(human_t *h, int hod,
     }
 }
 
+/* Push a human into the local carryover list, growing as needed. */
+static void carryover_push(zombie_state_t *st, const human_t *h)
+{
+    if (st->n_carryover >= st->carryover_cap) {
+        st->carryover_cap *= 2;
+        st->carryover = realloc(st->carryover,
+                                st->carryover_cap * sizeof(human_t));
+    }
+    st->carryover[st->n_carryover++] = *h;
+}
+
 /* ---------- main timestep (one HOUR) ----------
  *
- * Phases:
- *   STEP 0  — owner-only: day-boundary clock ticks + schedule re-roll
- *   STEP 1  — sentinel PUT on our self-bundle
- *   STEP 2  — clear outbox
- *   STEP 3  — RECEIVE: read all (rank, src) bundles into a per-cell
- *             roster keyed by cur_local. Bootstrap with our owned
- *             humans whose cur_node == rank but who never showed up
- *             in any bundle (e.g. patient zero on t=0, or anyone
- *             staying home through a sentinel hour).
- *   STEP 4  — INFECTION: per local cell, contagious carriers may
- *             infect healthy occupants. Apply state to roster
- *             entries; mirror into owner records for our humans.
- *   STEP 5  — ADVANCE & SHIP: for each human present, compute
- *             desired cell, route one hop, drop in outbox.
- *   STEP 6  — PUT each non-empty outbox bundle.
- */
+ * Two streams of humans feed into each hour's roster:
+ *   (A) inbound bundles from the darray — humans who traveled here
+ *   (B) carryover from last hour — humans physically here who
+ *       stayed put or just took a local hop. NEVER crosses MPI.
+ *
+ * The darray only ever carries inter-rank traffic. The self-bundle
+ * is sentineled (empty) but never used to ship humans, so there's
+ * no capacity contention there. */
 
 void zombie_timestep(zombie_state_t *st, dstm_time_t t, int quiet)
 {
@@ -200,7 +210,7 @@ void zombie_timestep(zombie_state_t *st, dstm_time_t t, int quiet)
         dstm_log_normal("Rank %d [t=%ld d=%d h=%02d]: === step ===\n",
                         rank, t, dod, hod);
 
-    /* STEP 0 */
+    /* STEP 0 — day boundary: ticks + schedule re-roll (owner-side). */
     if (hod == 0) {
         for (int i = 0; i < st->nh; i++) {
             human_t *h = &st->humans[i];
@@ -220,9 +230,30 @@ void zombie_timestep(zombie_state_t *st, dstm_time_t t, int quiet)
                 make_event(st, SLOT_AFTERNOON, &h->afternoon_event);
             }
         }
+        /* Also tick any infected human in carryover (they may be away
+         * from home — their authoritative state lives in carryover). */
+        for (int i = 0; i < st->n_carryover; i++) {
+            human_t *h = &st->carryover[i];
+            if (h->state == HSTATE_INFECTED && h->last_infect_day != dod) {
+                h->days_infected++;
+                h->last_infect_day = dod;
+                if (h->days_infected >= INFECT_DAYS_TO_ZOMBIE) {
+                    h->state = HSTATE_ZOMBIE;
+                    dstm_log_normal("Rank %d [t=%ld]: human %d TURNED ZOMBIE "
+                                    "at %d.%d (away from home)\n",
+                                    rank, t, h->human_id,
+                                    h->cur_node, h->cur_local);
+                }
+            }
+            if (h->state != HSTATE_ZOMBIE) {
+                make_event(st, SLOT_MORNING,   &h->morning_event);
+                make_event(st, SLOT_AFTERNOON, &h->afternoon_event);
+            }
+        }
     }
 
-    /* STEP 1 — sentinel PUT for our (rank, rank) self-bundle. */
+    /* STEP 1 — sentinel PUT for our self-bundle. We never write real
+     * humans into self; this just makes sure GETs don't block. */
     {
         size_t idx = bundle_index(rank, rank, num_ranks);
         dstm_darray_put(st->cells, idx, &empty_cell, t, 0);
@@ -232,19 +263,33 @@ void zombie_timestep(zombie_state_t *st, dstm_time_t t, int quiet)
     for (int r = 0; r < num_ranks; r++)
         st->outbox[r] = empty_cell;
 
-    /* STEP 3 — RECEIVE & build roster.
+    /* STEP 3 — build roster from BOTH streams.
      *
-     * The roster is sized nl + 1: cells 0..nl-1 are local cells, and
-     * cell nl is a "limbo" bucket for in-transit humans (cur_node !=
-     * dest_node, or cur_node != rank). Limbo humans don't participate
-     * in infection — they're just being forwarded. */
+     * Roster cells 0..nl-1 are local cells; nl is LIMBO (in-transit).
+     * Each roster cell can hold an unbounded number of humans, so we
+     * use heap-allocated growable buffers. */
     int LIMBO = nl;
-    cell_slot_t *roster = calloc(nl + 1, sizeof(cell_slot_t));
-    int *contagious_per_cell = calloc(nl, sizeof(int));
-    char *owned_seen = calloc(st->nh, sizeof(char));
+    int n_buckets = nl + 1;
 
-    /* 3a — pull every bundle addressed to us. */
+    human_t **bucket      = calloc(n_buckets, sizeof(human_t *));
+    int      *bucket_n    = calloc(n_buckets, sizeof(int));
+    int      *bucket_cap  = calloc(n_buckets, sizeof(int));
+    int      *contagious  = calloc(n_buckets, sizeof(int));
+
+    #define BUCKET_PUSH(b, hp) do {                                    \
+        int _b = (b);                                                  \
+        if (bucket_n[_b] >= bucket_cap[_b]) {                          \
+            bucket_cap[_b] = bucket_cap[_b] ? bucket_cap[_b] * 2 : 16; \
+            bucket[_b] = realloc(bucket[_b],                           \
+                                 bucket_cap[_b] * sizeof(human_t));    \
+        }                                                              \
+        bucket[_b][bucket_n[_b]++] = *(hp);                            \
+    } while (0)
+
+    /* 3a — inbound bundles (humans who actually traveled to us). */
     for (int src = 0; src < num_ranks; src++) {
+        if (src == rank) continue; /* self-bundle is always sentinel-only */
+
         size_t idx = bundle_index(rank, src, num_ranks);
         cell_slot_t recv;
         status = dstm_darray_get_or_default(st->cells, idx,
@@ -261,86 +306,70 @@ void zombie_timestep(zombie_state_t *st, dstm_time_t t, int quiet)
 
         for (int i = 0; i < recv.n_humans; i++) {
             human_t h = recv.humans[i];
-
-            /* Decide bucket: are they fully here, or just passing through? */
-            int bucket;
+            int b;
             if (h.cur_node == rank && h.dest_node == rank &&
                 h.cur_local >= 0 && h.cur_local < nl) {
-                bucket = h.cur_local;
-            } else {
-                bucket = LIMBO;
-            }
-
-            cell_slot_t *bk = &roster[bucket];
-            if (bk->n_humans >= CELL_CAPACITY) {
-                dstm_log_warning("Rank %d [t=%ld]: roster bucket %d FULL, "
-                                 "dropping human %d\n",
-                                 rank, t, bucket, h.human_id);
-                continue;
-            }
-            bk->humans[bk->n_humans++] = h;
-            if (bucket != LIMBO) {
-                st->arrivals[bucket]++;
+                b = h.cur_local;
+                st->arrivals[b]++;
                 if (h.state == HSTATE_ZOMBIE || h.state == HSTATE_INFECTED)
-                    contagious_per_cell[bucket]++;
+                    contagious[b]++;
+            } else {
+                b = LIMBO;
             }
-            if (h.home_node == rank) {
-                int li = h.human_id - rank * st->nh;
-                if (li >= 0 && li < st->nh) owned_seen[li] = 1;
-            }
+            BUCKET_PUSH(b, &h);
         }
     }
 
-    /* 3b — bootstrap roster with owned humans who didn't appear in any
-     * bundle. These are humans physically on our rank (cur_node==rank)
-     * who weren't transmitted via the darray this hour — either because
-     * it's t=0, or because they stayed put across an empty sentinel.
-     *
-     * This is the critical fix: previously, patient zero never entered
-     * any roster, so was invisible to infection. */
-    for (int i = 0; i < st->nh; i++) {
-        if (owned_seen[i]) continue;
-        human_t *h = &st->humans[i];
-        if (!h->valid) continue;
-        if (h->cur_node != rank) continue; /* somewhere else right now */
-
-        int bucket;
-        if (h->dest_node == rank &&
-            h->cur_local >= 0 && h->cur_local < nl) {
-            bucket = h->cur_local;
+    /* 3b — carryover (humans who were here last hour and stayed/moved
+     * locally). This stream is authoritative for any human it contains;
+     * the owner record may be stale for humans away from home. */
+    for (int i = 0; i < st->n_carryover; i++) {
+        human_t h = st->carryover[i];
+        int b;
+        if (h.cur_node == rank && h.dest_node == rank &&
+            h.cur_local >= 0 && h.cur_local < nl) {
+            b = h.cur_local;
+            if (h.state == HSTATE_ZOMBIE || h.state == HSTATE_INFECTED)
+                contagious[b]++;
         } else {
-            bucket = LIMBO;
+            b = LIMBO;
         }
+        BUCKET_PUSH(b, &h);
+    }
+    st->n_carryover = 0; /* consumed; we'll rebuild it in STEP 5 */
 
-        cell_slot_t *bk = &roster[bucket];
-        if (bk->n_humans >= CELL_CAPACITY) {
-            dstm_log_warning("Rank %d [t=%ld]: roster bucket %d FULL on "
-                             "bootstrap, dropping owned human %d\n",
-                             rank, t, bucket, h->human_id);
-            continue;
+    /* 3c — bootstrap: at t=0 the carryover is empty, so seed from
+     * owner records. After t=0 every owned human is accounted for
+     * either via 3a (came home from a trip) or via 3b (stayed). */
+    if (t == 0) {
+        for (int i = 0; i < st->nh; i++) {
+            human_t *h = &st->humans[i];
+            if (!h->valid) continue;
+            int b;
+            if (h->cur_node == rank && h->dest_node == rank &&
+                h->cur_local >= 0 && h->cur_local < nl) {
+                b = h->cur_local;
+                if (h->state == HSTATE_ZOMBIE || h->state == HSTATE_INFECTED)
+                    contagious[b]++;
+            } else {
+                b = LIMBO;
+            }
+            BUCKET_PUSH(b, h);
         }
-        bk->humans[bk->n_humans++] = *h;
-        if (bucket != LIMBO) {
-            /* Don't count as arrival — they didn't travel. */
-            if (h->state == HSTATE_ZOMBIE || h->state == HSTATE_INFECTED)
-                contagious_per_cell[bucket]++;
-        }
-        owned_seen[i] = 1;
     }
 
     /* STEP 4 — INFECTION per cell. */
     for (int l = 0; l < nl; l++) {
-        cell_slot_t *bk = &roster[l];
-        if (bk->n_humans == 0) continue;
-        int cont = contagious_per_cell[l];
+        if (bucket_n[l] == 0) continue;
+        int cont = contagious[l];
 
         if (!quiet)
             dstm_log_normal("Rank %d [t=%ld]: cell %d.%d pop=%d contagious=%d\n",
-                            rank, t, rank, l, bk->n_humans, cont);
+                            rank, t, rank, l, bucket_n[l], cont);
         if (cont == 0) continue;
 
-        for (int i = 0; i < bk->n_humans; i++) {
-            human_t *h = &bk->humans[i];
+        for (int i = 0; i < bucket_n[l]; i++) {
+            human_t *h = &bucket[l][i];
             if (h->state != HSTATE_HEALTHY) continue;
 
             int infected_now = 0;
@@ -356,20 +385,25 @@ void zombie_timestep(zombie_state_t *st, dstm_time_t t, int quiet)
 
             dstm_log_normal("Rank %d [t=%ld]: INFECTED human %d at %d.%d\n",
                             rank, t, h->human_id, rank, l);
-
-            if (h->home_node == rank) {
-                int li = h->human_id - rank * st->nh;
-                if (li >= 0 && li < st->nh)
-                    st->humans[li] = *h;
-            }
         }
     }
 
-    /* STEP 5 — ADVANCE & SHIP every roster human (incl. limbo). */
-    for (int b = 0; b <= LIMBO; b++) {
-        cell_slot_t *bk = &roster[b];
-        for (int j = 0; j < bk->n_humans; j++) {
-            human_t *h = &bk->humans[j];
+    /* STEP 5 — ADVANCE & route every roster human.
+     *
+     * Local hops and stay-puts go into the carryover list (no MPI).
+     * Inter-rank hops go into the outbox.
+     * Owner records (st->humans[i]) are updated in lockstep for any
+     * human we own so the final summary is accurate. */
+    int total_present = 0;
+    for (int b = 0; b < n_buckets; b++) total_present += bucket_n[b];
+
+    if (!quiet)
+        dstm_log_normal("Rank %d [t=%ld]: ROSTER total=%d (limbo=%d)\n",
+                        rank, t, total_present, bucket_n[LIMBO]);
+
+    for (int b = 0; b < n_buckets; b++) {
+        for (int j = 0; j < bucket_n[b]; j++) {
+            human_t *h = &bucket[b][j];
 
             int want_node, want_local;
             desired_cell(h, hod, &want_node, &want_local);
@@ -391,15 +425,34 @@ void zombie_timestep(zombie_state_t *st, dstm_time_t t, int quiet)
             h->next_hop_rank = dest_rank;
             h->legs_completed++;
 
-            cell_slot_t *ob = &st->outbox[dest_rank];
-            if (ob->n_humans >= CELL_CAPACITY) {
-                dstm_log_warning("Rank %d [t=%ld]: TRAVEL DROPPED human %d "
-                                 "— outbox to rank %d full\n",
-                                 rank, t, h->human_id, dest_rank);
+            if (dest_rank == rank) {
+                /* Local: drop into carryover; NEVER fails. */
+                carryover_push(st, h);
+                if (!quiet)
+                    dstm_log_normal("Rank %d [t=%ld]: STAY human %d at %d.%d "
+                                    "(state=%d)\n",
+                                    rank, t, h->human_id,
+                                    rank, h->cur_local, h->state);
             } else {
-                ob->humans[ob->n_humans++] = *h;
-                if (dest_rank != rank && b != LIMBO) {
-                    st->departures[from_local]++;
+                /* Inter-rank: outbox. Bounded by CELL_CAPACITY. */
+                cell_slot_t *ob = &st->outbox[dest_rank];
+                if (ob->n_humans >= CELL_CAPACITY) {
+                    /* Don't drop — keep them here in carryover so they
+                     * try again next hour. Roll back cur_node so they
+                     * don't think they've already moved. */
+                    h->cur_node = rank;
+                    /* cur_local stays as it was (from_local on a stay,
+                     * or want_local if dest_rank was want_node — but
+                     * either way they're still on our rank). */
+                    h->cur_local = from_local;
+                    carryover_push(st, h);
+                    dstm_log_warning("Rank %d [t=%ld]: outbox→%d FULL, "
+                                     "human %d held over at %d.%d\n",
+                                     rank, t, dest_rank,
+                                     h->human_id, rank, from_local);
+                } else {
+                    ob->humans[ob->n_humans++] = *h;
+                    if (b != LIMBO) st->departures[from_local]++;
                     if (!quiet)
                         dstm_log_normal("Rank %d [t=%ld]: SHIP human %d "
                                         "from %d.%d toward %d.%d via rank %d "
@@ -408,15 +461,10 @@ void zombie_timestep(zombie_state_t *st, dstm_time_t t, int quiet)
                                         rank, from_local,
                                         want_node, want_local, dest_rank,
                                         h->state);
-                } else if (dest_rank == rank && !quiet) {
-                    dstm_log_normal("Rank %d [t=%ld]: STAY human %d at %d.%d "
-                                    "(state=%d)\n",
-                                    rank, t, h->human_id,
-                                    rank, h->cur_local, h->state);
                 }
             }
 
-            /* Mirror back to owner record. */
+            /* Mirror to owner record so the final summary is accurate. */
             if (h->home_node == rank) {
                 int li = h->human_id - rank * st->nh;
                 if (li >= 0 && li < st->nh)
@@ -428,26 +476,27 @@ void zombie_timestep(zombie_state_t *st, dstm_time_t t, int quiet)
     volatile double sink = zombie_do_work(st->work);
     (void)sink;
 
-    free(roster);
-    free(contagious_per_cell);
-    free(owned_seen);
+    /* Cleanup roster. */
+    for (int b = 0; b < n_buckets; b++) free(bucket[b]);
+    free(bucket);
+    free(bucket_n);
+    free(bucket_cap);
+    free(contagious);
 
-    /* STEP 6 — PUT non-empty bundles. */
+    /* STEP 6 — PUT non-empty inter-rank bundles. */
     for (int dest = 0; dest < num_ranks; dest++) {
+        if (dest == rank) continue;
         if (st->outbox[dest].n_humans == 0) continue;
 
         size_t idx = bundle_index(dest, rank, num_ranks);
-        int delta;
-        if (dest == rank) {
-            delta = 1;
-        } else {
-            delta = dstm_distance_get(st->topology, rank, dest);
-            if (delta < 1) delta = 1;
-        }
+        int delta = dstm_distance_get(st->topology, rank, dest);
+        if (delta < 1) delta = 1;
 
         status = dstm_darray_put(st->cells, idx,
                                  &st->outbox[dest], t, delta);
         if (status != DSTM_SUCCESS)
             dstm_log_error("PUT to rank %d failed", dest);
     }
+
+    #undef BUCKET_PUSH
 }
