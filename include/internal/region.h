@@ -19,13 +19,13 @@
 extern "C" {
 #endif
 
+#include <jansson.h>
 #include <stdint.h>
 #include <stdlib.h>
 
-#include <jansson.h>
-
 #include "dstm.h"
 
+#include "internal/log.h"
 #include "internal/uthash.h"
 #include "internal/utlist.h"
 
@@ -40,7 +40,7 @@ extern "C" {
 /*******************************************************************************
  * REGION STATUS VALUES
  *
- * Used by the per-version state machine and the messaging layer (heartbeats).
+ * Used by the per-version state machine.
  ******************************************************************************/
 
 #define DSTM_REGION_STATUS_WRITABLE 0
@@ -89,8 +89,6 @@ typedef struct dstm_region_block_header_s dstm_region_block_header_t;
 struct dstm_region_ninfo_s {
 	int rank;
 	dstm_time_t time;
-	int state; /* DSTM_REGION_STATUS_WRITABLE or DSTM_REGION_STATUS_READABLE
-	            */
 	UT_hash_handle hh;
 };
 typedef struct dstm_region_ninfo_s dstm_region_ninfo_t;
@@ -150,6 +148,14 @@ struct dstm_region_s {
 	 * skip ALL neighbor distance checks, since no rank can issue new
 	 * PUT/GET messages.  Reset to 0 when the barrier exits. */
 	int barrier_all_drained;
+
+	/* Highest logical timestamp for which we have already broadcast a
+	 * HEARTBEAT to all neighbors.  Used to suppress redundant
+	 * heartbeats: dstm_put/dstm_get only emit a heartbeat when the
+	 * caller's `time` strictly exceeds this watermark.  Per-region
+	 * (and therefore per-session) so it resets to 0 with each fresh
+	 * dstm_start. */
+	int local_heartbeat_time;
 };
 
 /*******************************************************************************
@@ -166,12 +172,8 @@ void dstm_region_destroy(dstm_region_t **region);
  * Methods
  ******************************************************************************/
 
-int dstm_region_set_ninfo(dstm_region_t *region,
-                          int rank,
-                          dstm_time_t time,
-                          int state);
-int dstm_region_get_ninfo(dstm_region_t *region, int rank, dstm_time_t *time,
-			  int *state);
+int dstm_region_set_ninfo(dstm_region_t *region, int rank, dstm_time_t time);
+int dstm_region_get_ninfo(dstm_region_t *region, int rank, dstm_time_t *time);
 
 dstm_ptr_t dstm_region_malloc(dstm_region_t *r, size_t size);
 void dstm_region_free(dstm_region_t *r, dstm_ptr_t ptr);
@@ -187,8 +189,8 @@ dstm_region_version_t *dstm_region_version_find(dstm_region_t *region,
 /* Find or create a version for the given timestamp.  New versions are
  * created with an uninitialized buffer and WRITABLE status, inserted in
  * sorted order.  Returns NULL on allocation failure. */
-dstm_region_version_t *
-dstm_region_version_find_or_create(dstm_region_t *region, dstm_time_t time);
+dstm_region_version_t *dstm_region_version_find_or_create(dstm_region_t *region,
+                                                          dstm_time_t time);
 
 /* Destroy a single version: free its buffer and remove it from the
  * region's version list. */
@@ -212,74 +214,19 @@ json_t *dstm_darray_to_json(dstm_darray_t *a);
 /* Emit a log message at the given level with label: <json formatted value>.
  * The json object is created and dumped only when the level is active. */
 #define dstm_log_ptr(level, label, ptr)                                        \
-	do {                                                                   \
-		if ((level) <= dstm_log_level) {                               \
-			json_t *__j = dstm_ptr_to_json((ptr));                 \
-			char *__s = json_dumps(                                \
-			        __j, JSON_COMPACT | JSON_SORT_KEYS |   \
-			                     JSON_ENCODE_ANY);         \
-			dstm_log_printf((level), __FILE__, __func__, __LINE__, \
-			                "%s: %s\n", (label), __s);             \
-			free(__s);                                             \
-			json_decref(__j);                                      \
-		}                                                              \
-	} while (0)
+	dstm_log_json((level), (label), dstm_ptr_to_json((ptr)))
 
 #define dstm_log_region_ninfo(level, label, ni)                                \
-	do {                                                                   \
-		if ((level) <= dstm_log_level) {                               \
-			json_t *__j = dstm_region_ninfo_to_json((ni));         \
-			char *__s = json_dumps(                                \
-			        __j, JSON_COMPACT | JSON_SORT_KEYS |   \
-			                     JSON_ENCODE_ANY);         \
-			dstm_log_printf((level), __FILE__, __func__, __LINE__, \
-			                "%s: %s\n", (label), __s);             \
-			free(__s);                                             \
-			json_decref(__j);                                      \
-		}                                                              \
-	} while (0)
+	dstm_log_json((level), (label), dstm_region_ninfo_to_json((ni)))
 
 #define dstm_log_region_version(level, label, v)                               \
-	do {                                                                   \
-		if ((level) <= dstm_log_level) {                               \
-			json_t *__j = dstm_region_version_to_json((v));        \
-			char *__s = json_dumps(                                \
-			        __j, JSON_COMPACT | JSON_SORT_KEYS |   \
-			                     JSON_ENCODE_ANY);         \
-			dstm_log_printf((level), __FILE__, __func__, __LINE__, \
-			                "%s: %s\n", (label), __s);             \
-			free(__s);                                             \
-			json_decref(__j);                                      \
-		}                                                              \
-	} while (0)
+	dstm_log_json((level), (label), dstm_region_version_to_json((v)))
 
 #define dstm_log_region(level, label, r)                                       \
-	do {                                                                   \
-		if ((level) <= dstm_log_level) {                               \
-			json_t *__j = dstm_region_to_json((r));                \
-			char *__s = json_dumps(                                \
-			        __j, JSON_COMPACT | JSON_SORT_KEYS |   \
-			                     JSON_ENCODE_ANY);         \
-			dstm_log_printf((level), __FILE__, __func__, __LINE__, \
-			                "%s: %s\n", (label), __s);             \
-			free(__s);                                             \
-			json_decref(__j);                                      \
-		}                                                              \
-	} while (0)
+	dstm_log_json((level), (label), dstm_region_to_json((r)))
 
 #define dstm_log_darray(level, label, a)                                       \
-	do {                                                                   \
-		if ((level) <= dstm_log_level) {                               \
-			json_t *__j = dstm_darray_to_json((a));                \
-			char *__s = json_dumps(                                \
-			        __j, JSON_COMPACT | JSON_SORT_KEYS |   \
-			                     JSON_ENCODE_ANY);         \
-			dstm_log_printf((level), __FILE__, __func__, __LINE__, \
-			                "%s: %s\n", (label), __s);             \
-			free(__s);                                             \
-			json_decref(__j);                                      \
-		}                                                              \
-	} while (0)
+	dstm_log_json((level), (label), dstm_darray_to_json((a)))
 
 #ifdef __cplusplus
 }

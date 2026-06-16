@@ -699,6 +699,35 @@ START_TEST(test_version_find_or_create)
 }
 END_TEST
 
+START_TEST(test_version_buffer_zero_initialised)
+{
+	/* Newly-created versions must have all-zero buffers so that
+	 * applications which only put to specific offsets can rely on
+	 * unwritten offsets reading as zero rather than garbage. */
+	dstm_region_t *r = NULL;
+	const size_t region_size = 8192;
+	int err = dstm_region_create(&r, region_size);
+	ck_assert_int_eq(err, DSTM_SUCCESS);
+
+	dstm_region_version_t *v = dstm_region_version_find_or_create(r, 0);
+	ck_assert_ptr_nonnull(v);
+	ck_assert_ptr_nonnull(v->buffer);
+
+	const unsigned char *bytes = (const unsigned char *)v->buffer;
+	for (size_t i = 0; i < region_size; i++)
+		ck_assert_int_eq(bytes[i], 0);
+
+	/* Same guarantee for additional versions */
+	dstm_region_version_t *v2 = dstm_region_version_find_or_create(r, 17);
+	ck_assert_ptr_nonnull(v2);
+	const unsigned char *bytes2 = (const unsigned char *)v2->buffer;
+	for (size_t i = 0; i < region_size; i++)
+		ck_assert_int_eq(bytes2[i], 0);
+
+	dstm_region_destroy(&r);
+}
+END_TEST
+
 START_TEST(test_version_multiple)
 {
 	dstm_region_t *r = NULL;
@@ -919,6 +948,7 @@ Suite *region_suite(void)
 	tc_version = tcase_create("version");
 	tcase_add_test(tc_version, test_version_find_nonexistent);
 	tcase_add_test(tc_version, test_version_find_or_create);
+	tcase_add_test(tc_version, test_version_buffer_zero_initialised);
 	tcase_add_test(tc_version, test_version_multiple);
 	tcase_add_test(tc_version, test_version_destroy);
 	tcase_add_test(tc_version, test_version_buffer_independence);

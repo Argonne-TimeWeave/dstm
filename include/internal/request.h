@@ -21,6 +21,7 @@ extern "C" {
 
 #include "dstm.h"
 
+#include "internal/log.h"
 #include "internal/msg.h"
 
 /*******************************************************************************
@@ -129,6 +130,13 @@ int dstm_do_progress(dstm_time_t time);
 
 int dstm_request_new_tag(void);
 
+/* Reset the per-session monotonic tag counter back to its initial
+ * value.  Called from dstm_start so each session begins with a
+ * deterministic tag base.  With per-session communicators in place,
+ * tag uniqueness across sessions is no longer load-bearing for
+ * correctness; this reset is defense-in-depth. */
+void dstm_request_tag_reset(void);
+
 int dstm_request_cmp_departure(dstm_request_t *a, dstm_request_t *b);
 
 int dstm_request_create(dstm_request_t **r,
@@ -152,18 +160,7 @@ int dstm_request_progress_barrier(dstm_request_t *req);
 json_t *dstm_request_to_json(dstm_request_t *req);
 
 #define dstm_log_request(level, label, req)                                    \
-	do {                                                                   \
-		if ((level) <= dstm_log_level) {                               \
-			json_t *__j = dstm_request_to_json((req));             \
-			char *__s = json_dumps(                                \
-			    __j, JSON_COMPACT | JSON_SORT_KEYS |               \
-				     JSON_ENCODE_ANY);                         \
-			dstm_log_printf((level), __FILE__, __func__, __LINE__, \
-			                "%s: %s\n", (label), __s);             \
-			free(__s);                                             \
-			json_decref(__j);                                      \
-		}                                                              \
-	} while (0)
+	dstm_log_json((level), (label), dstm_request_to_json((req)))
 
 #ifdef __cplusplus
 }

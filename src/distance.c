@@ -642,6 +642,48 @@ void dstm_distance_destroy(dstm_distance_t **dist)
  * Extra functions
  ******************************************************************************/
 
+int dstm_distance_create_from_matrix(dstm_distance_t **ret, size_t size,
+                                     const int *matrix)
+{
+	if (ret == NULL || matrix == NULL)
+		goto err_inval;
+
+	if (size < 1 || size > DSTM_DISTANCE_MAX_SIZE)
+		goto err_inval;
+
+	/* Validate: diagonal must be zero, all entries non-negative. */
+	for (size_t i = 0; i < size; i++) {
+		if (matrix[i * size + i] != 0)
+			goto err_inval;
+		for (size_t j = 0; j < size; j++) {
+			if (matrix[i * size + j] < 0)
+				goto err_inval;
+		}
+	}
+
+	dstm_distance_t *dist = malloc(sizeof(*dist));
+	if (dist == NULL)
+		goto err_nomem;
+
+	dist->distances = calloc(size * size, sizeof(int));
+	if (dist->distances == NULL)
+		goto err_free_dist;
+
+	dist->size = size;
+	memcpy(dist->distances, matrix, size * size * sizeof(int));
+	*ret = dist;
+	return DSTM_SUCCESS;
+
+err_free_dist:
+	free(dist);
+err_nomem:
+	dstm_errno = DSTM_ENOMEM;
+	return -DSTM_ENOMEM;
+err_inval:
+	dstm_errno = DSTM_EINVAL;
+	return -DSTM_EINVAL;
+}
+
 int dstm_distance_create_copy(dstm_distance_t **dst, dstm_distance_t *src)
 {
 	if (dst == NULL || src == NULL || src->size == 0 ||

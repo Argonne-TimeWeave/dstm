@@ -47,6 +47,7 @@ noinst_include_internaldir = $(includedir)/internal
 noinst_include_internal_HEADERS = \
 				  include/internal/distance.h \
 				  include/internal/globals.h \
+				  include/internal/log.h \
 				  include/internal/msg.h \
 				  include/internal/region.h \
 				  include/internal/request.h \
@@ -77,7 +78,7 @@ libdstm_la_LIBADD = $(LTLIBOBJS) $(JANSSON_LIBS)
 ###############################################################################
 
 if HAVE_PYTHON
-SUBDIRS += bindings/python
+#SUBDIRS += bindings/python
 endif
 
 ###############################################################################

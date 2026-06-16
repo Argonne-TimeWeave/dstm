@@ -325,6 +325,7 @@ static int dstm_region_init_allocator(dstm_region_t *r)
 	r->versions = NULL;
 	r->barrier_token_count = 0;
 	r->barrier_all_drained = 0;
+	r->local_heartbeat_time = 0;
 
 	return DSTM_SUCCESS;
 
@@ -445,10 +446,7 @@ void dstm_region_destroy(dstm_region_t **region)
  * Neighbor Info Functions
  ******************************************************************************/
 
-int dstm_region_set_ninfo(dstm_region_t *region,
-                          int rank,
-                          dstm_time_t time,
-                          int state)
+int dstm_region_set_ninfo(dstm_region_t *region, int rank, dstm_time_t time)
 {
 	if (region == NULL)
 		return -DSTM_EINVAL;
@@ -460,23 +458,15 @@ int dstm_region_set_ninfo(dstm_region_t *region,
 		assert(ni != NULL);
 		ni->rank = rank;
 		ni->time = time;
-		ni->state = state;
 		HASH_ADD_INT(region->ninfos, rank, ni);
 	} else {
-		if (time > ni->time) {
-			/* new time: update both time and state */
+		if (time > ni->time)
 			ni->time = time;
-			ni->state = state;
-		} else if (time == ni->time && state > ni->state) {
-			/* same time, state advanced (WRITABLE -> READABLE) */
-			ni->state = state;
-		}
 	}
 	return DSTM_SUCCESS;
 }
 
-int dstm_region_get_ninfo(dstm_region_t *region, int rank, dstm_time_t *time,
-			  int *state)
+int dstm_region_get_ninfo(dstm_region_t *region, int rank, dstm_time_t *time)
 {
 	if (region == NULL)
 		return -DSTM_EINVAL;
@@ -485,12 +475,10 @@ int dstm_region_get_ninfo(dstm_region_t *region, int rank, dstm_time_t *time,
 	HASH_FIND_INT(region->ninfos, &rank, ni);
 	if (ni == NULL) {
 		*time = 0;
-		*state = DSTM_REGION_STATUS_WRITABLE;
 		return -DSTM_EINVAL;
 	}
 
 	*time = ni->time;
-	*state = ni->state;
 	return DSTM_SUCCESS;
 }
 
@@ -527,14 +515,14 @@ dstm_region_version_t *dstm_region_version_find(dstm_region_t *region,
 	return NULL;
 }
 
-dstm_region_version_t *
-dstm_region_version_find_or_create(dstm_region_t *region, dstm_time_t time)
+dstm_region_version_t *dstm_region_version_find_or_create(dstm_region_t *region,
+                                                          dstm_time_t time)
 {
 	if (region == NULL)
 		return NULL;
 
-	dstm_region_version_t *existing = dstm_region_version_find(region,
-	                                                           time);
+	dstm_region_version_t *existing =
+	        dstm_region_version_find(region, time);
 	if (existing != NULL)
 		return existing;
 
@@ -544,7 +532,11 @@ dstm_region_version_find_or_create(dstm_region_t *region, dstm_time_t time)
 
 	v->time = time;
 	v->status = DSTM_REGION_STATUS_WRITABLE;
-	v->buffer = malloc(region->size);
+	/* Zero-initialise so that offsets which are never put-targeted at
+	 * this timestamp read as zero rather than uninitialised garbage.
+	 * Applications relying on the "publish only what you change"
+	 * pattern (e.g. partial inbox slots) depend on this guarantee. */
+	v->buffer = calloc(1, region->size);
 	if (v->buffer == NULL) {
 		free(v);
 		return NULL;
@@ -662,10 +654,8 @@ json_t *dstm_region_ninfo_to_json(dstm_region_ninfo_t *ni)
 {
 	if (ni == NULL)
 		return json_null();
-	return json_pack("{s:i, s:I, s:s}", "rank", ni->rank, "time",
-	                 (json_int_t)ni->time, "state",
-	                 ni->state == DSTM_REGION_STATUS_READABLE ? "readable" :
-	                                                            "writable");
+	return json_pack("{s:I, s:i}", "time", (json_int_t)ni->time, "rank",
+	                 ni->rank);
 }
 
 json_t *dstm_region_version_to_json(dstm_region_version_t *v)
@@ -688,8 +678,8 @@ json_t *dstm_region_version_to_json(dstm_region_version_t *v)
 		break;
 	}
 	json_t *buf = json_sprintf("%p", v->buffer);
-	return json_pack("{s:s, s:s, s:I}", "buffer", buf, "status", status_str,
-	                 "time", (json_int_t)v->time);
+	return json_pack("{s:I, s:s, s:o}", "time", (json_int_t)v->time,
+	                 "status", status_str, "buffer", buf);
 }
 
 json_t *dstm_region_to_json(dstm_region_t *r)
@@ -697,6 +687,6 @@ json_t *dstm_region_to_json(dstm_region_t *r)
 	if (r == NULL)
 		return json_null();
 	json_t *buf = json_sprintf("%p", r->buffer);
-	return json_pack("{s:s, s:I, s:I}", "buffer", buf, "size",
-	                 (json_int_t)r->size, "time", (json_int_t)r->time);
+	return json_pack("{s:I, s:I, s:o}", "time", (json_int_t)r->time, "size",
+	                 (json_int_t)r->size, "buffer", buf);
 }
