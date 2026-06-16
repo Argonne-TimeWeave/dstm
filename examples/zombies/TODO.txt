@@ -1,7 +1,8 @@
 figure out correct value for cell_capcity
 
-it would be cool if zombies moved randomly
-    and then people ran away?
+zombies now wander towards the local cell with the highest population
+    or "POPULAR" locations
+        humans do not avoid zombies currently...
 
 i think some people never actually make it to their events...
     if someone's event is three hours away but the duration of the event is only two hours
@@ -12,3 +13,10 @@ i think some people never actually make it to their events...
 
 high risk/low risk humans?
     high risk may get infected across local locations?
+
+## This is 8 nodes; 4 ranks per node
+mpirun -n 32 --hostfile "$COBALT_NODEFILE" \
+    --prefix "$(dirname "$(dirname "$(which mpirun)")")" \
+    --map-by ppr:4:node \
+    -x LD_LIBRARY_PATH -x PATH \
+    ./zombies
