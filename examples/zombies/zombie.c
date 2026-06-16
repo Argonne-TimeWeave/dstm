@@ -197,7 +197,7 @@ static void carryover_push(zombie_state_t *st, const human_t *h)
  * is sentineled (empty) but never used to ship humans, so there's
  * no capacity contention there. */
 
-void zombie_timestep(zombie_state_t *st, dstm_time_t t, int quiet)
+void zombie_timestep(zombie_state_t *st, dstm_time_t t)
 {
     int rank      = st->rank;
     int num_ranks = st->num_ranks;
@@ -206,8 +206,7 @@ void zombie_timestep(zombie_state_t *st, dstm_time_t t, int quiet)
     int hod       = hour_of_day((int)t);
     int dod       = day_of((int)t);
 
-    if (!quiet)
-        dstm_log_normal("Rank %d [t=%ld d=%d h=%02d]: === step ===\n",
+    dstm_log_normal("Rank %d [t=%ld d=%d h=%02d]: === step ===\n",
                         rank, t, dod, hod);
 
     /* STEP 0 — day boundary: ticks + schedule re-roll (owner-side). */
@@ -300,8 +299,7 @@ void zombie_timestep(zombie_state_t *st, dstm_time_t t, int quiet)
         }
         if (recv.n_humans == 0) continue;
 
-        if (!quiet)
-            dstm_log_normal("Rank %d [t=%ld]: bundle src=%d carries %d human(s)\n",
+        dstm_log_normal("Rank %d [t=%ld]: bundle src=%d carries %d human(s)\n",
                             rank, t, src, recv.n_humans);
 
         for (int i = 0; i < recv.n_humans; i++) {
@@ -363,8 +361,7 @@ void zombie_timestep(zombie_state_t *st, dstm_time_t t, int quiet)
         if (bucket_n[l] == 0) continue;
         int cont = contagious[l];
 
-        if (!quiet)
-            dstm_log_normal("Rank %d [t=%ld]: cell %d.%d pop=%d contagious=%d\n",
+        dstm_log_normal("Rank %d [t=%ld]: cell %d.%d pop=%d contagious=%d\n",
                             rank, t, rank, l, bucket_n[l], cont);
         if (cont == 0) continue;
 
@@ -397,8 +394,7 @@ void zombie_timestep(zombie_state_t *st, dstm_time_t t, int quiet)
     int total_present = 0;
     for (int b = 0; b < n_buckets; b++) total_present += bucket_n[b];
 
-    if (!quiet)
-        dstm_log_normal("Rank %d [t=%ld]: ROSTER total=%d (limbo=%d)\n",
+    dstm_log_normal("Rank %d [t=%ld]: ROSTER total=%d (limbo=%d)\n",
                         rank, t, total_present, bucket_n[LIMBO]);
 
     for (int b = 0; b < n_buckets; b++) {
@@ -428,8 +424,7 @@ void zombie_timestep(zombie_state_t *st, dstm_time_t t, int quiet)
             if (dest_rank == rank) {
                 /* Local: drop into carryover; NEVER fails. */
                 carryover_push(st, h);
-                if (!quiet)
-                    dstm_log_normal("Rank %d [t=%ld]: STAY human %d at %d.%d "
+                dstm_log_normal("Rank %d [t=%ld]: STAY human %d at %d.%d "
                                     "(state=%d)\n",
                                     rank, t, h->human_id,
                                     rank, h->cur_local, h->state);
@@ -453,8 +448,7 @@ void zombie_timestep(zombie_state_t *st, dstm_time_t t, int quiet)
                 } else {
                     ob->humans[ob->n_humans++] = *h;
                     if (b != LIMBO) st->departures[from_local]++;
-                    if (!quiet)
-                        dstm_log_normal("Rank %d [t=%ld]: SHIP human %d "
+                    dstm_log_normal("Rank %d [t=%ld]: SHIP human %d "
                                         "from %d.%d toward %d.%d via rank %d "
                                         "(state=%d)\n",
                                         rank, t, h->human_id,
