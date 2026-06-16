@@ -56,6 +56,8 @@ typedef struct zombie_state_t {
     int               *departures;
     int               *arrivals;
     int               *infections;
+
+    int               *last_population;
 } zombie_state_t;
 
 void zombie_init(zombie_state_t *st,
