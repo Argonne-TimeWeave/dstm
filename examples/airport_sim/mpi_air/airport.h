@@ -9,6 +9,8 @@
 
 #define NUM_GATES 24
 
+#define LOGGING 1 //lazy
+
 typedef enum {
     TIER_HUB      = 0,
     TIER_REGIONAL = 1,
