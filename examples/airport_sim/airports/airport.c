@@ -172,6 +172,7 @@ void airport_timestep(airport_state_t *state, dstm_time_t t, int quiet)
     int num_ranks = state->num_ranks;
     int na = state->na;
     int status;
+    double start, end, sum = 0.0;
 
     dstm_log_normal("Rank %d [t=%ld]: === timestep ===\n", rank, t);
 
@@ -190,9 +191,18 @@ void airport_timestep(airport_state_t *state, dstm_time_t t, int quiet)
     for (int g = 0; g < NUM_GATES; g++) {
         size_t idx = (size_t)rank * NUM_GATES + g;
 
+        if (LOGGING)
+            start = MPI_Wtime();
+
         status = dstm_darray_get_or_default(state->gates, idx,
                                             &recv_gate, t, 0,
                                             &empty_gate);
+        
+        if (LOGGING) {
+            end = MPI_Wtime();
+            sum += end - start;
+        }
+
         if (status != DSTM_SUCCESS) {
             dstm_log_error("GET failed on gate %d", g);
             continue;
@@ -268,6 +278,9 @@ void airport_timestep(airport_state_t *state, dstm_time_t t, int quiet)
             }
         }
     }
+    
+    if (LOGGING)
+        dstm_log_normal("GET %f\n", sum);
 
     /* STEP 4 — each local airport independently decides to inject a flight */
     if (num_ranks > 1) {
@@ -334,6 +347,9 @@ void airport_timestep(airport_state_t *state, dstm_time_t t, int quiet)
         }
     }
 
+    if (LOGGING)
+        sum = 0.0;
+
     /* STEP 5 — send outbox (one PUT per remote rank that has flights) */
     for (int dest = 0; dest < num_ranks; dest++) {
         if (dest == rank)
@@ -344,9 +360,21 @@ void airport_timestep(airport_state_t *state, dstm_time_t t, int quiet)
         size_t idx = gate_index(dest, rank);
         int delta = dstm_distance_get(state->topology, rank, dest);
 
+        if (LOGGING)
+            start = MPI_Wtime();
+
         status = dstm_darray_put(state->gates, idx,
                                  &state->outbox[dest], t, delta);
+        
+        if (LOGGING) {
+            end = MPI_Wtime();
+            sum += end - start;
+        }
+
         if (status != DSTM_SUCCESS)
             dstm_log_error("PUT to rank %d gate failed", dest);
     }
+    
+    if (LOGGING)
+        dstm_log_normal("PUT %f\n", sum);
 }  
