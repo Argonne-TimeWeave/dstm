@@ -22,8 +22,6 @@
 #include "human.h"
 #include "zombie.h"
 
-static int is_pow2(int x) { return x > 0 && (x & (x - 1)) == 0; }
-
 static void usage(const char *prog)
 {
     fprintf(stderr,
@@ -52,10 +50,6 @@ int main(int argc, char *argv[])
         }
     }
 
-    if (!is_pow2(nl)) {
-        fprintf(stderr, "--nl must be a power of 2 (got %d)\n", nl);
-        return 1;
-    }
     if (nh < 1)   nh = 1;
     if (work < 0) work = 0;
 
@@ -156,7 +150,7 @@ int main(int argc, char *argv[])
     double t_start = MPI_Wtime();
 
     for (dstm_time_t t = 0; t < timesteps; t++) {
-        zombie_timestep(&state, t, quiet);
+        zombie_timestep(&state, t);
     }
 
     dstm_time_t last_time = timesteps + 1;
