@@ -22,7 +22,7 @@
 
 typedef enum {
     HSTATE_HEALTHY  = 0,
-    HSTATE_INFECTED = 1,   /* contagious, still walking, ticking down */
+    HSTATE_INFECTED = 1,   
     HSTATE_ZOMBIE   = 2
 } human_state_t;
 
