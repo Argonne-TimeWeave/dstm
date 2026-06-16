@@ -109,6 +109,7 @@ AC_CONFIG_FILES([Makefile
          examples/airport_sim/Makefile
          examples/airport_sim/airports/Makefile
          examples/airport_sim/mpi_air/Makefile
+         examples/zombies/Makefile
 		 include/dstm/version.h
 		 tests/mpi/bats-driver.sh
 		 tests/mpi/Makefile])
