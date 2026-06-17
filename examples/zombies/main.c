@@ -99,10 +99,14 @@ int main(int argc, char *argv[])
         printf("Zombie sim: %d ranks (%dx%d), %d locals/rank (%d total), "
                "%d humans/rank (%d total), cell cap=%d, "
                "incubation=%d days, work=%d\n"
+               "Risk model: %d%% high-risk, near-cell radius=%d "
+               "(same=%d%%, near=%d%%)\n"
                "Patient zero: rank=%d local-human=%d\n",
                num_ranks, rows, cols, nl, total_cells,
                nh, total_humans, CELL_CAPACITY,
                INFECT_DAYS_TO_ZOMBIE, work,
+               HIGH_RISK_FRACTION_PCT, HIGH_RISK_RADIUS,
+               INFECT_PROB_SAME_PCT, INFECT_PROB_NEAR_PCT,
                patient_zero_rank, patient_zero_local);
     }
 
@@ -165,11 +169,17 @@ int main(int argc, char *argv[])
     /* Gather counters + final population stats. */
     int *all_dep = NULL, *all_arr = NULL, *all_inf = NULL;
     int local_healthy = 0, local_infected = 0, local_zombie = 0;
+    int local_hr_total = 0, local_hr_infected_or_worse = 0;
     for (int i = 0; i < nh; i++) {
-        switch (state.humans[i].state) {
+        human_t *h = &state.humans[i];
+        switch (h->state) {
             case HSTATE_HEALTHY:  local_healthy++;  break;
             case HSTATE_INFECTED: local_infected++; break;
             case HSTATE_ZOMBIE:   local_zombie++;   break;
+        }
+        if (h->risk == HRISK_HIGH) {
+            local_hr_total++;
+            if (h->state != HSTATE_HEALTHY) local_hr_infected_or_worse++;
         }
     }
 
@@ -187,6 +197,10 @@ int main(int argc, char *argv[])
     MPI_Reduce(&local_infected, &tot_infected, 1, MPI_INT, MPI_SUM, 0, MPI_COMM_WORLD);
     MPI_Reduce(&local_zombie,   &tot_zombie,   1, MPI_INT, MPI_SUM, 0, MPI_COMM_WORLD);
 
+    int tot_hr_total = 0, tot_hr_infected = 0;
+    MPI_Reduce(&local_hr_total,             &tot_hr_total,    1, MPI_INT, MPI_SUM, 0, MPI_COMM_WORLD);
+    MPI_Reduce(&local_hr_infected_or_worse, &tot_hr_infected, 1, MPI_INT, MPI_SUM, 0, MPI_COMM_WORLD);
+
     if (rank == 0) {
         int total_dep = 0, total_arr = 0, total_inf = 0;
         for (int i = 0; i < total_cells; i++) {
@@ -202,10 +216,17 @@ int main(int argc, char *argv[])
                "Zombie     %10d\n"
                "-------------------------\n"
                "Total      %10d\n"
+               "\n"
+               "High-risk population:   %d / %d  (%.1f%%)\n"
+               "High-risk infected:     %d / %d  (%.1f%% of HR)\n"
                "=================================================\n",
                "Status", "Count",
                tot_healthy, tot_infected, tot_zombie,
-               tot_healthy + tot_infected + tot_zombie);
+               tot_healthy + tot_infected + tot_zombie,
+               tot_hr_total, total_humans,
+               100.0 * tot_hr_total / total_humans,
+               tot_hr_infected, tot_hr_total,
+               tot_hr_total > 0 ? 100.0 * tot_hr_infected / tot_hr_total : 0.0);
 
         double tsps = (elapsed > 0.0) ? (timesteps / elapsed) : 0.0;
         printf("\n=============== RESULTS ===============\n"

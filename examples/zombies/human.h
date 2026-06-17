@@ -26,10 +26,16 @@ typedef enum {
     HSTATE_ZOMBIE   = 2
 } human_state_t;
 
+typedef enum {
+    HRISK_LOW = 0,
+    HRISK_HIGH = 1
+} human_risk_t;
+
 typedef struct human_t {
     int           valid;            /* slot occupied? */
     int           human_id;         /* globally unique */
     human_state_t state;
+    human_risk_t  risk;
     int           days_infected;    /* 0 until infected */
     int           last_infect_day;  /* day on which days_infected last advanced */
 
