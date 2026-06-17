@@ -12,6 +12,9 @@ const int   loc_tier_weight[] = {       60,       30,      10 };
 
 cell_slot_t empty_cell = { .n_humans = 0 };
 
+#define MAX_TRAVEL_HOURS   2
+#define EVENT_MIN_HOURS    2
+
 /* ---------- generic helpers ---------- */
 
 double zombie_do_work(int work)
@@ -38,31 +41,63 @@ int human_find_next_hop(zombie_state_t *st, int from_rank, int to_rank)
     }
 }
 
+/* Pick an event cell that the human can actually reach from home_node
+ * within max_travel_hours. Weighted by tier popularity, restricted to
+ * the reachable set. Falls back to (home_node, home_local) if nothing
+ * qualifies (shouldn't happen unless max_travel_hours == 0 and the
+ * home cell is somehow filtered out). */
 void pick_event_location(zombie_state_t *st, event_slot_t slot,
+                         int home_node, int home_local,
+                         int max_travel_hours,
                          int *out_node, int *out_local)
 {
     (void)slot;
 
     int total_cells = st->num_ranks * st->nl;
-    long total_weight = 0;
-    for (int i = 0; i < total_cells; i++)
-        total_weight += loc_tier_weight[st->loc_tiers[i]];
 
-    long r = (long)rand() % (total_weight > 0 ? total_weight : 1);
+    /* First pass: total weight across reachable cells only. */
+    long total_weight = 0;
+    for (int i = 0; i < total_cells; i++) {
+        int node = i / st->nl;
+        int cost = (node == home_node)
+                    ? 0
+                    : dstm_distance_get(st->topology, home_node, node);
+        if (cost <= max_travel_hours)
+            total_weight += loc_tier_weight[st->loc_tiers[i]];
+    }
+
+    if (total_weight <= 0) {
+        /* No reachable cell — stay home. */
+        *out_node  = home_node;
+        *out_local = home_local;
+        return;
+    }
+
+    long r = (long)rand() % total_weight;
     long acc = 0;
     for (int i = 0; i < total_cells; i++) {
+        int node = i / st->nl;
+        int cost = (node == home_node)
+                    ? 0
+                    : dstm_distance_get(st->topology, home_node, node);
+        if (cost > max_travel_hours) continue;
+
         acc += loc_tier_weight[st->loc_tiers[i]];
         if (r < acc) {
-            *out_node  = i / st->nl;
+            *out_node  = node;
             *out_local = i % st->nl;
             return;
         }
     }
-    *out_node  = 0;
-    *out_local = 0;
+
+    /* Shouldn't reach here, but be safe. */
+    *out_node  = home_node;
+    *out_local = home_local;
 }
 
-static void make_event(zombie_state_t *st, event_slot_t slot, event_t *out)
+static void make_event(zombie_state_t *st, event_slot_t slot,
+                       int home_node, int home_local,
+                       event_t *out)
 {
     int start_min, end_max;
     if (slot == SLOT_MORNING) {
@@ -70,16 +105,31 @@ static void make_event(zombie_state_t *st, event_slot_t slot, event_t *out)
     } else {
         start_min = AFTERNOON_START_MIN; end_max = AFTERNOON_END_MAX;
     }
-    int span_start = end_max - start_min;
-    int start = start_min + (rand() % (span_start > 0 ? span_start : 1));
+
+    /* Pick a start such that an event of at least EVENT_MIN_HOURS fits
+     * inside the slot window. */
+    int latest_start = end_max - EVENT_MIN_HOURS;
+    if (latest_start < start_min) latest_start = start_min;
+    int span_start = latest_start - start_min + 1;
+    int start = start_min + (rand() % span_start);
+
+    /* Length: clamp into [EVENT_MIN_HOURS, EVENT_MAX_HOURS] and into
+     * what's left in the slot window. */
     int max_len = end_max - start;
-    if (max_len < 1) max_len = 1;
     if (max_len > EVENT_MAX_HOURS) max_len = EVENT_MAX_HOURS;
-    int len = 1 + (rand() % max_len);
+    if (max_len < EVENT_MIN_HOURS) max_len = EVENT_MIN_HOURS;
+    int len_span = max_len - EVENT_MIN_HOURS + 1;
+    int len = EVENT_MIN_HOURS + (rand() % len_span);
 
     out->time_start = start;
     out->time_end   = start + len;
-    pick_event_location(st, slot, &out->location_node, &out->location_local);
+
+    /* Budget: humans should arrive before the event ENDS, ideally before
+     * it starts. We require travel <= MAX_TRAVEL_HOURS, which is also
+     * <= EVENT_MIN_HOURS, so even a late-arriving human gets on-site time. */
+    pick_event_location(st, slot, home_node, home_local,
+                        MAX_TRAVEL_HOURS,
+                        &out->location_node, &out->location_local);
 }
 
 /* ---------- lifecycle ---------- */
@@ -125,6 +175,13 @@ void zombie_init(zombie_state_t *st,
         h->valid           = 1;
         h->human_id        = rank * nh + i;
         h->state           = HSTATE_HEALTHY;
+
+        {
+            unsigned hash = (unsigned)(h->human_id * 2654435761u) ^ (unsigned)seed;
+            h->risk = ((hash % 100) < HIGH_RISK_FRACTION_PCT)
+                ? HRISK_HIGH : HRISK_LOW;
+        }           
+
         h->days_infected   = 0;
         h->last_infect_day = -1;
         h->home_node       = rank;
@@ -135,8 +192,8 @@ void zombie_init(zombie_state_t *st,
         h->dest_local      = h->home_local;
         h->next_hop_rank   = rank;
         h->legs_completed  = 0;
-        make_event(st, SLOT_MORNING,   &h->morning_event);
-        make_event(st, SLOT_AFTERNOON, &h->afternoon_event);
+        make_event(st, SLOT_MORNING, h->home_node, h->home_local, &h->morning_event);
+        make_event(st, SLOT_AFTERNOON, h->home_node, h->home_local, &h->afternoon_event);
         snprintf(h->payload, PAYLOAD_MAX, "H%d@%d.%d",
                  h->human_id, h->home_node, h->home_local);
     }
@@ -267,8 +324,8 @@ void zombie_timestep(zombie_state_t *st, dstm_time_t t)
                 }
             }
             if (h->state != HSTATE_ZOMBIE) {
-                make_event(st, SLOT_MORNING,   &h->morning_event);
-                make_event(st, SLOT_AFTERNOON, &h->afternoon_event);
+                make_event(st, SLOT_MORNING, h->home_node, h->home_local, &h->morning_event);
+                make_event(st, SLOT_AFTERNOON, h->home_node, h->home_local, &h->afternoon_event);
             }
         }
         /* Also tick any infected human in carryover (they may be away
@@ -287,8 +344,8 @@ void zombie_timestep(zombie_state_t *st, dstm_time_t t)
                 }
             }
             if (h->state != HSTATE_ZOMBIE) {
-                make_event(st, SLOT_MORNING,   &h->morning_event);
-                make_event(st, SLOT_AFTERNOON, &h->afternoon_event);
+                make_event(st, SLOT_MORNING, h->home_node, h->home_local, &h->morning_event);
+                make_event(st, SLOT_AFTERNOON, h->home_node, h->home_local, &h->afternoon_event);
             }
         }
     }
@@ -401,20 +458,52 @@ void zombie_timestep(zombie_state_t *st, dstm_time_t t)
     /* STEP 4 — INFECTION per cell. */
     for (int l = 0; l < nl; l++) {
         if (bucket_n[l] == 0) continue;
-        int cont = contagious[l];
 
-        dstm_log_normal("Rank %d [t=%ld]: cell %d.%d pop=%d contagious=%d\n",
-                            rank, t, rank, l, bucket_n[l], cont);
-        if (cont == 0) continue;
+        int same_cont = contagious[l];
+
+        /* Pre-compute nearby contagious count for high-risk humans in
+         * this cell (sum over neighbors within HIGH_RISK_RADIUS, excluding
+         * self-cell since that's accounted for separately). */
+        int near_cont = 0;
+        for (int ll = 0; ll < nl; ll++) {
+            if (ll == l) continue;
+            int d = ll - l;
+            if (d < 0) d = -d;
+            if (d <= HIGH_RISK_RADIUS)
+                near_cont += contagious[ll];
+        }
+
+        dstm_log_normal("Rank %d [t=%ld]: cell %d.%d pop=%d "
+                        "same_cont=%d near_cont=%d\n",
+                        rank, t, rank, l, bucket_n[l],
+                        same_cont, near_cont);
+
+        if (same_cont == 0 && near_cont == 0) continue;
 
         for (int i = 0; i < bucket_n[l]; i++) {
             human_t *h = &bucket[l][i];
             if (h->state != HSTATE_HEALTHY) continue;
 
             int infected_now = 0;
-            for (int k = 0; k < cont; k++) {
-                if ((rand() % 100) < 30) { infected_now = 1; break; }
+
+            /* Same-cell exposure rolls. */
+            for (int k = 0; k < same_cont; k++) {
+                if ((rand() % 100) < INFECT_PROB_SAME_PCT) {
+                    infected_now = 1;
+                    break;
+                }
             }
+
+            /* Nearby-cell exposure rolls — high-risk humans only. */
+            if (!infected_now && h->risk == HRISK_HIGH && near_cont > 0) {
+                for (int k = 0; k < near_cont; k++) {
+                    if ((rand() % 100) < INFECT_PROB_NEAR_PCT) {
+                        infected_now = 1;
+                        break;
+                    }
+                }
+            }
+
             if (!infected_now) continue;
 
             h->state           = HSTATE_INFECTED;
@@ -422,8 +511,11 @@ void zombie_timestep(zombie_state_t *st, dstm_time_t t)
             h->last_infect_day = dod;
             st->infections[l]++;
 
-            dstm_log_normal("Rank %d [t=%ld]: INFECTED human %d at %d.%d\n",
-                            rank, t, h->human_id, rank, l);
+            dstm_log_normal("Rank %d [t=%ld]: INFECTED human %d at %d.%d "
+                            "(%s risk, %s exposure)\n",
+                            rank, t, h->human_id, rank, l,
+                            h->risk == HRISK_HIGH ? "HIGH" : "low",
+                            same_cont > 0 ? "same-cell" : "nearby-cell");
         }
     }
     
