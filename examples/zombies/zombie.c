@@ -199,6 +199,7 @@ void zombie_init(zombie_state_t *st,
     }
 
     st->last_population = calloc(nl, sizeof(int));
+    st->last_zombie_count = calloc(nl, sizeof(int));
 }
 
 void zombie_destroy(zombie_state_t *st)
@@ -210,6 +211,7 @@ void zombie_destroy(zombie_state_t *st)
     free(st->arrivals);
     free(st->infections);
     free(st->last_population);
+    free(st->last_zombie_count);
 }
 
 /* ---------- per-human scheduling ---------- */
@@ -262,16 +264,75 @@ static void desired_cell(zombie_state_t *st, human_t *h, int hod,
         return;
     }
      
+    /* --- HUMAN LOGIC (healthy or infected) --- */
     event_t *m = &h->morning_event;
     event_t *a = &h->afternoon_event;
 
+    int base_node, base_local;
     if (hod >= m->time_start && hod < m->time_end) {
-        *want_node = m->location_node; *want_local = m->location_local;
+        base_node = m->location_node; base_local = m->location_local;
     } else if (hod >= a->time_start && hod < a->time_end) {
-        *want_node = a->location_node; *want_local = a->location_local;
+        base_node = a->location_node; base_local = a->location_local;
     } else {
-        *want_node = h->home_node; *want_local = h->home_local;
+        base_node = h->home_node; base_local = h->home_local;
     }
+
+    /* ZOMBIE AVOIDANCE: If currently on this rank, check for nearby zombies */
+    if (h->cur_node == st->rank) {
+        int dominated_by_zombie = 0;
+        
+        /* Check if destination cell has zombies */
+        if (base_node == st->rank && st->last_zombie_count[base_local] > 0) {
+            dominated_by_zombie = 1;
+        }
+        
+        /* Also check current cell — if zombies here, flee immediately */
+        if (h->cur_local >= 0 && h->cur_local < st->nl &&
+            st->last_zombie_count[h->cur_local] > 0) {
+            dominated_by_zombie = 1;
+        }
+        
+        if (dominated_by_zombie) {
+            /* Find safest local cell: no zombies, lowest population */
+            int best_safe = -1;
+            int best_safe_pop = INT_MAX;
+            
+            for (int l = 0; l < st->nl; l++) {
+                if (st->last_zombie_count[l] == 0) {
+                    if (st->last_population[l] < best_safe_pop) {
+                        best_safe_pop = st->last_population[l];
+                        best_safe = l;
+                    }
+                }
+            }
+            
+            if (best_safe >= 0) {
+                *want_node  = st->rank;
+                *want_local = best_safe;
+                return;
+            }
+            
+            /* All local cells have zombies — flee to another rank */
+            int total_cells = st->num_ranks * st->nl;
+            int quiet_remote[total_cells];
+            int n_quiet = 0;
+            for (int i = 0; i < total_cells; i++) {
+                int node = i / st->nl;
+                if (node != st->rank && st->loc_tiers[i] == LOC_QUIET) {
+                    quiet_remote[n_quiet++] = i;
+                }
+            }
+            if (n_quiet > 0) {
+                int pick = quiet_remote[rand() % n_quiet];
+                *want_node  = pick / st->nl;
+                *want_local = pick % st->nl;
+                return;
+            }
+        }
+    }
+
+    *want_node = base_node;
+    *want_local = base_local;
 }
 
 /* Push a human into the local carryover list, growing as needed. */
@@ -537,8 +598,17 @@ void zombie_timestep(zombie_state_t *st, dstm_time_t t)
         }
     }
     
-    for (int l = 0; l < nl; l++)
+    for (int l = 0; l < nl; l++) {
         st->last_population[l] = bucket_n[l];
+        
+        int zcount = 0;
+        for (int j = 0; j < bucket_n[l]; j++) {
+            if (bucket[l][j].state == HSTATE_ZOMBIE) 
+                zcount++;
+        }
+
+        st->last_zombie_count[l] = zcount;
+    }
 
     /* STEP 5 — ADVANCE & route every roster human.
      *
