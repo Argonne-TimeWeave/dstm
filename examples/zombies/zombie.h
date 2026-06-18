@@ -4,6 +4,8 @@
 #include <dstm.h>
 #include "human.h"
 
+#include <limits.h>
+
 typedef enum {
     LOC_POPULAR = 0,
     LOC_NORMAL  = 1,
@@ -65,6 +67,7 @@ typedef struct zombie_state_t {
     int               *infections;
 
     int               *last_population;
+    int               *last_zombie_count;
 } zombie_state_t;
 
 void zombie_init(zombie_state_t *st,
