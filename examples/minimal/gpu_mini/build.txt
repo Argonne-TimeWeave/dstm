@@ -1,0 +1,13 @@
+p100
+
+module load cuda/12.9.1
+
+export LD_LIBRARY_PATH=$(realpath ../../../.libs):$MPI_PREFIX/lib:$LD_LIBRARY_PATH
+
+nvcc -x cu mini_gpu.cu -o mini \
+    -I$HOME/opt/check/include \
+    -I../../../include -I../../../include/internal \
+    -I$MPI_PREFIX/include \
+    -L$HOME/opt/check/lib -L../../../.libs \
+    -L$MPI_PREFIX/lib -lmpi \
+    -ldstm
