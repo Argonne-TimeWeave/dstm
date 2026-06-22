@@ -37,11 +37,9 @@
 #define N 4
 static const int edges[][3] = {
     {0, 1, 2},
-    {0, 2, 5},
     {0, 3, 2},
     {1, 2, 3},
     {1, 3, 1},
-    {2, 3, 9},
 };
 #define NUM_EDGES (sizeof(edges) / sizeof(edges[0]))
 
@@ -54,7 +52,7 @@ typedef struct {
     int         hops_taken;
     dstm_time_t origin_time;
     uint64_t    id;
-    char        payload[PACKET_SIZE - 24];
+    char        payload[PACKET_SIZE - 32];
 } mailbox_entry_t;
 
 typedef struct {
@@ -274,9 +272,9 @@ int main(int argc, char *argv[])
     }
 
     dstm_darray_t *mailbox;
-    status = dstm_darray_create_equal(&mailbox,
-                                      sizeof(mailbox_slot_t),
-                                      g.total_slots);
+    status = dstm_darray_create(&mailbox,
+                                sizeof(mailbox_slot_t),
+                                (size_t)g.in_deg[rank]);
     if (status != DSTM_SUCCESS) {
         dstm_log_error("Failed to create mailbox");
         return -1;
@@ -314,7 +312,9 @@ int main(int argc, char *argv[])
                                                 &recv_slot, t, 0,
                                                 &empty_slot);
             if (status != DSTM_SUCCESS) {
-                dstm_log_error("GET failed on slot from %d", src_u);
+                int link_delta = dstm_distance_get(topology, src_u, rank);
+                dstm_log_error("GET failed on slot from %d at t=%ld (link delta=%d, status=%d)",
+                               src_u, t, link_delta, status);
                 continue;
             }
 
