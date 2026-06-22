@@ -15,10 +15,10 @@ set -u
 # ---------- Config ----------
 RANKS=(1 2 4 8 16 32 64 128 256)
 NODES=8
-TOTAL_AIRPORTS=2048
-TIMESTEPS=16
-TRIALS=1
-WORK=10000
+TOTAL_AIRPORTS=16384
+TIMESTEPS=32
+TRIALS=3
+WORK=100000
 SEED=42
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -26,11 +26,10 @@ EXAMPLES_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 declare -A BUILDS=(
     [dstm]="$EXAMPLES_DIR/airports/airports"
-    [mpi]="$EXAMPLES_DIR/mpi_air/airports"
 )
 
 # Order to iterate the builds in (associative arrays don't preserve order).
-BUILD_ORDER=(dstm mpi)
+BUILD_ORDER=(dstm)
 
 # ---------- Sanity checks ----------
 if [[ -z "${COBALT_NODEFILE:-}" ]]; then
