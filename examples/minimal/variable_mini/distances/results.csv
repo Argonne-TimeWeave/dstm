@@ -1,0 +1,5 @@
+topo,n,p,avg_max_distance,max_of_runs
+topo5,5,75,3.20,4
+small_cluster,6,75,5.20,7
+med_cluster,16,75,11.20,13
+topo24,24,75,14.20,17
