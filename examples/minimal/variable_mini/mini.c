@@ -26,22 +26,13 @@
 #include <string.h>
 #include <limits.h>
 #include <inttypes.h>
+#include <ctype.h>
+#include <errno.h>
 #include <mpi.h>
 #include "dstm.h"
 
 #define PACKET_SIZE   256
 #define SLOT_CAPACITY 8
-
-/* ---------- graph definition ---------- */
-
-#define N 4
-static const int edges[][3] = {
-    {0, 1, 2},
-    {0, 3, 2},
-    {1, 2, 3},
-    {1, 3, 1},
-};
-#define NUM_EDGES (sizeof(edges) / sizeof(edges[0]))
 
 /* ---------- packet / slot types (unchanged from ring) ---------- */
 
@@ -114,6 +105,125 @@ static void floyd_warshall(int *dist, int *next, int n)
             }
 }
 
+/* ---------- topology loading ---------- */
+
+static int   N         = 0;     /* set by load_topology */
+static int (*edges)[3] = NULL;  /* dynamically allocated [num_edges][3] */
+static size_t num_edges = 0;
+
+/* Strip '#' comments and trailing whitespace in place. */
+static void strip_comment(char *line)
+{
+    char *hash = strchr(line, '#');
+    if (hash) *hash = '\0';
+    size_t len = strlen(line);
+    while (len > 0 && isspace((unsigned char)line[len - 1]))
+        line[--len] = '\0';
+}
+
+/* Return 1 if the line has any non-whitespace content, else 0. */
+static int line_has_content(const char *line)
+{
+    for (; *line; line++)
+        if (!isspace((unsigned char)*line)) return 1;
+    return 0;
+}
+
+/* Load a topology file. On success, sets globals N, edges, num_edges
+ * and returns 0. On failure, prints an error and returns -1. */
+static int load_topology(const char *path)
+{
+    FILE *f = fopen(path, "r");
+    if (!f) {
+        fprintf(stderr, "Cannot open topology file '%s': %s\n",
+                path, strerror(errno));
+        return -1;
+    }
+
+    char    line[512];
+    int     lineno  = 0;
+    int     got_n   = 0;
+    size_t  cap     = 0;
+
+    while (fgets(line, sizeof(line), f)) {
+        lineno++;
+        strip_comment(line);
+        if (!line_has_content(line)) continue;
+
+        if (!got_n) {
+            if (sscanf(line, "%d", &N) != 1 || N <= 0) {
+                fprintf(stderr, "%s:%d: expected N (positive integer), "
+                                "got: %s\n", path, lineno, line);
+                fclose(f);
+                return -1;
+            }
+            got_n = 1;
+            continue;
+        }
+
+        int from, to, weight;
+        if (sscanf(line, "%d %d %d", &from, &to, &weight) != 3) {
+            fprintf(stderr, "%s:%d: expected '<from> <to> <weight>', "
+                            "got: %s\n", path, lineno, line);
+            fclose(f);
+            return -1;
+        }
+        if (from < 0 || from >= N || to < 0 || to >= N) {
+            fprintf(stderr, "%s:%d: node id out of range [0,%d): %d %d\n",
+                    path, lineno, N, from, to);
+            fclose(f);
+            return -1;
+        }
+        if (from == to) {
+            fprintf(stderr, "%s:%d: self-loop not allowed: %d %d\n",
+                    path, lineno, from, to);
+            fclose(f);
+            return -1;
+        }
+        if (weight <= 0) {
+            fprintf(stderr, "%s:%d: weight must be positive: %d\n",
+                    path, lineno, weight);
+            fclose(f);
+            return -1;
+        }
+
+        if (num_edges == cap) {
+            cap = cap ? cap * 2 : 16;
+            int (*new_edges)[3] = realloc(edges, sizeof(*edges) * cap);
+            if (!new_edges) {
+                fprintf(stderr, "out of memory loading topology\n");
+                fclose(f);
+                return -1;
+            }
+            edges = new_edges;
+        }
+        edges[num_edges][0] = from;
+        edges[num_edges][1] = to;
+        edges[num_edges][2] = weight;
+        num_edges++;
+    }
+
+    fclose(f);
+
+    if (!got_n) {
+        fprintf(stderr, "%s: no N line found\n", path);
+        return -1;
+    }
+    if (num_edges == 0) {
+        fprintf(stderr, "%s: no edges found\n", path);
+        return -1;
+    }
+    return 0;
+}
+
+static void free_topology(void)
+{
+    free(edges);
+    edges = NULL;
+    num_edges = 0;
+    N = 0;
+}
+
 static void graph_build(graph_t *g)
 {
     g->n = N;
@@ -124,7 +234,7 @@ static void graph_build(graph_t *g)
     for (int i = 0; i < N * N; i++) g->adj[i] = INT_MAX;
     for (int i = 0; i < N; i++)     g->adj[i * N + i] = 0;
 
-    for (size_t e = 0; e < NUM_EDGES; e++) {
+    for (size_t e = 0; e < num_edges; e++) {
         int r = edges[e][0], c = edges[e][1], w = edges[e][2];
         g->adj[r * N + c] = w;
         g->adj[c * N + r] = w;
@@ -208,17 +318,19 @@ static void print_matrix(const char *label, const int *m, int n)
 static void usage(const char *prog)
 {
     fprintf(stderr,
-        "usage: %s [--seed S] [--time T] [--prob P] [--quiet]\n", prog);
+        "usage: %s --topo FILE [--seed S] [--time T] [--prob P] [--quiet]\n", prog);
 }
 
 int main(int argc, char *argv[])
 {
     int seed = 42, quiet = 0, timesteps = 16, send_prob = 60;
+    const char *topo_path = NULL;
 
     for (int i = 1; i < argc; i++) {
         if      (!strcmp(argv[i], "--seed") && i + 1 < argc) seed      = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--time") && i + 1 < argc) timesteps = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--prob") && i + 1 < argc) send_prob = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--topo") && i + 1 < argc) topo_path = argv[++i];
         else if (!strcmp(argv[i], "--quiet"))                quiet     = 1;
         else if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h")) {
             usage(argv[0]); return 0;
@@ -230,13 +342,33 @@ int main(int argc, char *argv[])
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &num_ranks);
 
-    if (num_ranks != N) {
-        if (rank == 0)
-            fprintf(stderr, "This example requires exactly %d ranks (got %d)\n",
-                    N, num_ranks);
+    if (!topo_path) {
+        if (rank == 0) {
+            fprintf(stderr, "--topo FILE is required\n");
+            usage(argv[0]);
+        }
         MPI_Finalize();
         return -1;
     }
+
+    if (load_topology(topo_path) != 0) {
+        /* error already printed by load_topology */
+        MPI_Finalize();
+        return -1;
+    }
+
+    if (num_ranks != N) {
+        if (rank == 0)
+            fprintf(stderr, "Topology has %d nodes but %d MPI ranks were "
+                            "launched — they must match.\n", N, num_ranks);
+        free_topology();
+        MPI_Finalize();
+        return -1;
+    }
+
+    if (rank == 0)
+        printf("Loaded topology from '%s': N=%d, %zu edges\n",
+               topo_path, N, num_edges);
 
     dstm_init(&argc, &argv);
     dstm_log_init(stdout, "variable_net_sim");
@@ -440,6 +572,7 @@ int main(int argc, char *argv[])
     dstm_distance_destroy(&topology);
     graph_free(&g);
     dstm_finalize();
+    free_topology();
     MPI_Finalize();
     return status;
 }
