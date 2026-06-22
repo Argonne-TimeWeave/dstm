@@ -1,1 +1,1 @@
-SUBDIRS = ring_mini variable_mini
+SUBDIRS = ring_mini variable_mini multi_mini
