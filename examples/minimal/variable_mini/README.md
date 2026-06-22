@@ -1,6 +1,6 @@
 # variable\_mini — variable-topology network simulation
 
-A DSTM example that simulates packet routing over an arbitrary undirected weighted graph. Generalizes the `ring_mini` example from a fixed 2-neighbor ring to any topology defined by a static edge list (default: 4 nodes, 6 edges). Requires exactly `N` MPI ranks, one per node.
+A DSTM example that simulates packet routing over an arbitrary undirected weighted graph. Generalizes the `ring_mini` example from a fixed 2-neighbor ring to any topology defined by a static edge list. Requires exactly `N` MPI ranks, one per node.
 
 ## Model
 
@@ -16,6 +16,6 @@ Each rank owns one mailbox slot per **incoming** edge, laid out ragged across a 
 
 ## Usage
 
-mpirun -n 4 ./variable\_mini [--seed S] [--time T] [--prob P] [--quiet]
+mpirun -n N ./variable\_mini --topo \<file-name> [--seed S] [--time T] [--prob P] [--quiet]
 
-Edit the `edges[][3]` table and `N` at the top of the file to change topology.
+The directory topos contains some examples. N can also be found within these files. If you launch with the wrong N value you will error out. 
