@@ -19,3 +19,28 @@ Each rank owns one mailbox slot per **incoming** edge, laid out ragged across a 
 mpirun -n N ./variable\_mini --topo \<file-name> [--seed S] [--time T] [--prob P] [--quiet]
 
 The directory topos contains some examples. N can also be found within these files. If you launch with the wrong N value you will error out. 
+
+## Sim\_viz
+
+Visualize the simulation:
+
+```python
+pip install networkx matplotlib numpy
+
+python viz_sim.py dump.log --summary                 # sanity check
+python viz_sim.py dump.log --static t=20             # one PNG (no ffmpeg needed)
+python viz_sim.py dump.log --out sim.mp4 --fps 4     # full animation
+python viz_sim.py dump.log --out sim.gif --fps 3     # if ffmpeg is missing
+```
+
+Nodes are colored by current packet "load" (viridis: dark = idle, bright = busy).
+
+Grey arrows = static topology edges.
+
+Red bold arrows = active FORWARD this tick.
+
+Dashed cyan arrows = INJECT this tick.
+
+Gold ring around a node = a packet was DELIVERED there this tick.
+
+Title shows t=… plus inject/forward/delivered counts for that tick.
