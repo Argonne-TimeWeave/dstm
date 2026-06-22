@@ -108,6 +108,7 @@ AC_CONFIG_FILES([Makefile
 		 examples/minimal/Makefile
          examples/minimal/ring_mini/Makefile
          examples/minimal/variable_mini/Makefile
+         examples/minimal/multi_mini/Makefile
          examples/airport_sim/Makefile
          examples/airport_sim/airports/Makefile
          examples/airport_sim/mpi_air/Makefile
