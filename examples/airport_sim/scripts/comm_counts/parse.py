@@ -25,16 +25,20 @@ from pathlib import Path
 # Order matters for reporting; counting itself is unambiguous.
 OP_NAMES = ["Recv", "Irecv", "Isend", "Send h", "Send b", "Send", "alltoall"]
 
-# One regex per op. Each must match the *end* of the line (after optional
-# trailing whitespace) so stray suffixes don't accidentally count.
+# Optional trailing number: int OR float (e.g. "0.001159", "1.5e-4", "42").
+_TAIL = r"(?:\s+[-+]?(?:\d+\.\d*|\.\d+|\d+)(?:[eE][-+]?\d+)?)?\s*$"
+
+# All patterns are case-insensitive so "ALLTOALL" and "alltoall" both match.
+_F = re.IGNORECASE
+
 OP_PATTERNS = {
-    "Recv":     re.compile(r"(?<![A-Za-z])Recv\s*$"),
-    "Irecv":    re.compile(r"(?<![A-Za-z])Irecv\s*$"),
-    "Isend":    re.compile(r"(?<![A-Za-z])Isend\s*$"),
-    "Send h":   re.compile(r"(?<![A-Za-z])Send\s+h\s*$"),
-    "Send b":   re.compile(r"(?<![A-Za-z])Send\s+b\s*$"),
-    "Send":     re.compile(r"(?<![A-Za-z])Send\s*$"),   # plain Send only
-    "alltoall": re.compile(r"(?<![A-Za-z])alltoall\s*$", re.IGNORECASE),
+    "Recv":     re.compile(r"(?<![A-Za-z])Recv"      + _TAIL, _F),
+    "Irecv":    re.compile(r"(?<![A-Za-z])Irecv"     + _TAIL, _F),
+    "Isend":    re.compile(r"(?<![A-Za-z])Isend"     + _TAIL, _F),
+    "Send h":   re.compile(r"(?<![A-Za-z])Send\s+h"  + _TAIL, _F),
+    "Send b":   re.compile(r"(?<![A-Za-z])Send\s+b"  + _TAIL, _F),
+    "Send":     re.compile(r"(?<![A-Za-z])Send"      + _TAIL, _F),   # plain Send only
+    "alltoall": re.compile(r"(?<![A-Za-z])alltoall"  + _TAIL, _F),
 }
 
 # Pulls "<rank>/<size>" out of the "normal:94/256:" style prefix, if present.
