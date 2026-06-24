@@ -5,16 +5,20 @@ Plot stacked-bar comm counts from a comm_counts.csv produced by counts.sh.
 Each x-tick is a rank count. At each tick, one bar per build (dstm, mpi)
 is drawn side-by-side. Within each bar, the comm-op categories are stacked.
 
+By default counts are normalized to *per-rank averages* (raw count / num_ranks)
+so weak-scaling comparisons aren't dominated by the linear growth in rank
+count. Use --totals to plot raw aggregate counts instead.
+
 Usage:
     python plot_counts.py <comm_counts.csv>
     python plot_counts.py <comm_counts.csv> -o counts.png
     python plot_counts.py <comm_counts.csv> --log-y
+    python plot_counts.py <comm_counts.csv> --totals     # raw, not per-rank
 """
 
 import argparse
 import csv
 import sys
-from collections import defaultdict
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -41,6 +45,8 @@ def load_rows(path):
                 row["ranks"] = int(row["ranks"])
             except (KeyError, ValueError):
                 continue
+            if row["ranks"] <= 0:
+                continue
             for op in OP_COLS:
                 v = row.get(op, "")
                 try:
@@ -51,12 +57,12 @@ def load_rows(path):
     return rows
 
 
-def organize(rows):
+def organize(rows, per_rank):
     """
     Return:
       ranks  : sorted list of unique rank counts
-      builds : sorted list of unique build names
-      data   : dict[(build, ranks)] -> dict[op] -> count
+      builds : sorted list of unique build names (dstm first if present)
+      data   : dict[(build, ranks)] -> dict[op] -> count (per-rank or total)
     """
     data = {}
     rank_set = set()
@@ -65,10 +71,13 @@ def organize(rows):
         key = (r["build"], r["ranks"])
         rank_set.add(r["ranks"])
         build_set.add(r["build"])
-        # If duplicates exist (e.g. you reran a single point), last write wins.
-        data[key] = {op: r.get(op, 0) for op in OP_COLS}
+        # Per-rank normalization happens here. We divide every raw aggregate
+        # count by the rank count for that run. Counts become floats; that's
+        # fine since matplotlib handles them and a non-integer per-rank value
+        # is itself a useful diagnostic (would indicate straggler skew).
+        denom = r["ranks"] if per_rank else 1
+        data[key] = {op: r.get(op, 0) / denom for op in OP_COLS}
 
-    # Put dstm before mpi if both present; otherwise alphabetical.
     preferred = ["dstm", "mpi"]
     builds = [b for b in preferred if b in build_set]
     builds += sorted(b for b in build_set if b not in preferred)
@@ -76,7 +85,7 @@ def organize(rows):
     return sorted(rank_set), builds, data
 
 
-def plot(ranks, builds, data, out_path, log_y, title):
+def plot(ranks, builds, data, out_path, log_y, per_rank, title):
     n_groups = len(ranks)
     n_builds = len(builds)
     if n_groups == 0 or n_builds == 0:
@@ -87,22 +96,17 @@ def plot(ranks, builds, data, out_path, log_y, title):
     x = np.arange(n_groups, dtype=float)
     group_width = 0.8
     bar_width = group_width / n_builds
-    # Offsets center the cluster on the tick.
     offsets = (np.arange(n_builds) - (n_builds - 1) / 2.0) * bar_width
 
-    # Consistent color per op across builds/runs. tab10 has 10 distinct colors.
     cmap = plt.get_cmap("tab10")
     op_color = {op: cmap(i % 10) for i, op in enumerate(STACK_ORDER)}
 
     fig, ax = plt.subplots(figsize=(max(8, 1.0 * n_groups + 2), 6))
 
-    # For the legend we want each op to appear once, and each build to appear once.
     op_handles = {}
     build_handles = {}
 
-    # Patterns to visually distinguish builds (in addition to position).
     build_hatches = {"dstm": "", "mpi": "//"}
-    # Edge color helps when hatches are off.
     edge_color = "black"
 
     for bi, build in enumerate(builds):
@@ -117,7 +121,7 @@ def plot(ranks, builds, data, out_path, log_y, title):
             )
             if not np.any(heights):
                 continue
-            bars = ax.bar(
+            ax.bar(
                 xpos, heights, bar_width,
                 bottom=bottom,
                 color=op_color[op],
@@ -127,7 +131,6 @@ def plot(ranks, builds, data, out_path, log_y, title):
             )
             bottom += heights
             if op not in op_handles:
-                # Plain patch (no hatch) for the op legend entry.
                 op_handles[op] = plt.Rectangle(
                     (0, 0), 1, 1,
                     facecolor=op_color[op],
@@ -135,7 +138,6 @@ def plot(ranks, builds, data, out_path, log_y, title):
                     linewidth=0.4,
                 )
 
-        # Build-level legend swatch: gray w/ this build's hatch.
         if build not in build_handles:
             build_handles[build] = plt.Rectangle(
                 (0, 0), 1, 1,
@@ -146,11 +148,17 @@ def plot(ranks, builds, data, out_path, log_y, title):
             )
 
         # Annotate totals above each bar so small ops aren't lost.
+        # Use a format that's readable for both integers (totals) and
+        # fractional per-rank averages.
         totals = bottom  # final cumulative height
         for xi, t in zip(xpos, totals):
             if t > 0:
+                if per_rank:
+                    label = "{:.1f}".format(t) if t < 100 else "{:.0f}".format(t)
+                else:
+                    label = "{:g}".format(t)
                 ax.text(
-                    xi, t, "{:g}".format(t),
+                    xi, t, label,
                     ha="center", va="bottom",
                     fontsize=7, rotation=0,
                 )
@@ -158,16 +166,19 @@ def plot(ranks, builds, data, out_path, log_y, title):
     ax.set_xticks(x)
     ax.set_xticklabels([str(r) for r in ranks])
     ax.set_xlabel("MPI ranks")
-    ax.set_ylabel("Communication count")
+    if per_rank:
+        ax.set_ylabel("Communication count per rank (avg)")
+    else:
+        ax.set_ylabel("Communication count (total across ranks)")
     ax.set_title(title)
     if log_y:
         ax.set_yscale("log")
-        ax.set_ylim(bottom=1)
+        # Per-rank values can be <1 for rare ops; total values are always >=1.
+        ax.set_ylim(bottom=0.1 if per_rank else 1)
 
     ax.grid(True, axis="y", linestyle=":", alpha=0.5)
     ax.set_axisbelow(True)
 
-    # Two legends: one for ops (stack categories), one for builds (clusters).
     op_legend = ax.legend(
         list(op_handles.values()), list(op_handles.keys()),
         title="Op", loc="upper left", fontsize=8, title_fontsize=9,
@@ -193,18 +204,30 @@ def main():
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("csv", help="Path to comm_counts.csv")
     ap.add_argument("-o", "--output",
-                    help="Output image path (e.g. counts.png). If omitted, opens an interactive window.")
+                    help="Output image path (e.g. counts.png). "
+                         "If omitted, opens an interactive window.")
     ap.add_argument("--log-y", action="store_true",
-                    help="Use log scale on the y axis (helps when counts span orders of magnitude across P).")
+                    help="Use log scale on the y axis (helps when counts span "
+                         "orders of magnitude across P).")
+    ap.add_argument("--totals", action="store_true",
+                    help="Plot raw aggregate counts (sum across all ranks) "
+                         "instead of the default per-rank average.")
     ap.add_argument("--title", default=None,
                     help="Override plot title (default: derived from CSV path).")
     args = ap.parse_args()
 
-    rows = load_rows(args.csv)
-    ranks, builds, data = organize(rows)
+    per_rank = not args.totals
 
-    title = args.title or "Comm counts vs ranks  ({})".format(Path(args.csv).parent.name or args.csv)
-    return plot(ranks, builds, data, args.output, args.log_y, title)
+    rows = load_rows(args.csv)
+    ranks, builds, data = organize(rows, per_rank=per_rank)
+
+    suffix = "per rank" if per_rank else "totals"
+    default_title = "Comm counts ({}) vs ranks  ({})".format(
+        suffix, Path(args.csv).parent.name or args.csv
+    )
+    title = args.title or default_title
+
+    return plot(ranks, builds, data, args.output, args.log_y, per_rank, title)
 
 
 if __name__ == "__main__":
