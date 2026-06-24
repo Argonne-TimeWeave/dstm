@@ -88,6 +88,3 @@ __pycache__
 
 # tooling
 /.cache*
-
-# nic is generating csvs [srry can remove if u want]
-*.png
