@@ -1,0 +1,12 @@
+RANKS=(1 2 4 8 16 32 64 128 256)
+NODES=8
+LOCATIONS_PER_RANK=128
+HUMANS_PER_RANK=512
+TIMESTEPS=72
+WORK=1000
+SEED=42
+BUILDS:
+  dstm = /home/ncassarino/dstm/examples/zombies/dstm_zombies/zombies
+  mpi = /home/ncassarino/dstm/examples/zombies/mpi_zombies/zombies
+MPI_PREFIX=/soft/libraries/mpi/openmpi/4.1.1
+started=2026-06-24T19:36:44+00:00
