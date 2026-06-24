@@ -18,10 +18,10 @@ TRIALS="${TRIALS:-2}"
 OUT="${OUT:-weak_scaling_zombies.csv}"
 
 # Per-rank workload (held constant for weak scaling).
-NL=64
-NH=32
+NL=128
+NH=512
 WORK=1000
-TIME=72
+TIME=256
 SEED=42
 
 # Path to the two binaries.
