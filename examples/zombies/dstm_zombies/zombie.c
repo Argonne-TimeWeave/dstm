@@ -366,6 +366,10 @@ void zombie_timestep(zombie_state_t *st, dstm_time_t t)
     int hod       = hour_of_day((int)t);
     int dod       = day_of((int)t);
 
+    double start = 0;
+    double end = 0;
+    double sum = 0;
+
     dstm_log_normal("Rank %d [t=%ld d=%d h=%02d]: === step ===\n",
                         rank, t, dod, hod);
 
@@ -397,7 +401,16 @@ void zombie_timestep(zombie_state_t *st, dstm_time_t t)
      * humans into self; this just makes sure GETs don't block. */
     {
         size_t idx = bundle_index(rank, rank, num_ranks);
+
+        if (LOGGING) 
+            start = MPI_Wtime();
+
         dstm_darray_put(st->cells, idx, &empty_cell, t, 0);
+        
+        if (LOGGING) {
+            end = MPI_Wtime();
+            printf("_PUT: %f\n", end - start);
+        }   
     }
 
     /* STEP 2 — clear outbox. */
@@ -433,8 +446,18 @@ void zombie_timestep(zombie_state_t *st, dstm_time_t t)
 
         size_t idx = bundle_index(rank, src, num_ranks);
         cell_slot_t recv;
+
+        if (LOGGING)
+            start = MPI_Wtime();
+
         status = dstm_darray_get_or_default(st->cells, idx,
                                             &recv, t, 0, &empty_cell);
+
+        if (LOGGING) {
+            end = MPI_Wtime();
+            sum += end - start;
+        }
+
         if (status != DSTM_SUCCESS) {
             dstm_log_error("GET failed on bundle (dest=%d,src=%d)", rank, src);
             continue;
@@ -475,6 +498,11 @@ void zombie_timestep(zombie_state_t *st, dstm_time_t t)
             BUCKET_PUSH(b, &h);
         }
     }
+
+    if (LOGGING) {     
+        printf("_GET: %f\n", sum);
+        sum = 0;
+    }   
 
     /* 3b — carryover (humans who were here last hour and stayed/moved
      * locally). This stream is authoritative for any human it contains;
@@ -687,10 +715,24 @@ void zombie_timestep(zombie_state_t *st, dstm_time_t t)
         int delta = dstm_distance_get(st->topology, rank, dest);
         if (delta < 1) delta = 1;
 
+        if (LOGGING) 
+            start = MPI_Wtime();
+
         status = dstm_darray_put(st->cells, idx,
                                  &st->outbox[dest], t, delta);
+    
+        if (LOGGING) {
+            end = MPI_Wtime();
+            sum += end - start;
+        }   
+
         if (status != DSTM_SUCCESS)
             dstm_log_error("PUT to rank %d failed", dest);
+    }
+    
+    if (LOGGING) {     
+        printf("_PUT: %f\n", sum);
+        sum = 0;
     }
 
     #undef BUCKET_PUSH
