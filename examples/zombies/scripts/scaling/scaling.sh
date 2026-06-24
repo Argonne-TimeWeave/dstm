@@ -14,7 +14,7 @@
 set -u  # don't set -e: we want to keep going even if one config fails
 
 # ---------- config ----------
-TRIALS="${TRIALS:-2}"
+TRIALS="${TRIALS:-4}"
 OUT="${OUT:-weak_scaling_zombies.csv}"
 
 # Per-rank workload (held constant for weak scaling).
