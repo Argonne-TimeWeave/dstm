@@ -391,6 +391,10 @@ void zombie_timestep(zombie_state_t *st, dstm_time_t t)
     int nl        = st->nl;
     int hod       = hour_of_day((int)t);
     int dod       = day_of((int)t);
+    
+    double start = 0;
+    double end = 0;
+    double sum = 0;
 
     dstm_log_normal("Rank %d [t=%ld d=%d h=%02d]: === step ===\n",
                     rank, t, dod, hod);
@@ -739,9 +743,18 @@ void zombie_timestep(zombie_state_t *st, dstm_time_t t)
         send_counts[r] = st->outbox[r].n_humans;
         recv_counts[r] = 0;
     }
+
+    if (LOGGING) 
+        start = MPI_Wtime();
+
     MPI_Alltoall(send_counts, 1, MPI_INT,
                  recv_counts, 1, MPI_INT,
                  MPI_COMM_WORLD);
+
+    if (LOGGING) {
+        end = MPI_Wtime();
+        printf("_Alltoall: %f\n", end - start);
+    }
 
     /* Phase B: sparse payload exchange. */
     for (int r = 0; r < num_ranks; r++)
@@ -751,20 +764,55 @@ void zombie_timestep(zombie_state_t *st, dstm_time_t t)
     for (int src = 0; src < num_ranks; src++) {
         if (src == rank) continue;
         if (recv_counts[src] == 0) continue;
+
+        if (LOGGING) 
+            start = MPI_Wtime();
+
         MPI_Irecv(&inbox[src], (int)sizeof(cell_slot_t), MPI_BYTE,
                   src, ZOMBIE_MPI_TAG_BASE + (int)t,
                   MPI_COMM_WORLD, &recv_reqs[n_recv++]);
+        
+        if (LOGGING) {
+            end = MPI_Wtime();
+            sum += end - start;
+        }
     }
+
+    if (LOGGING) {
+        printf("_Irecv: %f\n", sum);
+        sum = 0;
+    }
+
     for (int dest = 0; dest < num_ranks; dest++) {
         if (dest == rank) continue;
         if (send_counts[dest] == 0) continue;
+
+        if (LOGGING) 
+            start = MPI_Wtime();
+
         MPI_Isend(&st->outbox[dest], (int)sizeof(cell_slot_t), MPI_BYTE,
                   dest, ZOMBIE_MPI_TAG_BASE + (int)t,
                   MPI_COMM_WORLD, &send_reqs[n_send++]);
+        
+        if (LOGGING) {
+            end = MPI_Wtime(); 
+            sum += end - start;
+        }   
     }
+    
+    if (LOGGING) 
+        printf("_Isend: %f\n", sum);
+
+    if (LOGGING) 
+        start = MPI_Wtime();
 
     if (n_recv > 0) MPI_Waitall(n_recv, recv_reqs, MPI_STATUSES_IGNORE);
     if (n_send > 0) MPI_Waitall(n_send, send_reqs, MPI_STATUSES_IGNORE);
+
+    if (LOGGING) {
+        end = MPI_Wtime();
+        printf("_Waitall: %f\n", end - start);
+    }
 
     /* Stash for next step's drain. inbox already carries arrive_time
      * inside each cell_slot_t, so saved_inbox + saved_recv_counts is
