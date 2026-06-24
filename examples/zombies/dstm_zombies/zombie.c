@@ -371,26 +371,6 @@ void zombie_timestep(zombie_state_t *st, dstm_time_t t)
 
     /* STEP 0 — day boundary: ticks + schedule re-roll (owner-side). */
     if (hod == 0) {
-/*
-        for (int i = 0; i < st->nh; i++) {
-            human_t *h = &st->humans[i];
-            if (h->state == HSTATE_INFECTED && h->last_infect_day != dod) {
-                h->days_infected++;
-                h->last_infect_day = dod;
-                if (h->days_infected >= INFECT_DAYS_TO_ZOMBIE) {
-                    h->state = HSTATE_ZOMBIE;
-                    dstm_log_normal("Rank %d [t=%ld]: human %d TURNED ZOMBIE "
-                                    "at %d.%d\n",
-                                    rank, t, h->human_id,
-                                    h->cur_node, h->cur_local);
-                }
-            }
-            if (h->state != HSTATE_ZOMBIE) {
-                make_event(st, SLOT_MORNING, h->home_node, h->home_local, &h->morning_event);
-                make_event(st, SLOT_AFTERNOON, h->home_node, h->home_local, &h->afternoon_event);
-            }
-        }
-*/
         /* Also tick any infected human in carryover (they may be away
          * from home — their authoritative state lives in carryover). */
         for (int i = 0; i < st->n_carryover; i++) {
