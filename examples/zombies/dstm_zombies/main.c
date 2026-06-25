@@ -153,6 +153,22 @@ int main(int argc, char *argv[])
     MPI_Barrier(MPI_COMM_WORLD);
     double t_start = MPI_Wtime();
 
+    double start = 0;
+    double end = 0;
+
+    if (LOGGING)
+        start = MPI_Wtime();
+
+    for (dstm_time_t t = 0; t < timesteps; t++) {
+        size_t idx = bundle_index(rank, rank, num_ranks);
+        dstm_darray_put(state.cells, idx, &empty_cell, 0, t);
+    }   
+
+    if (LOGGING) {
+        end = MPI_Wtime();
+        printf("_PUT: %f\n", end - start);
+    }   
+
     for (dstm_time_t t = 0; t < timesteps; t++) {
         zombie_timestep(&state, t);
     }

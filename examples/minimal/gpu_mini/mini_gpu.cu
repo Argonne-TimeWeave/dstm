@@ -312,13 +312,15 @@ int main(int argc, char *argv[])
     long delivered = 0, mismatched = 0;
 
     for (dstm_time_t t = 0; t < timesteps; t++) {
-        dstm_log_normal("Rank %d: step %ld\n", rank, t);
-
         /* STEP 1: sentinel PUT --------------------------------------- */
         for (int s = 0; s < MAILBOX_SLOTS; s++) {
             size_t idx = (size_t)rank * MAILBOX_SLOTS + s;
-            dstm_darray_put(mailbox, idx, &empty_slot, t, 0);
+            dstm_darray_put(mailbox, idx, &empty_slot, 0, t);
         }
+    }
+
+    for (dstm_time_t t = 0; t < timesteps; t++) {
+        dstm_log_normal("Rank %d: step %ld\n", rank, t);
 
         /* STEP 2: receive both slots --------------------------------- */
         outbox[SLOT_LEFT]  = empty_slot;
