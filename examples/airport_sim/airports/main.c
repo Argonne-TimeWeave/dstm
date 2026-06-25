@@ -5,6 +5,8 @@
 #include <dstm.h>
 #include "airport.h"
 
+#include "internal/distance.h"
+
 static void usage(const char *prog)
 {
     fprintf(stderr,
@@ -67,6 +69,17 @@ int main(int argc, char *argv[])
     }
     int rows = num_ranks / cols;
 
+    for (int i = 0; i < num_ranks; i++) {
+        for (int j = 0; j < num_ranks; j++) {
+            if (topology->distances[i * num_ranks + j] > LAYOVER_THRESHOLD)
+                topology->distances[i * num_ranks + j] = -1;
+                if (rank == 0)
+                    printf("%d ", topology->distances[i * num_ranks + j]);
+        }
+        if (rank == 0)
+            printf("\n");
+    } 
+    
     int total_airports = num_ranks * na;
 
     /* Assign tiers per local airport (deterministic from seed, same on all ranks) */
@@ -120,7 +133,7 @@ int main(int argc, char *argv[])
     srand(seed + rank);
 
     airport_state_t state;
-    airport_init(&state, rank, num_ranks, na, work, tiers, topology, gates);
+    airport_init(&state, rank, num_ranks, na, cols, work, tiers, topology, gates);
 
     /* Sync all ranks before timing the simulation loop */
     MPI_Barrier(MPI_COMM_WORLD);
