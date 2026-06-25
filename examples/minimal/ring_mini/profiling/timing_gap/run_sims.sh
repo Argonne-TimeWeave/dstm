@@ -1,7 +1,7 @@
 #!/bin/bash
 
 OUTPUT_CSV="results.csv"
-EXE_PATH="./../minimal"
+EXE_PATH="./../../minimal"
 LOG_DIR="data"
 RUNS_PER_CONFIG=5
 
