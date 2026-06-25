@@ -176,12 +176,6 @@ void airport_timestep(airport_state_t *state, dstm_time_t t, int quiet)
 
     dstm_log_normal("Rank %d [t=%ld]: === timestep ===\n", rank, t);
 
-    /* STEP 1 — sentinel PUT (one per source rank gate slot we own) */
-    {
-        size_t idx = gate_index(rank, rank);
-        dstm_darray_put(state->gates, idx, &empty_gate, t, 0);
-    }
-
     /* STEP 2 — clear outbox and receive */
     for (int r = 0; r < num_ranks; r++)
         state->outbox[r] = empty_gate;
