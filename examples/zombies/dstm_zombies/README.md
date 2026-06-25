@@ -1,6 +1,4 @@
-# zombie TODO 
-
-figure out correct value for cell\_capcity
+# zombie 
 
 # How to run on multi-node
 ## This is 8 nodes; 4 ranks per node

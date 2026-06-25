@@ -397,22 +397,6 @@ void zombie_timestep(zombie_state_t *st, dstm_time_t t)
         }
     }
 
-    /* STEP 1 — sentinel PUT for our self-bundle. We never write real
-     * humans into self; this just makes sure GETs don't block. */
-    {
-        size_t idx = bundle_index(rank, rank, num_ranks);
-
-        if (LOGGING) 
-            start = MPI_Wtime();
-
-        dstm_darray_put(st->cells, idx, &empty_cell, t, 0);
-        
-        if (LOGGING) {
-            end = MPI_Wtime();
-            printf("_PUT: %f\n", end - start);
-        }   
-    }
-
     /* STEP 2 — clear outbox. */
     for (int r = 0; r < num_ranks; r++)
         st->outbox[r] = empty_cell;
