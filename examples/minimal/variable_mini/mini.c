@@ -422,16 +422,18 @@ int main(int argc, char *argv[])
     uint64_t next_packet_id = 0;
 
     for (dstm_time_t t = 0; t < timesteps; t++) {
-        dstm_log_normal("Rank %d: time step %ld\n", rank, t);
-
         for (int k = 0; k < g.in_deg[rank]; k++) {
             int    src_u = g.in_neigh[rank][k];
             int    delta = dstm_distance_get(topology, src_u, rank);
             if (t < delta) {
                 size_t idx = g.slot_offset[rank] + k;
-                dstm_darray_put(mailbox, idx, &empty_slot, t, 0);
+                dstm_darray_put(mailbox, idx, &empty_slot, 0, t);
             }
         }
+    }
+
+    for (dstm_time_t t = 0; t < timesteps; t++) {
+        dstm_log_normal("Rank %d: time step %ld\n", rank, t);
 
         for (int k = 0; k < out_deg; k++) outbox[k] = empty_slot;
 
