@@ -125,6 +125,22 @@ int main(int argc, char *argv[])
     /* Sync all ranks before timing the simulation loop */
     MPI_Barrier(MPI_COMM_WORLD);
     double t_start = MPI_Wtime();
+    
+    double start = 0;
+    double end = 0;
+    
+    if (LOGGING)
+        start = MPI_Wtime(); 
+
+    for (dstm_time_t t = 0; t < timesteps; t++) {
+        size_t idx = gate_index(rank, rank);
+        dstm_darray_put(state.gates, idx, &empty_gate, 0, t);
+    }
+
+    if (LOGGING) {
+        end + MPI_Wtime();
+        dstm_log_normal("PUT %f\n");
+    }
 
     /* Main simulation loop */
     for (dstm_time_t t = 0; t < timesteps; t++) {
