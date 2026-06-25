@@ -2,7 +2,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <mpi.h>
+
 #include "dstm.h"
+#include "internal/distance.h"
 
 /**
  * Minimal Network Simulation with DSTM
@@ -56,7 +58,7 @@ static const mailbox_slot_t empty_slot = { .n_packets = 0 };
 
 static void usage(const char *prog)
 {
-    fprintf(stderr, "usage: %s [--seed S] [--time T] [--prob %] [--quiet]\n", prog);
+    fprintf(stderr, "usage: %s [--seed S] [--dist D] [--time T] [--prob %] [--quiet]\n", prog);
 }
 
 int main(int argc, char *argv[])
@@ -65,6 +67,8 @@ int main(int argc, char *argv[])
     int quiet = 0;
     int timesteps = 16;
     int send_prob = 60; // check each rank sends each step
+
+    int distance_matrix_metric = 999;
 
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--seed") && i + 1 < argc)
@@ -75,6 +79,8 @@ int main(int argc, char *argv[])
             send_prob = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--quiet"))
             quiet = 1;
+        else if (!strcmp(argv[i], "--dist"))
+            distance_matrix_metric = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h")) {
             usage(argv[0]);
             return 0;
@@ -88,10 +94,10 @@ int main(int argc, char *argv[])
 
     dstm_init(&argc, &argv);
     dstm_log_init(stdout, "network_sim");
-    
-    if (quiet) 
+
+    if (quiet)
         dstm_log_setlevel(DSTM_LOG_QUIET);
-    else 
+    else
         dstm_log_setlevel(DSTM_LOG_NORMAL);
 
     dstm_distance_t *topology;
@@ -100,6 +106,21 @@ int main(int argc, char *argv[])
         dstm_log_error("Failed to create topology");
         MPI_Finalize();
         return -1;
+    }
+
+    if (distance_matrix_metric < 1) {
+        distance_matrix_metric = 1;
+    }   
+
+    for (int i = 0; i < num_ranks; i++) {
+        for (int j = 0; j < num_ranks; j++) {
+            if (topology->distances[i * num_ranks + j] > distance_matrix_metric)
+                topology->distances[i * num_ranks + j] = -1;
+            if (rank == 0)
+                printf("%d ", topology->distances[i * num_ranks + j]);
+        }
+        if (rank == 0)
+            printf("\n");
     }
 
     if (rank == 0)
@@ -112,16 +133,6 @@ int main(int argc, char *argv[])
         return -1;
     }
 
-    /*
-     * Distributed array layout — one mailbox_slot_t per (rank, direction):
-     *
-     *   index = rank * MAILBOX_SLOTS + slot
-     *
-     *   [r0·LEFT][r0·RIGHT][r1·LEFT][r1·RIGHT] ...
-     *       ↑         ↑
-     *       │         └─ written only by right_rank (rank+1)
-     *       └─────────── written only by left_rank  (rank-1)
-     */
     dstm_darray_t *mailbox;
     status = dstm_darray_create_equal(&mailbox,
                                       sizeof(mailbox_slot_t),
@@ -136,31 +147,33 @@ int main(int argc, char *argv[])
     int left_rank  = (rank - 1 + num_ranks) % num_ranks;
     int right_rank = (rank + 1) % num_ranks;
 
-    /* pending outbox: packets this rank is forwarding or injecting this step.
-     * Indexed by direction: [SLOT_LEFT] = going left, [SLOT_RIGHT] = going right.
-     * We accumulate into these before a single PUT per direction. */
     mailbox_slot_t outbox[MAILBOX_SLOTS];
-
     mailbox_slot_t recv_slot;
+
+    /* -----------------------------------------------------------------
+     * Per-rank metric counters
+     * ----------------------------------------------------------------- */
+    long n_sent      = 0;   /* packets this rank injected             */
+    long n_delivered = 0;   /* packets this rank received as dest     */
+    long n_forwarded = 0;   /* packets this rank forwarded onward     */
+
+    for (dstm_time_t t = 0; t < timesteps; t++) {
+        for (int s = 0; s < MAILBOX_SLOTS; s++) {
+            size_t idx = (size_t)rank * MAILBOX_SLOTS + s;
+            dstm_darray_put(mailbox, idx, &empty_slot, 0, t);
+        }
+    }
 
     for (dstm_time_t t = 0; t < timesteps; t++) {
         dstm_log_normal("Rank %d: time step %ld\n", rank, t);
 
-        /* ----------------------------------------------------------------
-         * STEP 1 — sentinel PUT
-         * Write empty_slot into our own slots so that any GET at this
-         * timestep always finds a version and never blocks.
-         * A real packet PUT by a neighbor (delta=1 from t-1) will have
-         * been written before we GET, so it wins over this sentinel.
-         * ---------------------------------------------------------------- */
+        /*
         for (int s = 0; s < MAILBOX_SLOTS; s++) {
             size_t idx = (size_t)rank * MAILBOX_SLOTS + s;
             dstm_darray_put(mailbox, idx, &empty_slot, t, 0);
         }
+*/
 
-        /* ----------------------------------------------------------------
-         * STEP 2 — RECEIVE: read both inbox slots
-         * ---------------------------------------------------------------- */
         outbox[SLOT_LEFT]  = empty_slot;
         outbox[SLOT_RIGHT] = empty_slot;
 
@@ -181,44 +194,31 @@ int main(int argc, char *argv[])
                           s == SLOT_LEFT ? "left" : "right",
                           recv_slot.n_packets);
 
-            /* ----------------------------------------------------------------
-             * STEP 3 — process each packet in the slot
-             * ---------------------------------------------------------------- */
             for (int p = 0; p < recv_slot.n_packets; p++) {
                 mailbox_entry_t pkt = recv_slot.packets[p];
 
                 if (pkt.dest_rank == rank) {
-                    /* DELIVER */
+                    n_delivered++;
                     dstm_log_normal("Rank %d [t=%ld]: DELIVERED — "
                            "src=%d origin_t=%ld hops=%d payload=\"%s\"\n",
                            rank, t,
                            pkt.source_rank, pkt.origin_time,
                            pkt.hops_taken, pkt.payload);
                 } else {
-                    /* FORWARD one hop toward dest.
-                     *
-                     * Direction: clockwise distance to dest tells us whether
-                     * to pass right or left.  We only move one hop (delta=1)
-                     * which is pure store-and-forward — no cut-through.
-                     *
-                     * The neighbor's slot we write into is the one that faces
-                     * back toward us:
-                     *   - we go right → write into neighbor's SLOT_LEFT
-                     *   - we go left  → write into neighbor's SLOT_RIGHT
-                     */
                     int dist_right = (pkt.dest_rank - rank + num_ranks) % num_ranks;
                     int go_right   = (dist_right <= num_ranks - dist_right);
 
                     int fwd_dir        = go_right ? SLOT_RIGHT : SLOT_LEFT;
                     int neighbor_slot  = go_right ? SLOT_LEFT  : SLOT_RIGHT;
                     int neighbor_rank  = go_right ? right_rank : left_rank;
-                    (void)neighbor_rank; /* rank implicit from fwd_dir outbox */
+                    (void)neighbor_rank;
 
                     pkt.hops_taken++;
 
                     mailbox_slot_t *ob = &outbox[fwd_dir];
                     if (ob->n_packets < SLOT_CAPACITY) {
                         ob->packets[ob->n_packets++] = pkt;
+                        n_forwarded++;
                         dstm_log_normal("Rank %d [t=%ld]: FORWARD src=%d dst=%d "
                                       "via %s (hop %d)\n",
                                       rank, t, pkt.source_rank, pkt.dest_rank,
@@ -231,15 +231,11 @@ int main(int argc, char *argv[])
                                          pkt.source_rank, pkt.dest_rank);
                     }
 
-                    (void)neighbor_slot; /* used implicitly: outbox[fwd_dir]
-                                           maps to neighbor's opposite slot  */
+                    (void)neighbor_slot;
                 }
             }
         }
 
-        /* ----------------------------------------------------------------
-         * STEP 4 — INJECT: randomly create a new packet this timestep
-         * ---------------------------------------------------------------- */
         if ((rand() % 100) < send_prob) {
             int dest = rand() % (num_ranks - 1);
             if (dest >= rank) dest++;
@@ -260,18 +256,13 @@ int main(int argc, char *argv[])
                 snprintf(pkt.payload, sizeof(pkt.payload),
                          "src=%d dst=%d t=%ld", rank, dest, t);
                 ob->packets[ob->n_packets++] = pkt;
+                n_sent++;
 
                 dstm_log_normal("Rank %d [t=%ld]: INJECT dst=%d via %s\n",
                               rank, t, dest, go_right ? "right" : "left");
             }
         }
 
-        /* ----------------------------------------------------------------
-         * STEP 5 — SEND outbox slots to neighbors (delta=1, one hop)
-         *
-         * outbox[SLOT_RIGHT] → right_rank's SLOT_LEFT  (they recv from left)
-         * outbox[SLOT_LEFT]  → left_rank's  SLOT_RIGHT (they recv from right)
-         * ---------------------------------------------------------------- */
         if (outbox[SLOT_RIGHT].n_packets > 0) {
             size_t idx = (size_t)right_rank * MAILBOX_SLOTS + SLOT_LEFT;
             status = dstm_darray_put(mailbox, idx,
@@ -301,6 +292,27 @@ int main(int argc, char *argv[])
         dstm_log_error("Failed to finalize DSTM");
 
     dstm_distance_destroy(&topology);
+
+    /* -----------------------------------------------------------------
+     * Metrics summary — per-rank line plus global totals on rank 0
+     * ----------------------------------------------------------------- */
+    dstm_log_normal("Rank %d METRICS: sent=%ld delivered=%ld forwarded=%ld\n",
+                    rank, n_sent, n_delivered, n_forwarded);
+
+    long totals_local[3]  = { n_sent, n_delivered, n_forwarded };
+    long totals_global[3] = { 0, 0, 0 };
+    MPI_Reduce(totals_local, totals_global, 3, MPI_LONG, MPI_SUM,
+               0, MPI_COMM_WORLD);
+
+    if (rank == 0) {
+        printf("==== GLOBAL METRICS ====\n");
+        printf("  sent      = %ld\n", totals_global[0]);
+        printf("  delivered = %ld\n", totals_global[1]);
+        printf("  forwarded = %ld\n", totals_global[2]);
+        printf("  in-flight = %ld  (sent - delivered)\n",
+                        totals_global[0] - totals_global[1]);
+    }
+
     dstm_finalize();
     MPI_Finalize();
     return status;
