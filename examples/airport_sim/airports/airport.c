@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h> 
+#include <limits.h>
 
 #include "airport.h"
 
@@ -33,6 +34,7 @@ void airport_init(airport_state_t *state,
                   int rank,
                   int num_ranks,
                   int na,
+                  int cols,
                   int work,
                   airport_tier_t *tiers,
                   dstm_distance_t *topology,
@@ -41,6 +43,7 @@ void airport_init(airport_state_t *state,
     state->rank           = rank;
     state->num_ranks      = num_ranks;
     state->na             = na;
+    state->cols           = cols;
     state->work           = work;
     state->tiers          = tiers;
     state->topology       = topology;
@@ -114,35 +117,64 @@ void airport_pick_dest(airport_state_t *state,
 }
 
 /*
- * Find next-hop RANK from origin_rank toward dest_rank.
- * Distance is per-rank (node-level). Prefers ranks that host at least
- * one HUB-tier airport when picking a layover.
+ * Find next-hop RANK from origin_rank toward dest_rank on a rows x cols mesh.
+ *
+ * Distance matrix convention (after pruning):
+ *   d >= 0  : reachable in one hop
+ *   d == -1 : not reachable in one hop
+ *
+ * Selection rules, in priority order:
+ *   1. Direct hop if the edge exists.
+ *   2. Among reachable hops, prefer those that strictly reduce Manhattan
+ *      distance to dest in (row, col) — this replaces the old
+ *      "remaining < dist_to_dest" monotonic-progress rule.
+ *   3. Prefer ranks hosting at least one HUB-tier airport (unchanged).
+ *   4. Among equally-good Manhattan progress, prefer purely cardinal
+ *      moves (row XOR col matches dest) over diagonal-ish ones.
+ *   5. Smaller hop distance breaks any remaining ties.
+ *
+ * If no progress-making hop exists, fall back to returning dest_rank
+ * (mirrors the original behavior).
  */
 int airport_find_next_hop(airport_state_t *state, int origin_rank, int dest_rank)
 {
-    int dist_to_dest = dstm_distance_get(state->topology, origin_rank, dest_rank);
+    int cols = state->cols;
+    int na   = state->na;
 
-    if (dist_to_dest <= LAYOVER_THRESHOLD)
+    /* 1) Direct edge wins. */
+    int dist_to_dest_edge = dstm_distance_get(state->topology, origin_rank, dest_rank);
+    if (dist_to_dest_edge >= 0)
         return dest_rank;
 
-    int best_hop = -1;
-    int best_remaining = dist_to_dest;
-    int best_is_hub = 0;
-    int na = state->na;
+    /* Grid coordinates */
+    int o_row = origin_rank / cols, o_col = origin_rank % cols;
+    int d_row = dest_rank   / cols, d_col = dest_rank   % cols;
+
+    int manh_origin_to_dest = abs(d_row - o_row) + abs(d_col - o_col);
+
+    int best_hop       = -1;
+    int best_manh      = manh_origin_to_dest;  /* must strictly improve */
+    int best_is_hub    = 0;
+    int best_cardinal  = 0;                    /* 1 if hop is purely N/S/E/W */
+    int best_dist      = INT_MAX;
 
     for (int r = 0; r < state->num_ranks; r++) {
         if (r == origin_rank || r == dest_rank)
             continue;
 
         int dist_to_hop = dstm_distance_get(state->topology, origin_rank, r);
-        if (dist_to_hop > LAYOVER_THRESHOLD)
+        if (dist_to_hop < 0)
+            continue;  /* unreachable in one hop */
+
+        int h_row = r / cols, h_col = r % cols;
+        int manh_hop_to_dest = abs(d_row - h_row) + abs(d_col - h_col);
+
+        /* Strict progress in Manhattan distance — analog of the original
+         * "remaining >= dist_to_dest" prune. */
+        if (manh_hop_to_dest >= manh_origin_to_dest)
             continue;
 
-        int remaining = dstm_distance_get(state->topology, r, dest_rank);
-        if (remaining >= dist_to_dest)
-            continue;
-
-        /* Rank "is a hub" if any of its local airports is a HUB tier */
+        /* Hub preference (unchanged from original) */
         int is_hub = 0;
         for (int l = 0; l < na; l++) {
             if (state->tiers[airport_global(r, l, na)] == TIER_HUB) {
@@ -151,17 +183,36 @@ int airport_find_next_hop(airport_state_t *state, int origin_rank, int dest_rank
             }
         }
 
-        if (best_hop == -1 ||
-            (is_hub && !best_is_hub) ||
-            (is_hub == best_is_hub && remaining < best_remaining)) {
-            best_hop = r;
-            best_remaining = remaining;
-            best_is_hub = is_hub;
+        /* Purely cardinal step toward dest: aligns on one axis with origin
+         * and moves only on the other axis. */
+        int is_cardinal = (h_row == o_row) || (h_col == o_col);
+
+        /* Lexicographic preference:
+         *   smaller manh > is_hub > is_cardinal > smaller hop distance */
+        int take = 0;
+        if (best_hop == -1) {
+            take = 1;
+        } else if (manh_hop_to_dest != best_manh) {
+            take = (manh_hop_to_dest < best_manh);
+        } else if (is_hub != best_is_hub) {
+            take = is_hub;
+        } else if (is_cardinal != best_cardinal) {
+            take = is_cardinal;
+        } else {
+            take = (dist_to_hop < best_dist);
+        }
+
+        if (take) {
+            best_hop      = r;
+            best_manh     = manh_hop_to_dest;
+            best_is_hub   = is_hub;
+            best_cardinal = is_cardinal;
+            best_dist     = dist_to_hop;
         }
     }
 
     if (best_hop == -1)
-        return dest_rank;
+        return dest_rank;   /* original fallback behavior */
 
     return best_hop;
 }
