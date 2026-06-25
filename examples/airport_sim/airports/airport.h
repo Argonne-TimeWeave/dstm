@@ -10,7 +10,7 @@
 
 #define NUM_GATES 24
 
-#define LOGGING 1 // lazy
+#define LOGGING 0 // lazy
 
 typedef enum {
     TIER_HUB      = 0,
@@ -64,6 +64,7 @@ typedef struct {
     int              rank;
     int              num_ranks;
     int              na;             /* airports per rank */
+    int              cols;
     airport_tier_t  *tiers;          /* size: num_ranks * na (global) */
     dstm_distance_t *topology;       /* per-rank distance */
     dstm_darray_t   *gates;
@@ -85,6 +86,7 @@ void airport_init(airport_state_t *state,
                   int rank,
                   int num_ranks,
                   int na,
+                  int cols,
                   int work,
                   airport_tier_t *tiers,
                   dstm_distance_t *topology,

@@ -26,19 +26,25 @@ from pathlib import Path
 OP_NAMES = ["Recv", "Irecv", "Isend", "Send h", "Send b", "Send", "alltoall"]
 
 # Optional trailing number: int OR float (e.g. "0.001159", "1.5e-4", "42").
-_TAIL = r"(?:\s+[-+]?(?:\d+\.\d*|\.\d+|\d+)(?:[eE][-+]?\d+)?)?\s*$"
+_NUM  = r"(?:[-+]?(?:\d+\.\d*|\.\d+|\d+)(?:[eE][-+]?\d+)?)"
+# After the op token we require: optional whitespace+number, then end-of-line
+# (or end of string). MULTILINE makes $ match at every newline.
+_TAIL = rf"(?:[ \t]+{_NUM})?(?=\s|$|[^A-Za-z0-9])"
 
-# All patterns are case-insensitive so "ALLTOALL" and "alltoall" both match.
-_F = re.IGNORECASE
+# Case-insensitive + multiline so bare "Recv\n" and "Send b\n" both match.
+_F = re.IGNORECASE | re.MULTILINE
 
 OP_PATTERNS = {
-    "Recv":     re.compile(r"(?<![A-Za-z])Recv"      + _TAIL, _F),
-    "Irecv":    re.compile(r"(?<![A-Za-z])Irecv"     + _TAIL, _F),
-    "Isend":    re.compile(r"(?<![A-Za-z])Isend"     + _TAIL, _F),
-    "Send h":   re.compile(r"(?<![A-Za-z])Send\s+h"  + _TAIL, _F),
-    "Send b":   re.compile(r"(?<![A-Za-z])Send\s+b"  + _TAIL, _F),
-    "Send":     re.compile(r"(?<![A-Za-z])Send"      + _TAIL, _F),   # plain Send only
-    "alltoall": re.compile(r"(?<![A-Za-z])alltoall"  + _TAIL, _F),
+    # Plain Recv — must not be followed by a letter (so "Recvd" wouldn't match)
+    "Recv":     re.compile(r"(?<![A-Za-z])Recv(?![A-Za-z])"            + _TAIL, _F),
+    "Irecv":    re.compile(r"(?<![A-Za-z])Irecv(?![A-Za-z])"           + _TAIL, _F),
+    "Isend":    re.compile(r"(?<![A-Za-z])Isend(?![A-Za-z])"           + _TAIL, _F),
+    "Send h":   re.compile(r"(?<![A-Za-z])Send\s+h(?![A-Za-z])"        + _TAIL, _F),
+    "Send b":   re.compile(r"(?<![A-Za-z])Send\s+b(?![A-Za-z])"        + _TAIL, _F),
+    # Plain Send only: must NOT be followed by whitespace+h/b (those are their own ops),
+    # and must not be part of a longer word like "Sender".
+    "Send":     re.compile(r"(?<![A-Za-z])Send(?![A-Za-z])(?!\s+[hb](?![A-Za-z]))" + _TAIL, _F),
+    "alltoall": re.compile(r"(?<![A-Za-z])alltoall(?![A-Za-z])"        + _TAIL, _F),
 }
 
 # Pulls "<rank>/<size>" out of the "normal:94/256:" style prefix, if present.
@@ -54,13 +60,12 @@ def format_csv(totals):
     return ",".join(str(c) for c in counts + [sum(counts)])
 
 def classify(line):
-    """Return the op name this line represents, or None."""
-    if "airport_sim" not in line:
-        return None
-    for op in OP_NAMES:
-        if OP_PATTERNS[op].search(line):
-            return op
-    return None
+    hits = []
+    for op in ["Send h", "Send b", "Irecv", "Isend", "alltoall", "Recv", "Send"]:
+        for m in OP_PATTERNS[op].finditer(line):
+            hits.append((m.start(), op))
+    hits.sort()
+    return [op for _, op in hits]
 
 
 def rank_of(line):
@@ -73,13 +78,14 @@ def count_stream(fp, per_rank):
     by_rank = defaultdict(Counter)
     for raw in fp:
         line = raw.rstrip("\n")
-        op = classify(line)
-        if op is None:
+        ops = classify(line)
+        if not ops:
             continue
-        totals[op] += 1
-        if per_rank:
-            r = rank_of(line) or "?"
-            by_rank[r][op] += 1
+        r = rank_of(line) if per_rank else None
+        for op in ops:
+            totals[op] += 1
+            if per_rank:
+                by_rank[r or "?"][op] += 1
     return totals, by_rank
 
 
