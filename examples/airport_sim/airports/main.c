@@ -71,10 +71,11 @@ int main(int argc, char *argv[])
 
     for (int i = 0; i < num_ranks; i++) {
         for (int j = 0; j < num_ranks; j++) {
-            if (topology->distances[i * num_ranks + j] > LAYOVER_THRESHOLD)
+            if (topology->distances[i * num_ranks + j] > LAYOVER_THRESHOLD) {
                 topology->distances[i * num_ranks + j] = -1;
-                if (rank == 0)
-                    printf("%d ", topology->distances[i * num_ranks + j]);
+            }   
+            if (rank == 0)
+                printf("%d ", topology->distances[i * num_ranks + j]);
         }
         if (rank == 0)
             printf("\n");
@@ -97,17 +98,9 @@ int main(int argc, char *argv[])
 
     if (rank == 0) {
         printf("Mesh topology: %d ranks (%dx%d grid), %d airports/rank "
-               "(%d total), %d gates/rank, layover threshold=%d, work=%d\n",
+               "(%d total), layover threshold=%d, work=%d\n",
                num_ranks, rows, cols, na, total_airports,
-               NUM_GATES, LAYOVER_THRESHOLD, work);
-        /*
-        for (int r = 0; r < num_ranks; r++) {
-            for (int l = 0; l < na; l++) {
-                int g = airport_global(r, l, na);
-                printf("  Airport %d.%d: %s\n", r, l, tier_name[tiers[g]]);
-            }
-        }
-        */
+               LAYOVER_THRESHOLD, work);
     }
 
     status = dstm_start(topology);
@@ -121,7 +114,7 @@ int main(int argc, char *argv[])
     dstm_darray_t *gates;
     status = dstm_darray_create_equal(&gates,
                                       sizeof(gate_slot_t),
-                                      (size_t)num_ranks * NUM_GATES);
+                                      (size_t)num_ranks * num_ranks);
     if (status != DSTM_SUCCESS) {
         dstm_log_error("Failed to create gates array");
         free(tiers);
@@ -146,13 +139,18 @@ int main(int argc, char *argv[])
         start = MPI_Wtime(); 
 
     for (dstm_time_t t = 0; t < timesteps; t++) {
-        size_t idx = gate_index(rank, rank);
-        dstm_darray_put(state.gates, idx, &empty_gate, 0, t);
+        for (int g = 0; g < num_ranks; g++) {
+            int delta = dstm_distance_get(topology, rank, g);
+            if (delta == -1)
+                continue;
+            size_t idx = (size_t)rank * num_ranks + g;
+            dstm_darray_put(state.gates, idx, &empty_gate, 0, t);
+        }
     }
 
     if (LOGGING) {
-        end + MPI_Wtime();
-        dstm_log_normal("PUT %f\n");
+        end = MPI_Wtime();
+        dstm_log_normal("PUT %f\n", end - start);
     }
 
     /* Main simulation loop */

@@ -7,9 +7,7 @@
 #define GATE_CAPACITY        128
 #define LAYOVER_THRESHOLD    3
 
-#define NUM_GATES 24
-
-#define LOGGING 1 //lazy
+#define LOGGING 0 //lazy
 
 typedef enum {
     TIER_HUB      = 0,
@@ -32,7 +30,7 @@ typedef struct {
     int         legs_completed;
     dstm_time_t departure_time;
     dstm_time_t arrive_time;
-    int         flight_id;
+    long long   flight_id;
     char        payload[FLIGHT_PAYLOAD_SIZE];
 } flight_t;
 
@@ -49,16 +47,6 @@ extern const gate_slot_t empty_gate;
  * derived from the computation so the compiler can't optimize it away.
  */
 double airport_do_work(int iterations);
-
-/*
- * Per-rank inbox layout: gates indexed by destination rank, with NUM_GATES
- * slots per rank (sender hashes into one of them). Local airport within
- * the rank is resolved on receive (from flight_t.dest_local).
- */
-static inline size_t gate_index(int dest_rank, int source_rank) {
-    int gate = (source_rank * 49) % NUM_GATES;
-    return (size_t)dest_rank * NUM_GATES + gate;
-}
 
 typedef struct {
     int              rank;
