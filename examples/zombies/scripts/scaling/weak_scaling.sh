@@ -20,11 +20,12 @@ OUT="${OUT:-weak_scaling_zombies.csv}"
 # Per-rank workload (held constant for weak scaling).
 NL=128
 NH=512
-WORK=1000
+WORK=0
 TIME=256
 SEED=42
 
 # Path to the two binaries.
+FIXED_BIN="./../../dstm_fixed/zombies"
 DSTM_BIN="./../../dstm_zombies/zombies"
 MPI_BIN="./../../mpi_zombies/zombies"
 
@@ -51,7 +52,7 @@ if [[ ! -r "$COBALT_NODEFILE" ]]; then
     echo "ERROR: COBALT_NODEFILE=$COBALT_NODEFILE not readable." >&2
     exit 1
 fi
-for bin in "$DSTM_BIN" "$MPI_BIN"; do
+for bin in "$DSTM_BIN" "$MPI_BIN" "$FIXED_BIN"; do
     if [[ ! -x "$bin" ]]; then
         echo "ERROR: binary not found or not executable: $bin" >&2
         exit 1
@@ -126,6 +127,7 @@ run_one() {
 for cfg in "${CONFIGS[@]}"; do
     read -r RANKS PPN NODES <<<"$cfg"
     for trial in $(seq 1 "$TRIALS"); do
+        run_one "fixed" "$FIXED_BIN" "$RANKS" "$PPN" "$NODES" "$trial"
         run_one "dstm" "$DSTM_BIN" "$RANKS" "$PPN" "$NODES" "$trial"
         run_one "mpi"  "$MPI_BIN"  "$RANKS" "$PPN" "$NODES" "$trial"
     done

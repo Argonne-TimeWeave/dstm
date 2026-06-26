@@ -12,7 +12,6 @@ const int   loc_tier_weight[] = {       60,       30,      10 };
 
 cell_slot_t empty_cell = { .n_humans = 0 };
 
-#define MAX_TRAVEL_HOURS   2
 #define EVENT_MIN_HOURS    2
 
 /* ---------- generic helpers ---------- */
@@ -48,7 +47,6 @@ int human_find_next_hop(zombie_state_t *st, int from_rank, int to_rank)
  * home cell is somehow filtered out). */
 void pick_event_location(zombie_state_t *st, event_slot_t slot,
                          int home_node, int home_local,
-                         int max_travel_hours,
                          int *out_node, int *out_local)
 {
     (void)slot;
@@ -59,10 +57,10 @@ void pick_event_location(zombie_state_t *st, event_slot_t slot,
     long total_weight = 0;
     for (int i = 0; i < total_cells; i++) {
         int node = i / st->nl;
-        int cost = (node == home_node)
-                    ? 0
-                    : dstm_distance_get(st->topology, home_node, node);
-        if (cost <= max_travel_hours)
+        int cost = 0;
+        if (node != home_node)
+            cost = dstm_distance_get(st->topology, home_node, node);
+        if (cost <= MAX_TRAVEL_HOURS)
             total_weight += loc_tier_weight[st->loc_tiers[i]];
     }
 
@@ -77,10 +75,10 @@ void pick_event_location(zombie_state_t *st, event_slot_t slot,
     long acc = 0;
     for (int i = 0; i < total_cells; i++) {
         int node = i / st->nl;
-        int cost = (node == home_node)
-                    ? 0
-                    : dstm_distance_get(st->topology, home_node, node);
-        if (cost > max_travel_hours) continue;
+        int cost = 0;
+        if (node != home_node)
+            cost = dstm_distance_get(st->topology, home_node, node);
+        if (cost > MAX_TRAVEL_HOURS) continue;
 
         acc += loc_tier_weight[st->loc_tiers[i]];
         if (r < acc) {
@@ -128,7 +126,6 @@ static void make_event(zombie_state_t *st, event_slot_t slot,
      * it starts. We require travel <= MAX_TRAVEL_HOURS, which is also
      * <= EVENT_MIN_HOURS, so even a late-arriving human gets on-site time. */
     pick_event_location(st, slot, home_node, home_local,
-                        MAX_TRAVEL_HOURS,
                         &out->location_node, &out->location_local);
 }
 

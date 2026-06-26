@@ -1,1 +1,1 @@
-SUBDIRS = dstm_zombies mpi_zombies
+SUBDIRS = dstm_zombies mpi_zombies dstm_fixed
