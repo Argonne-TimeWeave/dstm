@@ -84,9 +84,9 @@ int main(int argc, char *argv[])
 
     if (rank == 0) {
         printf("Mesh topology: %d ranks (%dx%d grid), %d airports/rank "
-               "(%d total), %d gates/rank, layover threshold=%d, work=%d\n",
+               "(%d total), layover threshold=%d, work=%d\n",
                num_ranks, rows, cols, na, total_airports,
-               NUM_GATES, LAYOVER_THRESHOLD, work);
+               LAYOVER_THRESHOLD, work);
     }
 
     /* No dstm_start / dstm_darray_create_equal — MPI handles transport. */
