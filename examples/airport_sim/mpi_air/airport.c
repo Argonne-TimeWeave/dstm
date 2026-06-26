@@ -243,7 +243,7 @@ void airport_timestep(airport_state_t *state, dstm_time_t t, int quiet)
         if (flt.dest_rank == rank) {
             int dl = flt.dest_local;
             if (dl < 0 || dl >= na) {
-                dstm_log_error("Bad dest_local=%d on flight %d", dl, flt.flight_id);
+                dstm_log_error("Bad dest_local=%d on flight %lld", dl, flt.flight_id);
                 continue;
             }
             state->arrivals[dl]++;
@@ -251,7 +251,7 @@ void airport_timestep(airport_state_t *state, dstm_time_t t, int quiet)
             (void)sink;
 
             int og = airport_global(flt.origin_rank, flt.origin_local, na);
-            dstm_log_normal("Rank %d [t=%ld]: LANDED flight %d at airport "
+            dstm_log_normal("Rank %d [t=%ld]: LANDED flight %lld at airport "
                             "%d.%d — origin=%d.%d (%s) dep_t=%ld legs=%d \"%s\"\n",
                             rank, t, flt.flight_id, rank, dl,
                             flt.origin_rank, flt.origin_local,
@@ -259,7 +259,7 @@ void airport_timestep(airport_state_t *state, dstm_time_t t, int quiet)
                             flt.departure_time, flt.legs_completed + 1,
                             flt.payload);
         } else {
-            int local_hub = (flt.origin_rank * 49) % NUM_GATES % na;
+            int local_hub = flt.origin_rank % na;
             state->connections[local_hub]++;
             flt.legs_completed++;
 
@@ -274,14 +274,14 @@ void airport_timestep(airport_state_t *state, dstm_time_t t, int quiet)
                 ob->flights[ob->n_flights++] = flt;
 
                 if (next_hop == flt.dest_rank) {
-                    dstm_log_normal("Rank %d [t=%ld]: CONNECTING flight %d "
+                    dstm_log_normal("Rank %d [t=%ld]: CONNECTING flight %lld "
                                     "-> final dst rank=%d (airport %d.%d) "
                                     "delta=%d arrive_t=%ld (leg %d)\n",
                                     rank, t, flt.flight_id, next_hop,
                                     flt.dest_rank, flt.dest_local, delta,
                                     flt.arrive_time, flt.legs_completed);
                 } else {
-                    dstm_log_normal("Rank %d [t=%ld]: CONNECTING flight %d "
+                    dstm_log_normal("Rank %d [t=%ld]: CONNECTING flight %lld "
                                     "-> hop rank=%d toward dst=%d.%d delta=%d "
                                     "arrive_t=%ld (leg %d)\n",
                                     rank, t, flt.flight_id, next_hop,
@@ -290,7 +290,7 @@ void airport_timestep(airport_state_t *state, dstm_time_t t, int quiet)
                 }
             } else {
                 dstm_log_warning("Rank %d [t=%ld]: CONNECTION DELAYED "
-                                 "flight %d — outbox to rank %d full\n",
+                                 "flight %lld — outbox to rank %d full\n",
                                  rank, t, flt.flight_id, next_hop);
             }
         }
@@ -324,7 +324,7 @@ void airport_timestep(airport_state_t *state, dstm_time_t t, int quiet)
                 .next_hop_rank = next_hop, .legs_completed = 0,
                 .departure_time = t,
                 .arrive_time = t + delta,
-                .flight_id = (rank * na + l) * 100000 + state->flight_counter++,
+                .flight_id = (long long) (rank * na + l) * 100000 + state->flight_counter++,
             };
             int is_direct = (next_hop == dest_rank);
             snprintf(flt.payload, sizeof(flt.payload),
@@ -336,14 +336,14 @@ void airport_timestep(airport_state_t *state, dstm_time_t t, int quiet)
             state->departures[l]++;
 
             if (is_direct) {
-                dstm_log_normal("Rank %d [t=%ld]: DEPART flight %d from %d.%d "
+                dstm_log_normal("Rank %d [t=%ld]: DEPART flight %lld from %d.%d "
                                 "dst=%d.%d (%s) DIRECT delta=%d arrive_t=%ld\n",
                                 rank, t, flt.flight_id, rank, l,
                                 dest_rank, dest_local,
                                 tier_name[state->tiers[dg]], delta,
                                 flt.arrive_time);
             } else {
-                dstm_log_normal("Rank %d [t=%ld]: DEPART flight %d from %d.%d "
+                dstm_log_normal("Rank %d [t=%ld]: DEPART flight %lld from %d.%d "
                                 "dst=%d.%d via rank %d delta=%d arrive_t=%ld\n",
                                 rank, t, flt.flight_id, rank, l,
                                 dest_rank, dest_local, next_hop, delta,

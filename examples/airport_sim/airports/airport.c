@@ -233,8 +233,12 @@ void airport_timestep(airport_state_t *state, dstm_time_t t, int quiet)
 
     gate_slot_t recv_gate;
 
-    for (int g = 0; g < NUM_GATES; g++) {
-        size_t idx = (size_t)rank * NUM_GATES + g;
+    for (int g = 0; g < num_ranks; g++) {
+        size_t idx = (size_t)rank * num_ranks + g;
+        int delta = dstm_distance_get(state->topology, rank, g);
+        if (delta == -1) {
+            continue;
+        }
 
         if (LOGGING)
             start = MPI_Wtime();
@@ -267,14 +271,14 @@ void airport_timestep(airport_state_t *state, dstm_time_t t, int quiet)
                 /* Final destination is on this rank — deliver to local airport */
                 int dl = flt.dest_local;
                 if (dl < 0 || dl >= na) {
-                    dstm_log_error("Bad dest_local=%d on flight %d", dl, flt.flight_id);
+                    dstm_log_error("Bad dest_local=%d on flight %lld", dl, flt.flight_id);
                     continue;
                 }
 
                 state->arrivals[dl]++;
 
                 int og = airport_global(flt.origin_rank, flt.origin_local, na);
-                dstm_log_normal("Rank %d [t=%ld]: LANDED flight %d at airport "
+                dstm_log_normal("Rank %d [t=%ld]: LANDED flight %lld at airport "
                                 "%d.%d — origin=%d.%d (%s) dep_t=%ld legs=%d \"%s\"\n",
                                 rank, t, flt.flight_id,
                                 rank, dl,
@@ -302,14 +306,14 @@ void airport_timestep(airport_state_t *state, dstm_time_t t, int quiet)
                     ob->flights[ob->n_flights++] = flt;
 
                     if (next_hop == flt.dest_rank) {
-                        dstm_log_normal("Rank %d [t=%ld]: CONNECTING flight %d "
+                        dstm_log_normal("Rank %d [t=%ld]: CONNECTING flight %lld "
                                         "-> final dst rank=%d (airport %d.%d) "
                                         "delta=%d (leg %d)\n",
                                         rank, t, flt.flight_id,
                                         next_hop, flt.dest_rank, flt.dest_local,
                                         delta, flt.legs_completed);
                     } else {
-                        dstm_log_normal("Rank %d [t=%ld]: CONNECTING flight %d "
+                        dstm_log_normal("Rank %d [t=%ld]: CONNECTING flight %lld "
                                         "-> hop rank=%d toward dst=%d.%d delta=%d (leg %d)\n",
                                         rank, t, flt.flight_id,
                                         next_hop, flt.dest_rank, flt.dest_local,
@@ -317,7 +321,7 @@ void airport_timestep(airport_state_t *state, dstm_time_t t, int quiet)
                     }
                 } else {
                     dstm_log_warning("Rank %d [t=%ld]: CONNECTION DELAYED "
-                                     "flight %d — outbox to rank %d full\n",
+                                     "flight %lld — outbox to rank %d full\n",
                                      rank, t, flt.flight_id, next_hop);
                 }
             }
@@ -360,7 +364,7 @@ void airport_timestep(airport_state_t *state, dstm_time_t t, int quiet)
                 .next_hop_rank  = next_hop,
                 .legs_completed = 0,
                 .departure_time = t,
-                .flight_id      = (rank * na + l) * 100000 + state->flight_counter++,
+                .flight_id      = (long long)(rank * na + l) * 100000 + state->flight_counter++,
             };
 
             int is_direct = (next_hop == dest_rank);
@@ -378,13 +382,13 @@ void airport_timestep(airport_state_t *state, dstm_time_t t, int quiet)
             (void)sink;
 
             if (is_direct) {
-                dstm_log_normal("Rank %d [t=%ld]: DEPART flight %d from %d.%d "
+                dstm_log_normal("Rank %d [t=%ld]: DEPART flight %lld from %d.%d "
                                 "dst=%d.%d (%s) DIRECT delta=%d\n",
                                 rank, t, flt.flight_id, rank, l,
                                 dest_rank, dest_local,
                                 tier_name[state->tiers[dg]], delta);
             } else {
-                dstm_log_normal("Rank %d [t=%ld]: DEPART flight %d from %d.%d "
+                dstm_log_normal("Rank %d [t=%ld]: DEPART flight %lld from %d.%d "
                                 "dst=%d.%d via rank %d delta=%d\n",
                                 rank, t, flt.flight_id, rank, l,
                                 dest_rank, dest_local, next_hop, delta);
@@ -402,8 +406,11 @@ void airport_timestep(airport_state_t *state, dstm_time_t t, int quiet)
         if (state->outbox[dest].n_flights == 0)
             continue;
 
-        size_t idx = gate_index(dest, rank);
+        size_t idx = (size_t)dest * num_ranks + rank;
         int delta = dstm_distance_get(state->topology, rank, dest);
+
+        if (delta == -1)
+            continue; 
 
         if (LOGGING)
             start = MPI_Wtime();
