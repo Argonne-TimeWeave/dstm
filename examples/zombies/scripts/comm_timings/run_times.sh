@@ -31,9 +31,10 @@ echo $EXAMPLES_DIR
 
 declare -A BUILDS=(
     [dstm]="$EXAMPLES_DIR/dstm_zombies/zombies"
+    [fixed]="$EXAMPLES_DIR/dstm_fixed/zombies"
     [mpi]="$EXAMPLES_DIR/mpi_zombies/zombies"
 )
-BUILD_ORDER=(dstm mpi)
+BUILD_ORDER=(dstm fixed mpi)
 
 PARSER="$SCRIPT_DIR/parse_times.py"
 if [[ ! -f "$PARSER" ]]; then
