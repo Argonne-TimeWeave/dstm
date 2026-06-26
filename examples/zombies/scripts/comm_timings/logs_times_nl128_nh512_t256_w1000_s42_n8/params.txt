@@ -7,6 +7,7 @@ WORK=1000
 SEED=42
 BUILDS:
   dstm = /home/ncassarino/dstm/examples/zombies/dstm_zombies/zombies
+  fixed = /home/ncassarino/dstm/examples/zombies/dstm_fixed/zombies
   mpi = /home/ncassarino/dstm/examples/zombies/mpi_zombies/zombies
 MPI_PREFIX=/soft/libraries/mpi/openmpi/4.1.1
-started=2026-06-24T18:50:57+00:00
+started=2026-06-26T19:04:53+00:00
