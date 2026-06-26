@@ -2,10 +2,11 @@
 """
 Plot stacked-bar comm timings from a comm_times.csv produced by run_times.sh.
 
-Each x-tick is a rank count. At each tick, one bar per build (dstm, mpi)
-is drawn side-by-side. Bar height = total application runtime (elapsed_s).
-The bar is stacked by per-op communication time (seconds per rank), with
-the leftover time shown as OTHER (compute + everything not in a tracked op).
+Each x-tick is a rank count. At each tick, one bar per build (dstm, fixed,
+mpi) is drawn side-by-side. Bar height = total application runtime
+(elapsed_s). The bar is stacked by per-op communication time (seconds per
+rank), with the leftover time shown as OTHER (compute + everything not in
+a tracked op).
 
 Usage:
     python plot_times.py <comm_times.csv>
@@ -61,7 +62,7 @@ def organize(rows):
     """
     Return:
       ranks  : sorted list of unique rank counts
-      builds : list of unique build names (dstm first, mpi second, rest sorted)
+      builds : list of unique build names (dstm, fixed, mpi first; rest sorted)
       data   : dict[(build, ranks)] -> {"elapsed": float, "ops": {op: seconds}}
     """
     data = {}
@@ -77,7 +78,7 @@ def organize(rows):
             "ops": {op: r[op] for op in OP_COLS},
         }
 
-    preferred = ["dstm", "mpi"]
+    preferred = ["dstm", "fixed", "mpi"]
     builds = [b for b in preferred if b in build_set]
     builds += sorted(b for b in build_set if b not in preferred)
 
@@ -102,8 +103,11 @@ def plot(ranks, builds, data, out_path, pct_mode, title):
     op_color = {op: cmap(i % 10) for i, op in enumerate(OP_COLS)}
     op_color["OTHER"] = (0.78, 0.78, 0.78, 1.0)
 
-    # Slight visual tuning so DSTM vs MPI bars are distinguishable beyond color.
-    build_hatches = {"dstm": "", "mpi": "//"}
+    # Per-build hatch so the three builds remain distinguishable beyond color.
+    #   dstm  : solid (no hatch)
+    #   fixed : dotted
+    #   mpi   : diagonal
+    build_hatches = {"dstm": "", "fixed": "..", "mpi": "//"}
     edge_color = "black"
 
     fig, ax = plt.subplots(figsize=(max(8, 1.0 * n_groups + 2), 6))
