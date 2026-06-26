@@ -68,8 +68,27 @@ echo "MPI prefix: $MPI_PREFIX"
 echo "Total airports (fixed): $TOTAL_AIRPORTS"
 echo
 
-TS="$(date +%Y%m%d_%H%M%S)"
-CSV="$SCRIPT_DIR/strong_scaling_${TS}.csv"
+# ---------- Output filename from parameters ----------
+# Compact, sorted, deterministic. Same params -> same filename.
+# Format:
+#   strong_n<NODES>_apr<APR>_t<TIMESTEPS>_w<WORK>_tr<TRIALS>_s<SEED>_r<MIN>-<MAX>x<COUNT>.csv
+RANKS_MIN=${RANKS[0]}
+RANKS_MAX=${RANKS[-1]}
+RANKS_COUNT=${#RANKS[@]}
+
+BASE="strong_n${NODES}_apr${AIRPORTS_PER_RANK}_t${TIMESTEPS}_w${WORK}_tr${TRIALS}_s${SEED}_r${RANKS_MIN}-${RANKS_MAX}x${RANKS_COUNT}"
+CSV="$SCRIPT_DIR/${BASE}.csv"
+
+# Avoid clobbering an earlier run with identical params: append _2, _3, ...
+if [[ -e "$CSV" ]]; then
+    i=2
+    while [[ -e "$SCRIPT_DIR/${BASE}_${i}.csv" ]]; do
+        i=$(( i + 1 ))
+    done
+    CSV="$SCRIPT_DIR/${BASE}_${i}.csv"
+fi
+
+echo "CSV output: $CSV"
 
 # ---------- CSV header ----------
 echo "build,ranks,ppn,nodes_used,na,total_airports,timesteps,work,trial,elapsed_s,steps_per_s,departures,arrivals,connections,status" > "$CSV"
