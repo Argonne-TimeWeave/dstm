@@ -107,7 +107,7 @@ def plot(ranks, builds, data, out_path, per_rank, title):
     op_handles = {}
     build_handles = {}
 
-    build_hatches = {"dstm": "", "mpi": "//"}
+    build_hatches = {"dstm": "", "fixed": "..",  "mpi": "//"}
     edge_color = "black"
 
     for bi, build in enumerate(builds):
