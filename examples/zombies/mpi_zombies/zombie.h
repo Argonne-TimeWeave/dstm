@@ -16,7 +16,7 @@ extern const char *loc_tier_name[];
 extern const int   loc_tier_weight[];
 
 #define CELL_CAPACITY  64    /* per-bundle, only for inter-rank traffic */
-#define LOGGING 1
+#define LOGGING 0
 
 /* High-risk humans (immunocompromised etc.) can be infected by
  * contagious carriers in nearby local cells, not just the same cell. */
