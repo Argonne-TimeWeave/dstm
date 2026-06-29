@@ -20,7 +20,7 @@ NODES=8
 LOCATIONS_PER_RANK=128
 HUMANS_PER_RANK=512
 TIMESTEPS=72
-WORK=1000
+WORK=0
 SEED=42
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -29,8 +29,9 @@ EXAMPLES_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 declare -A BUILDS=(
     [dstm]="$EXAMPLES_DIR/dstm_zombies/zombies"
     [mpi]="$EXAMPLES_DIR/mpi_zombies/zombies"
+    [fixed]="$EXAMPLES_DIR/dstm_fixed/zombies"
 )
-BUILD_ORDER=(dstm mpi)
+BUILD_ORDER=(fixed dstm mpi)
 
 PARSER="$SCRIPT_DIR/parse.py"
 if [[ ! -f "$PARSER" ]]; then
