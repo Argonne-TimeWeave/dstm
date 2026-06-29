@@ -754,6 +754,7 @@ void zombie_timestep(zombie_state_t *st, dstm_time_t t)
     if (LOGGING) {
         end = MPI_Wtime();
         printf("_Alltoall: %f\n", end - start);
+        printf("alltoall\n");
     }
 
     /* Phase B: sparse payload exchange. */
@@ -775,6 +776,7 @@ void zombie_timestep(zombie_state_t *st, dstm_time_t t)
         if (LOGGING) {
             end = MPI_Wtime();
             sum += end - start;
+            printf("Irecv\n");
         }
     }
 
@@ -797,6 +799,7 @@ void zombie_timestep(zombie_state_t *st, dstm_time_t t)
         if (LOGGING) {
             end = MPI_Wtime(); 
             sum += end - start;
+            printf("Isend\n");
         }   
     }
     
@@ -812,6 +815,11 @@ void zombie_timestep(zombie_state_t *st, dstm_time_t t)
     if (LOGGING) {
         end = MPI_Wtime();
         printf("_Waitall: %f\n", end - start);
+            
+        if (n_recv > 0)
+            printf("Waitall\n");
+        if (n_send > 0)
+            printf("Waitall\n");
     }
 
     /* Stash for next step's drain. inbox already carries arrive_time
