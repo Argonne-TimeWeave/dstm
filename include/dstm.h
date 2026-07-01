@@ -261,7 +261,39 @@ typedef int64_t dstm_time_t;
  * DSTM START/FINISH
  ******************************************************************************/
 
-/* basic configuration of dstm:
+/* Options for the dstm
+ * @param region_size  Size in bytes for the local region. Will be
+ *                     rounded up to the next power of 2. Must be at
+ *                     least DSTM_REGION_MIN_BLOCK_SIZE (64 bytes).
+ */
+struct dstm_opts_s {
+	size_t region_size;
+};
+typedef struct dstm_opts_s dstm_opts_t;
+
+extern dstm_opts_t dstm_default_options;
+
+/**
+ * Initialize the DSTM.
+ *
+ * Like dstm_start(), but allows specifying the size of the local memory
+ * region instead of using the default DSTM_DEFAULT_REGION_SIZE.
+ *
+ * @param dist         Distance matrix defining the network topology.
+ *                     Must have size equal to world_size.
+ * @param opts         See dstm_opts_t.
+ *
+ * @return 0 if successful; an error code otherwise.
+ */
+int dstm_start_custom(dstm_distance_t *dist, dstm_opts_t opts);
+
+/**
+ * Initialize the DSTM, with default options.
+ *
+ * @param dist         Distance matrix defining the network topology.
+ *                     Must have size equal to world_size.
+ *
+ * @return 0 if successful; an error code otherwise.
  */
 int dstm_start(dstm_distance_t *dist);
 

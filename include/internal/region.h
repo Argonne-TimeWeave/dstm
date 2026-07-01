@@ -33,7 +33,7 @@ extern "C" {
  * CONSTANTS
  ******************************************************************************/
 
-#define DSTM_DEFAULT_REGION_SIZE (1 << 20)
+#define DSTM_DEFAULT_REGION_SIZE (1 << 30) /* 2 ^ 30 should be 1 GiB */
 #define DSTM_REGION_MIN_BLOCK_SIZE 64 /* 64 bytes minimum allocation */
 #define DSTM_REGION_MAX_ORDER 30 /* Supports up to 1GB regions */
 
