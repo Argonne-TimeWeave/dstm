@@ -32,6 +32,8 @@ int main(int argc, char *argv[])
             work = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--quiet"))
             quiet = 1;
+        else if (!strcmp(argv[i], "--info"))
+            quiet = 2;
         else if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h")) {
             usage(argv[0]);
             return 0;
@@ -49,9 +51,11 @@ int main(int argc, char *argv[])
     dstm_init(&argc, &argv);
     dstm_log_init(stdout, "airport_sim");
 
-    if (quiet)
+    if (quiet) {
         dstm_log_setlevel(DSTM_LOG_QUIET);
-    else
+        if (quiet == 2)
+            dstm_log_setlevel(DSTM_LOG_INFO);
+    } else
         dstm_log_setlevel(DSTM_LOG_NORMAL);
 
     dstm_distance_t *topology;

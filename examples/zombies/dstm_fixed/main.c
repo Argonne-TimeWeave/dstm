@@ -46,7 +46,8 @@ int main(int argc, char *argv[])
         else if (!strcmp(argv[i], "--nl")   && i+1 < argc) nl        = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--nh")   && i+1 < argc) nh        = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--work") && i+1 < argc) work      = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--quiet"))               quiet     = 1;
+        else if (!strcmp(argv[i], "--quiet"))               quiet    = 1;
+        else if (!strcmp(argv[i], "--info"))                quiet    = 2;
         else if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h")) {
             usage(argv[0]); return 0;
         }
@@ -62,7 +63,13 @@ int main(int argc, char *argv[])
 
     dstm_init(&argc, &argv);
     dstm_log_init(stdout, "zombie_sim");
-    dstm_log_setlevel(quiet ? DSTM_LOG_QUIET : DSTM_LOG_NORMAL);
+
+    if (quiet) {
+        dstm_log_setlevel(DSTM_LOG_QUIET);
+        if (quiet == 2)
+            dstm_log_setlevel(DSTM_LOG_INFO);
+    } else
+        dstm_log_setlevel(DSTM_LOG_NORMAL);
 
     /* Build mesh topology. */
     dstm_distance_t *topology;
