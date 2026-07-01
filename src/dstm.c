@@ -33,6 +33,7 @@ int dstm_errno = 0;
  * Should be in a user controlled struct, but a singleton will do for now.
  ******************************************************************************/
 
+dstm_opts_t dstm_default_options = {DSTM_DEFAULT_REGION_SIZE};
 dstm_context_t dstm_global_context = {0, 0, 0, 0, NULL, NULL};
 
 /*******************************************************************************
@@ -52,7 +53,7 @@ dstm_region_t *dstm_get_local_region(void)
  * Init functions
  ******************************************************************************/
 
-int dstm_start_with_size(dstm_distance_t *dist, size_t region_size)
+int dstm_start_custom(dstm_distance_t *dist, dstm_opts_t opts)
 {
 	int err;
 
@@ -62,7 +63,7 @@ int dstm_start_with_size(dstm_distance_t *dist, size_t region_size)
 	if (dstm_distance_size(dist) != (size_t)dstm_global_context.world_size)
 		return -DSTM_EINVAL;
 
-	if (region_size < DSTM_REGION_MIN_BLOCK_SIZE)
+	if (opts.region_size < DSTM_REGION_MIN_BLOCK_SIZE)
 		return -DSTM_EINVAL;
 	
 	/* Reset the per-session monotonic tag counter so each session
@@ -74,12 +75,12 @@ int dstm_start_with_size(dstm_distance_t *dist, size_t region_size)
 		return err;
 
 	/* create a region locally with user-specified size */
-	err = dstm_region_create(&dstm_global_context.region, region_size);
+	err = dstm_region_create(&dstm_global_context.region, opts.region_size);
 	if (err) {
 		dstm_distance_destroy(&dstm_global_context.distances);
 		return err;
 	}
-	
+
 	/* Duplicate user_comm into a fresh per-session communicator.  All
 	 * session-level traffic (puts, gets, heartbeats, barrier tokens)
 	 * will be matched against this private comm; messages from a
@@ -92,8 +93,7 @@ int dstm_start_with_size(dstm_distance_t *dist, size_t region_size)
 
 int dstm_start(dstm_distance_t *dist)
 {
-	/* Use the default region size */
-	return dstm_start_with_size(dist, DSTM_DEFAULT_REGION_SIZE);
+	return dstm_start_custom(dist, dstm_default_options);
 }
 
 int dstm_fini(dstm_time_t last_time)
