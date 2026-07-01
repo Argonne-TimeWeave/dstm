@@ -79,6 +79,8 @@ int main(int argc, char *argv[])
             send_prob = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--quiet"))
             quiet = 1;
+        else if (!strcmp(argv[i], "--info"))
+            quiet = 2;
         else if (!strcmp(argv[i], "--dist"))
             distance_matrix_metric = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h")) {
@@ -95,9 +97,11 @@ int main(int argc, char *argv[])
     dstm_init(&argc, &argv);
     dstm_log_init(stdout, "network_sim");
 
-    if (quiet)
+    if (quiet) {
         dstm_log_setlevel(DSTM_LOG_QUIET);
-    else
+        if (quiet == 2)
+            dstm_log_setlevel(DSTM_LOG_INFO);
+    } else
         dstm_log_setlevel(DSTM_LOG_NORMAL);
 
     dstm_distance_t *topology;
