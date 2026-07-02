@@ -99,6 +99,18 @@ static int dstm_version_can_become_readable(dstm_region_version_t *v)
 			if (nt + dist <= v->time)
 				return 0;
 		}
+
+        /* The local rank can still issue local puts (delta >= 0)
+         * targeting any effective time >= its own current logical
+         * time.  Until our own clock has moved strictly past v->time,
+         * a local put at v->time is still legal and the version must
+         * remain WRITABLE.
+         *
+         * Also gated by barrier_all_drained: after barrier round 1,
+         * no rank (including this one) will issue more puts.
+         */
+        if (region->local_heartbeat_time < v->time)
+            return 0;
 	}
 
 	return 1;
@@ -151,6 +163,9 @@ static int dstm_version_can_become_discardable(dstm_region_version_t *v)
 			if (nt - dist <= v->time)
 				return 0;
 		}
+
+        if (region->local_heartbeat_time < v->time)
+            return 0;
 	}
 
 	return 1;
