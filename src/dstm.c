@@ -120,7 +120,7 @@ int dstm_fini(dstm_time_t last_time)
 	return 0;
 }
 
-int dstm_init(int *argc, char **argv[])
+int dstm_init_comm(int *argc, char **argv[], MPI_Comm comm)
 {
 	(void)argc;
 	(void)argv;
@@ -132,16 +132,16 @@ int dstm_init(int *argc, char **argv[])
 		dstm_log_init(stderr, "dstm");
 
 	int world_size, rank;
-	MPI_Comm_size(MPI_COMM_WORLD, &world_size);
-	MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+	MPI_Comm_size(comm, &world_size);
+	MPI_Comm_rank(comm, &rank);
 
-	/* Duplicate MPI_COMM_WORLD into the long-lived user_comm.  This
+	/* Duplicate passed MPI_Comm into the long-lived user_comm.  This
 	 * gives DSTM a private message namespace for the entire process
 	 * lifetime, isolated from any other MPI traffic the application
 	 * may have.  Between sessions (or before the first dstm_start),
 	 * `comm` aliases user_comm so calls like dstm_darray_create can
 	 * still run their collectives. */
-	MPI_Comm_dup(MPI_COMM_WORLD, &dstm_global_context.user_comm);
+	MPI_Comm_dup(comm, &dstm_global_context.user_comm);
 	dstm_global_context.comm = dstm_global_context.user_comm;
 
 	dstm_global_context.world_size = world_size;
@@ -150,6 +150,11 @@ int dstm_init(int *argc, char **argv[])
 	dstm_msg_init();
 
 	return DSTM_SUCCESS;
+}
+
+int dstm_init(int *argc, char **argv[])
+{
+    return dstm_init_comm(argc, argv, MPI_COMM_WORLD);
 }
 
 int dstm_finalize(void)

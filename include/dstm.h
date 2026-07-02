@@ -25,6 +25,7 @@ extern "C" {
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
+#include <mpi.h>
 
 // clang-format off
 #include "dstm/error.h"
@@ -35,9 +36,36 @@ extern "C" {
  * Library Init/Fini
  ******************************************************************************/
 
-/** initializes the library, in particular using environment variables to figure
- * out if the library should emit messages at all and if a ratelimit is in
- * place.
+/** Initializes the library with a user-supplied MPI communicator.
+ *
+ * This is the primary initialization function for DSTM. The library will
+ * use the provided communicator instead of MPI_COMM_WORLD, allowing DSTM
+ * to operate on a subset of ranks or to avoid collisions with other MPI
+ * traffic in the application.
+ *
+ * The communicator is duplicated internally; the caller retains ownership
+ * of @p comm and may free it after this call returns.
+ *
+ * @param[in,out] argc: a pointer to the number of arguments in *argv
+ * @param[in,out] argv: an array of command line options.
+ * @param[in]     comm: the MPI communicator DSTM should use.
+ *
+ * If the library detects command line options it understands, it will consume
+ * those arguments and modify the two variables accordingly. Other arguments
+ * will be ignored. It is safe to give a program's main arguments to this
+ * library.
+ *
+ * @return 0 if successful; an error code otherwise.
+ **/
+int dstm_init_comm(int *argc, char **argv[], MPI_Comm comm);
+
+/** Initializes the library using MPI_COMM_WORLD.
+ *
+ * Convenience wrapper around dstm_init_comm() that passes MPI_COMM_WORLD
+ * as the communicator. Equivalent to:
+ * @code
+ *   dstm_init_comm(argc, argv, MPI_COMM_WORLD);
+ * @endcode
  *
  * @param[in,out] argc: a pointer to the number of arguments in *argv
  * @param[in,out] argv: an array of command line options.
