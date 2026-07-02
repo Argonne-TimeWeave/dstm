@@ -23,6 +23,8 @@ COMPILED_TESTS = \
 		darray \
 		distances \
 		get_or_default \
+               init_comm \
+               init_comm_world \
 		local_delta \
 		msg \
 		multi_session \
