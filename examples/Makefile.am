@@ -1,1 +1,1 @@
-SUBDIRS = traffic minimal airport_sim zombies
+SUBDIRS = traffic minimal airport_sim zombies phold
