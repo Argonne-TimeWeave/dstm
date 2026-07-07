@@ -117,6 +117,8 @@ AC_CONFIG_FILES([Makefile
          examples/zombies/mpi_zombies/Makefile
          examples/zombies/dstm_fixed/Makefile
          examples/phold/Makefile
+         examples/phold/complete/Makefile
+         examples/phold/local-neighbors/Makefile
 		 include/dstm/version.h
 		 tests/mpi/bats-driver.sh
 		 tests/mpi/Makefile])

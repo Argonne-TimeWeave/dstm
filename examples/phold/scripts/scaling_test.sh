@@ -7,7 +7,7 @@
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROSS_BIN="$SCRIPT_DIR/ross-phold"
-DSTM_BIN="$SCRIPT_DIR/../phold"
+DSTM_BIN="$SCRIPT_DIR/../complete/phold"
 OUTPUT_CSV="$SCRIPT_DIR/scaling_results.csv"
 RAW_DIR="$SCRIPT_DIR/raw_output"
 
@@ -16,8 +16,9 @@ if [ -z "${MPI_PREFIX:-}" ]; then
     MPI_PREFIX="$(dirname "$(dirname "$(which mpirun)")")"
 fi
 
-RANKS="1 2 4 8 16 32 64 128 256"
-NUM_TRIALS=1
+#RANKS="1 2 4 8 16 32 64 128 256"
+RANKS="1 2 4 8 16 32 64"
+NUM_TRIALS=4
 
 # --- Shared parameters ---
 LPS_PER_RANK=8
@@ -125,7 +126,7 @@ for np in $RANKS; do
             efficiency=$(awk "BEGIN {printf \"%.2f\", $events / $runtime / $np}")
         fi
 
-        echo "ROSS,$np,$trial,$LPS_PER_RANK,$total_lps,$runtime,$events,N/A,N/A,$throughput,$efficiency" >> "$OUTPUT_CSV"
+        echo "ROSS,$np,$trial,$LPS_PER_RANK,$total_lps,$runtime,$events,$throughput,$efficiency" >> "$OUTPUT_CSV"
         echo "--- ROSS done: ranks=$np, trial=$trial, runtime=${runtime}s, events=$events ---"
         echo ""
     done
