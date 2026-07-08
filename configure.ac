@@ -116,6 +116,7 @@ AC_CONFIG_FILES([Makefile
          examples/zombies/dstm_zombies/Makefile
          examples/zombies/mpi_zombies/Makefile
          examples/zombies/dstm_fixed/Makefile
+         examples/simple_ABMS_z/Makefile
          examples/phold/Makefile
          examples/phold/complete/Makefile
          examples/phold/local-neighbors/Makefile
