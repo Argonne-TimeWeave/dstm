@@ -111,6 +111,16 @@ int dstm_fini(dstm_time_t last_time)
 	dstm_region_destroy(&dstm_global_context.region);
 	dstm_distance_destroy(&dstm_global_context.distances);
 
+	/* Rendezvous before tearing down the session communicator.  The ring
+	 * barrier above only guarantees each rank has completed *locally*; a
+	 * straggler token it sent may still be in flight.  Freeing the comm
+	 * now would let MPI recycle its context id, and the next session's
+	 * MPI_Comm_dup could reuse it — aliasing a stale message into the new
+	 * session and corrupting its protocol.  A collective MPI_Barrier
+	 * ensures all ranks have arrived and no session message is in transit
+	 * before the comm (and its context id) is released. */
+	MPI_Barrier(dstm_global_context.comm);
+
 	/* Free the session communicator and restore the fallback so any
 	 * subsequent data-structure calls (e.g. dstm_darray_create) made
 	 * before the next dstm_start still have a valid `comm`. */

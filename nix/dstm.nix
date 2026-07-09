@@ -4,11 +4,11 @@
 , git
 , jansson
 , pkg-config
-, mpich
+, openmpi
 }:
 stdenv.mkDerivation {
   src = ../.;
   name = "dstm";
   nativeBuildInputs = [ autoreconfHook pkg-config git ];
-  buildInputs = [ check jansson mpich ];
+  buildInputs = [ check jansson openmpi ];
 }
