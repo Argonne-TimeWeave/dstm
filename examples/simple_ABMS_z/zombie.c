@@ -36,21 +36,159 @@ int human_find_next_hop(zombie_state_t *st, int from_rank, int to_rank)
     }
 }
 
-/* Deterministic per-rank RNG (no reliance on global rand()). */
 static inline int rr(zombie_state_t *st, int mod)
 {
     if (mod <= 0) return 0;
     return (int)(rand_r(&st->rng_state) % (unsigned)mod);
 }
 
-/* Local-cell geometry helpers.
- * A rank owns a cell_side x cell_side sub-grid, row-major, so local id
- * l decomposes as (row, col) = (l / cell_side, l % cell_side). */
+/* Local-cell geometry helpers. */
 static inline int local_row(zombie_state_t *st, int l) { return l / st->cell_side; }
 static inline int local_col(zombie_state_t *st, int l) { return l % st->cell_side; }
 static inline int local_id (zombie_state_t *st, int r, int c) { return r * st->cell_side + c; }
 static inline int local_in_bounds(zombie_state_t *st, int r, int c) {
     return (r >= 0 && r < st->cell_side && c >= 0 && c < st->cell_side);
+}
+
+/* Rank-grid geometry helper. */
+static inline void neighbor_offset(zombie_state_t *st, int neigh_rank,
+                                   int *drank_r, int *drank_c)
+{
+    int my_r = st->rank    / st->cols, my_c = st->rank    % st->cols;
+    int nr   = neigh_rank  / st->cols, nc   = neigh_rank  % st->cols;
+    *drank_r = nr - my_r;
+    *drank_c = nc - my_c;
+}
+
+/* Cross-rank cell mapping (same as before). */
+static inline int neighbor_across(zombie_state_t *st,
+                                  int cur_local,
+                                  int dr, int dc,
+                                  int *out_rank, int *out_local)
+{
+    int cr = local_row(st, cur_local);
+    int cc = local_col(st, cur_local);
+    int nr = cr + dr;
+    int nc = cc + dc;
+
+    int my_rr = st->rank / st->cols;
+    int my_rc = st->rank % st->cols;
+
+    int drank_r = 0, drank_c = 0;
+    int wrapped_r = nr, wrapped_c = nc;
+
+    if (nr < 0)                     { drank_r = -1; wrapped_r = st->cell_side - 1; }
+    else if (nr >= st->cell_side)   { drank_r = +1; wrapped_r = 0; }
+
+    if (nc < 0)                     { drank_c = -1; wrapped_c = st->cell_side - 1; }
+    else if (nc >= st->cell_side)   { drank_c = +1; wrapped_c = 0; }
+
+    int nrank_r = my_rr + drank_r;
+    int nrank_c = my_rc + drank_c;
+
+    if (nrank_r < 0 || nrank_r >= st->rows) return 0;
+    if (nrank_c < 0 || nrank_c >= st->cols) return 0;
+
+    *out_rank  = nrank_r * st->cols + nrank_c;
+    *out_local = local_id(st, wrapped_r, wrapped_c);
+    return 1;
+}
+
+static inline int neighbor_slot_for_rank(zombie_state_t *st, int neigh_rank)
+{
+    for (int ni = 0; ni < st->n_mesh_neighbors; ni++)
+        if (st->mesh_neighbors[ni] == neigh_rank) return ni;
+    return -1;
+}
+
+/* ---------- border-strip encode / decode ----------
+ *
+ * When rank A sends to neighbor rank B (offset (dr, dc) in the rank
+ * grid, dr,dc in {-1,0,+1}), the "border strip" is A's boundary of
+ * cells facing B:
+ *
+ *   dr = 0, |dc| = 1  -> W or E edge: a full column, indexed by row
+ *   |dr| = 1, dc = 0  -> N or S edge: a full row, indexed by col
+ *   |dr| = 1, |dc| = 1 -> corner: a single cell at strip index 0
+ *
+ * B's inverse map: given a cell (wrapped_r, wrapped_c) on B that A
+ * cares about (i.e., A's out-of-bounds step landed there), pick the
+ * strip index B used when stamping its bundle to A. That index is the
+ * row for E/W edges, the col for N/S edges, and 0 for corners.
+ */
+
+/* Sender side: fill strip_pop/strip_zom for the outgoing bundle to
+ * `neigh_rank`. Returns strip length used (1 for corner, cell_side for
+ * edge). */
+static int fill_border_strip(zombie_state_t *st, int neigh_rank,
+                             int *out_pop, int *out_zom)
+{
+    int dr, dc;
+    neighbor_offset(st, neigh_rank, &dr, &dc);
+    int s = st->cell_side;
+
+    if (dr != 0 && dc != 0) {
+        int row = (dr < 0) ? 0 : s - 1;
+        int col = (dc < 0) ? 0 : s - 1;
+        int l = local_id(st, row, col);
+        out_pop[0] = st->last_population[l];
+        out_zom[0] = st->last_zombie_count[l];
+        return 1;
+    }
+    if (dr != 0) {
+        int row = (dr < 0) ? 0 : s - 1;
+        for (int c = 0; c < s; c++) {
+            int l = local_id(st, row, c);
+            out_pop[c] = st->last_population[l];
+            out_zom[c] = st->last_zombie_count[l];
+        }
+        return s;
+    }
+    /* dc != 0 */
+    int col = (dc < 0) ? 0 : s - 1;
+    for (int r = 0; r < s; r++) {
+        int l = local_id(st, r, col);
+        out_pop[r] = st->last_population[l];
+        out_zom[r] = st->last_zombie_count[l];
+    }
+    return s;
+}
+
+/* Receiver side: given a candidate cell (wrapped_r, wrapped_c) on the
+ * neighbor rank `neigh_rank`, return the strip index that neighbor
+ * used for that cell. Returns -1 if the (wrapped_r, wrapped_c) doesn't
+ * actually lie on the strip that neighbor sent us (shouldn't happen
+ * with correctly-generated calls from neighbor_across()). */
+static int strip_index_from_receiver(zombie_state_t *st, int neigh_rank,
+                                     int wrapped_r, int wrapped_c)
+{
+    /* Offset from *me* to neighbor: */
+    int dr_me_to_n, dc_me_to_n;
+    neighbor_offset(st, neigh_rank, &dr_me_to_n, &dc_me_to_n);
+
+    /* Offset from *neighbor* to *me* is the negation. That's the (dr,dc)
+     * the neighbor used when it filled its strip destined for me. */
+    int dr = -dr_me_to_n;
+    int dc = -dc_me_to_n;
+    int s  = st->cell_side;
+
+    if (dr != 0 && dc != 0) {
+        /* Corner: only cell (row_expected, col_expected) matters. */
+        int row_expected = (dr < 0) ? 0 : s - 1;
+        int col_expected = (dc < 0) ? 0 : s - 1;
+        if (wrapped_r == row_expected && wrapped_c == col_expected) return 0;
+        return -1;
+    }
+    if (dr != 0) {
+        /* N/S edge: neighbor's strip is a row indexed by col. */
+        int row_expected = (dr < 0) ? 0 : s - 1;
+        if (wrapped_r != row_expected) return -1;
+        return wrapped_c;
+    }
+    /* E/W edge: neighbor's strip is a column indexed by row. */
+    int col_expected = (dc < 0) ? 0 : s - 1;
+    if (wrapped_c != col_expected) return -1;
+    return wrapped_r;
 }
 
 /* ---------- lifecycle ---------- */
@@ -65,16 +203,20 @@ void zombie_init(zombie_state_t *st,
     st->rank      = rank;
     st->num_ranks = num_ranks;
 
-    /* Snap nl up to the next perfect square so local cells form a
-     * cell_side x cell_side grid. This preserves the caller's intent
-     * ("at least this many local cells") without needing them to pass
-     * a perfect square. */
     int side = 1;
     while (side * side < nl_req) side++;
     st->cell_side = side;
     st->nl        = side * side;
 
-    st->nh        = nh + nz;   /* one owner slot per agent */
+    if (st->cell_side > MAX_CELL_SIDE) {
+        fprintf(stderr,
+                "zombie_init: cell_side=%d exceeds MAX_CELL_SIDE=%d "
+                "(bump MAX_CELL_SIDE in zombie.h)\n",
+                st->cell_side, MAX_CELL_SIDE);
+        MPI_Abort(MPI_COMM_WORLD, 1);
+    }
+
+    st->nh        = nh + nz;
     st->work      = work;
     st->topology  = topology;
     st->cells     = cells;
@@ -91,15 +233,12 @@ void zombie_init(zombie_state_t *st,
     st->arrivals   = calloc(st->nl,    sizeof(int));
     st->infections = calloc(st->nl,    sizeof(int));
 
-    /* Carryover sized for the worst case. */
     st->carryover_cap = num_ranks * st->nh;
     st->carryover     = calloc(st->carryover_cap, sizeof(human_t));
     st->n_carryover   = 0;
 
     st->rng_state = (unsigned int)(seed + 1);
 
-    /* Seed nz zombies first, then nh humans. Matches Repast's
-     * zombie.count / human.count per-process configuration. */
     for (int i = 0; i < st->nh; i++) {
         human_t *h = &st->humans[i];
         h->valid           = 1;
@@ -124,9 +263,7 @@ void zombie_init(zombie_state_t *st,
 
     st->infection_csv = infection_csv;
 
-    /* Precompute mesh-adjacent neighbors (delta == 1). Used to drive the
-     * every-tick sync pattern regardless of whether any agent actually
-     * has traffic for a given neighbor this tick. */
+    /* Precompute mesh-adjacent neighbors (delta == 1). */
     st->mesh_neighbors = calloc(num_ranks, sizeof(int));
     st->n_mesh_neighbors = 0;
     for (int r = 0; r < num_ranks; r++) {
@@ -135,6 +272,14 @@ void zombie_init(zombie_state_t *st,
         if (d == 1) {
             st->mesh_neighbors[st->n_mesh_neighbors++] = r;
         }
+    }
+
+    /* Ghost strips: one small strip per mesh neighbor. */
+    st->ghost_strip_pop = calloc(st->n_mesh_neighbors, sizeof(int *));
+    st->ghost_strip_zom = calloc(st->n_mesh_neighbors, sizeof(int *));
+    for (int ni = 0; ni < st->n_mesh_neighbors; ni++) {
+        st->ghost_strip_pop[ni] = calloc(MAX_CELL_SIDE, sizeof(int));
+        st->ghost_strip_zom[ni] = calloc(MAX_CELL_SIDE, sizeof(int));
     }
 }
 
@@ -149,68 +294,109 @@ void zombie_destroy(zombie_state_t *st)
     free(st->last_population);
     free(st->last_zombie_count);
     free(st->mesh_neighbors);
+
+    if (st->ghost_strip_pop) {
+        for (int ni = 0; ni < st->n_mesh_neighbors; ni++)
+            free(st->ghost_strip_pop[ni]);
+        free(st->ghost_strip_pop);
+    }
+    if (st->ghost_strip_zom) {
+        for (int ni = 0; ni < st->n_mesh_neighbors; ni++)
+            free(st->ghost_strip_zom[ni]);
+        free(st->ghost_strip_zom);
+    }
 }
 
-/* ---------- per-agent movement (Repast-style with Moore neighborhood) ---
- *
- * Zombie: face the neighboring local cell with the most humans.
- * Human:  face the neighboring local cell with the fewest zombies.
- * "Neighboring" = the 8 Moore neighbors of the human's current cell
- * inside the rank's cell_side x cell_side sub-grid, plus the current
- * cell itself (the "stay put" option, matching Repast where staying is
- * always a valid winner).
- *
- * Both stay on the current rank (Repast movement is a short step, not
- * a rank hop). The inter-rank codepath below is preserved but is only
- * driven by the always-on sync described in the timestep. */
+/* ---------- per-agent movement (strip-informed) ---------- */
 static void desired_cell(zombie_state_t *st, human_t *h,
                          int *want_node, int *want_local)
 {
     int cr = local_row(st, h->cur_local);
     int cc = local_col(st, h->cur_local);
 
+    int best_node  = st->rank;
+    int best_local = h->cur_local;
+
     if (h->state == HSTATE_ZOMBIE) {
-        int best = h->cur_local;
-        int humans_here_best =
-            st->last_population[h->cur_local] - st->last_zombie_count[h->cur_local];
+        int best_score = st->last_population[h->cur_local]
+                       - st->last_zombie_count[h->cur_local];
 
         for (int dr = -1; dr <= 1; dr++) {
             for (int dc = -1; dc <= 1; dc++) {
                 if (dr == 0 && dc == 0) continue;
                 int nr = cr + dr, nc = cc + dc;
-                if (!local_in_bounds(st, nr, nc)) continue;
-                int nl = local_id(st, nr, nc);
-                int humans_here = st->last_population[nl] - st->last_zombie_count[nl];
-                if (humans_here > humans_here_best) {
-                    humans_here_best = humans_here;
-                    best = nl;
+
+                int cand_node, cand_local, score;
+                if (local_in_bounds(st, nr, nc)) {
+                    cand_node  = st->rank;
+                    cand_local = local_id(st, nr, nc);
+                    score = st->last_population[cand_local]
+                          - st->last_zombie_count[cand_local];
+                } else {
+                    if (!neighbor_across(st, h->cur_local, dr, dc,
+                                         &cand_node, &cand_local))
+                        continue;
+                    int slot = neighbor_slot_for_rank(st, cand_node);
+                    if (slot < 0) continue;
+
+                    int wr = local_row(st, cand_local);
+                    int wc = local_col(st, cand_local);
+                    int si = strip_index_from_receiver(st, cand_node, wr, wc);
+                    if (si < 0) continue;
+
+                    int pop = st->ghost_strip_pop[slot][si];
+                    int zom = st->ghost_strip_zom[slot][si];
+                    score = pop - zom;
+                }
+
+                if (score > best_score) {
+                    best_score = score;
+                    best_node  = cand_node;
+                    best_local = cand_local;
                 }
             }
         }
-        *want_node  = st->rank;
-        *want_local = best;
     } else {
-        int best = h->cur_local;
-        int zombies_here_best = st->last_zombie_count[h->cur_local];
+        int best_score = st->last_zombie_count[h->cur_local];
 
         for (int dr = -1; dr <= 1; dr++) {
             for (int dc = -1; dc <= 1; dc++) {
                 if (dr == 0 && dc == 0) continue;
                 int nr = cr + dr, nc = cc + dc;
-                if (!local_in_bounds(st, nr, nc)) continue;
-                int nl = local_id(st, nr, nc);
-                if (st->last_zombie_count[nl] < zombies_here_best) {
-                    zombies_here_best = st->last_zombie_count[nl];
-                    best = nl;
+
+                int cand_node, cand_local, score;
+                if (local_in_bounds(st, nr, nc)) {
+                    cand_node  = st->rank;
+                    cand_local = local_id(st, nr, nc);
+                    score = st->last_zombie_count[cand_local];
+                } else {
+                    if (!neighbor_across(st, h->cur_local, dr, dc,
+                                         &cand_node, &cand_local))
+                        continue;
+                    int slot = neighbor_slot_for_rank(st, cand_node);
+                    if (slot < 0) continue;
+
+                    int wr = local_row(st, cand_local);
+                    int wc = local_col(st, cand_local);
+                    int si = strip_index_from_receiver(st, cand_node, wr, wc);
+                    if (si < 0) continue;
+
+                    score = st->ghost_strip_zom[slot][si];
+                }
+
+                if (score < best_score) {
+                    best_score = score;
+                    best_node  = cand_node;
+                    best_local = cand_local;
                 }
             }
         }
-        *want_node  = st->rank;
-        *want_local = best;
     }
+
+    *want_node  = best_node;
+    *want_local = best_local;
 }
 
-/* Push an agent into the local carryover list, growing as needed. */
 static void carryover_push(zombie_state_t *st, const human_t *h)
 {
     if (st->n_carryover >= st->carryover_cap) {
@@ -221,23 +407,7 @@ static void carryover_push(zombie_state_t *st, const human_t *h)
     st->carryover[st->n_carryover++] = *h;
 }
 
-/* ---------- main timestep (one TICK) ----------
- *
- * Two streams feed into each tick's roster:
- *   (A) inbound bundles from the darray — agents that traveled here
- *   (B) carryover from last tick — agents physically here that
- *       stayed put or moved locally. NEVER crosses MPI.
- *
- * The darray only ever carries inter-rank traffic. Every tick we
- * PUT to every mesh-adjacent neighbor (with an empty bundle if we
- * have nothing to send) and GET from every mesh-adjacent neighbor,
- * mirroring Repast's per-tick synchronize<AgentPackage>. This keeps
- * the DSTM communication path on the critical path of every tick
- * even in the common case where no agent physically crosses a rank
- * boundary in the minimal model.
- *
- * The self-bundle is sentineled (empty) but never used to ship agents.
- */
+/* ---------- main timestep ---------- */
 
 void zombie_timestep(zombie_state_t *st, dstm_time_t t)
 {
@@ -252,9 +422,7 @@ void zombie_timestep(zombie_state_t *st, dstm_time_t t)
 
     dstm_log_normal("Rank %d [t=%ld]: === step ===\n", rank, t);
 
-    /* STEP 0 — age every infected agent by one tick.
-     * When infection_time reaches INFECT_TICKS_TO_ZOMBIE the human
-     * becomes a zombie (Repast semantics: hatch<Zombie>(this); die()). */
+    /* STEP 0 — age every infected agent. */
     for (int i = 0; i < st->n_carryover; i++) {
         human_t *h = &st->carryover[i];
         if (h->state == HSTATE_INFECTED) {
@@ -270,11 +438,11 @@ void zombie_timestep(zombie_state_t *st, dstm_time_t t)
     }
 
     /* STEP 2 — clear outbox. */
-    for (int r = 0; r < num_ranks; r++)
-        st->outbox[r] = empty_cell;
+    for (int r = 0; r < num_ranks; r++) {
+        memset(&st->outbox[r], 0, sizeof(cell_slot_t));
+    }
 
-    /* STEP 3 — build roster from BOTH streams.
-     * Roster cells 0..nl-1 are local cells; nl is LIMBO (in-transit). */
+    /* STEP 3 — build roster. */
     int LIMBO = nl;
     int n_buckets = nl + 1;
 
@@ -293,10 +461,7 @@ void zombie_timestep(zombie_state_t *st, dstm_time_t t)
         bucket[_b][bucket_n[_b]++] = *(hp);                            \
     } while (0)
 
-    /* 3a — inbound bundles from EVERY mesh-adjacent neighbor.
-     * We drain the neighbor set unconditionally so the darray GET
-     * path fires on every tick, matching Repast's per-tick ghost
-     * sync. Empty bundles are cheap and expected. */
+    /* 3a — inbound bundles + refresh ghost strips. */
     for (int ni = 0; ni < st->n_mesh_neighbors; ni++) {
         int src = st->mesh_neighbors[ni];
 
@@ -314,13 +479,21 @@ void zombie_timestep(zombie_state_t *st, dstm_time_t t)
             dstm_log_error("GET failed on bundle (dest=%d,src=%d)", rank, src);
             continue;
         }
+
+        /* Refresh ghost strip for this neighbor. Copy the whole
+         * MAX_CELL_SIDE slice; unused entries stay at whatever the
+         * sender left there (they won't be indexed by strip_index_
+         * from_receiver, so it's harmless). */
+        for (int k = 0; k < MAX_CELL_SIDE; k++) {
+            st->ghost_strip_pop[ni][k] = recv.strip_population[k];
+            st->ghost_strip_zom[ni][k] = recv.strip_zombie_count[k];
+        }
+
         if (recv.n_humans == 0) continue;
 
         for (int i = 0; i < recv.n_humans; i++) {
             human_t h = recv.humans[i];
 
-            /* Tick infection for agents in transit so they don't skip
-             * their aging step. */
             if (h.state == HSTATE_INFECTED) {
                 h.infection_time++;
                 if (h.infection_time >= INFECT_TICKS_TO_ZOMBIE)
@@ -357,7 +530,7 @@ void zombie_timestep(zombie_state_t *st, dstm_time_t t)
     }
     st->n_carryover = 0;
 
-    /* 3c — bootstrap at t=0 from owner records. */
+    /* 3c — bootstrap at t=0. */
     if (t == 0) {
         for (int i = 0; i < st->nh; i++) {
             human_t *h = &st->humans[i];
@@ -374,27 +547,20 @@ void zombie_timestep(zombie_state_t *st, dstm_time_t t)
         }
     }
 
-    /* STEP 4 — INFECTION (Repast rule).
-     * For each local cell with >=1 zombie, pick ONE random healthy
-     * human currently in that cell and infect them. Matches
-     * Zombie::step: humans.oneOf(); infect(human). */
+    /* STEP 4 — INFECTION. */
     for (int l = 0; l < nl; l++) {
         if (bucket_n[l] == 0 || zombies_at[l] == 0) continue;
 
-        /* Count zombies and collect indices of healthy humans in this cell. */
         int n_healthy = 0;
         for (int i = 0; i < bucket_n[l]; i++) {
             if (bucket[l][i].state == HSTATE_HEALTHY) n_healthy++;
         }
         if (n_healthy == 0) continue;
 
-        /* Each zombie in the cell infects up to one healthy human.
-         * We cap total infections at n_healthy so we don't double-infect. */
         int n_bites = zombies_at[l];
         if (n_bites > n_healthy) n_bites = n_healthy;
 
         for (int bite = 0; bite < n_bites; bite++) {
-            /* Pick the k-th still-healthy human, k in [0, remaining). */
             int remaining = n_healthy - bite;
             int k = rr(st, remaining);
 
@@ -415,17 +581,21 @@ void zombie_timestep(zombie_state_t *st, dstm_time_t t)
         }
     }
 
-    /* Cache per-cell counts for desired_cell() below. */
+    /* Cache per-cell counts for desired_cell(). */
     for (int l = 0; l < nl; l++) {
         st->last_population[l]   = bucket_n[l];
         st->last_zombie_count[l] = zombies_at[l];
     }
 
-    /* STEP 5 — MOVE & route every roster agent.
-     * Zombies take up to ZOMBIE_STEP local hops; humans take up to
-     * HUMAN_STEP. Each hop consults desired_cell() again using the
-     * per-cell caches computed above, so multi-step movement still
-     * chases/flees greedily but never crosses ranks. */
+    /* Stamp per-neighbor border strip into each outbox slot. */
+    for (int ni = 0; ni < st->n_mesh_neighbors; ni++) {
+        int dest = st->mesh_neighbors[ni];
+        fill_border_strip(st, dest,
+                          st->outbox[dest].strip_population,
+                          st->outbox[dest].strip_zombie_count);
+    }
+
+    /* STEP 5 — MOVE & route every roster agent. */
     int total_present = 0;
     for (int b = 0; b < n_buckets; b++) total_present += bucket_n[b];
 
@@ -439,7 +609,6 @@ void zombie_timestep(zombie_state_t *st, dstm_time_t t)
             int from_local = h->cur_local;
             int max_hops = (h->state == HSTATE_ZOMBIE) ? ZOMBIE_STEP : HUMAN_STEP;
 
-            /* Multi-hop local movement (Repast: zombies 0.5, humans 1.5). */
             for (int hop = 0; hop < max_hops; hop++) {
                 int want_node, want_local;
                 desired_cell(st, h, &want_node, &want_local);
@@ -447,16 +616,11 @@ void zombie_timestep(zombie_state_t *st, dstm_time_t t)
                 h->dest_local = want_local;
 
                 if (h->cur_node == want_node) {
-                    if (want_local == h->cur_local) break; /* nowhere better */
+                    if (want_local == h->cur_local) break;
                     h->cur_local = want_local;
                 } else {
-                    /* Inter-rank branch retained for the sync path; it
-                     * shouldn't fire from desired_cell() but is preserved
-                     * for the day someone adds cross-rank movement. */
-                    int dest_rank = human_find_next_hop(st, rank, want_node);
-                    h->cur_node = dest_rank;
-                    if (dest_rank == want_node)
-                        h->cur_local = want_local;
+                    h->cur_node  = want_node;
+                    h->cur_local = want_local;
                     break;
                 }
             }
@@ -475,7 +639,6 @@ void zombie_timestep(zombie_state_t *st, dstm_time_t t)
             } else {
                 cell_slot_t *ob = &st->outbox[dest_rank];
                 if (ob->n_humans >= CELL_CAPACITY) {
-                    /* Held over — bounce back to carryover. */
                     h->cur_node  = rank;
                     h->cur_local = from_local;
                     carryover_push(st, h);
@@ -489,7 +652,6 @@ void zombie_timestep(zombie_state_t *st, dstm_time_t t)
                 }
             }
 
-            /* Mirror to owner record so the final summary is accurate. */
             if (h->home_node == rank) {
                 int li = h->human_id - rank * st->nh;
                 if (li >= 0 && li < st->nh)
@@ -501,19 +663,20 @@ void zombie_timestep(zombie_state_t *st, dstm_time_t t)
     volatile double sink = zombie_do_work(st->work);
     (void)sink;
 
-    /* Cleanup roster. */
     for (int b = 0; b < n_buckets; b++) free(bucket[b]);
     free(bucket);
     free(bucket_n);
     free(bucket_cap);
     free(zombies_at);
 
-    /* STEP 6 — PUT to EVERY mesh-adjacent neighbor.
-     * We always PUT, even if the bundle is empty, to mirror Repast's
-     * per-tick synchronize<AgentPackage>: the framework's ghost buffers
-     * exchange messages every tick regardless of whether any agent
-     * physically crossed a boundary. This exercises the DSTM darray
-     * PUT path on every tick without changing its shape. */
+    /* STEP 6 — PUT to every mesh-adjacent neighbor.
+     *
+     * IMPORTANT: the outbox for each neighbor already has:
+     *   - n_humans + humans[]         (from Step 5's routing)
+     *   - strip_population[]           (from the fill_border_strip call
+     *   - strip_zombie_count[]          just before Step 5)
+     * So this loop only performs the PUT.
+     */
     for (int ni = 0; ni < st->n_mesh_neighbors; ni++) {
         int dest = st->mesh_neighbors[ni];
         size_t idx = bundle_index(dest, rank, num_ranks);
@@ -533,15 +696,13 @@ void zombie_timestep(zombie_state_t *st, dstm_time_t t)
 
     if (LOGGING) { printf("_PUT: %f\n", sum); sum = 0; }
 
-    /* STEP 7 — Per-tick infection reduction, mirroring Repast's
-     * InfectionSum data set (std::plus<int>). Rank 0 writes one CSV row
-     * per tick. Only ranks with a non-null csv handle write. */
+    /* STEP 7 — Per-tick infection reduction. */
     int local_infected_now = 0;
     for (int i = 0; i < st->nh; i++) {
         if (st->humans[i].state == HSTATE_INFECTED) local_infected_now++;
     }
 
-    if (t % 10 == 11) {
+    if (t % 10 == 0) {
         int total_infected_now = 0;
         MPI_Reduce(&local_infected_now, &total_infected_now, 1,
                    MPI_INT, MPI_SUM, 0, MPI_COMM_WORLD);
