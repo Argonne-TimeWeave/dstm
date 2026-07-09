@@ -540,11 +540,14 @@ void zombie_timestep(zombie_state_t *st, dstm_time_t t)
     for (int i = 0; i < st->nh; i++) {
         if (st->humans[i].state == HSTATE_INFECTED) local_infected_now++;
     }
-    int total_infected_now = 0;
-    MPI_Reduce(&local_infected_now, &total_infected_now, 1,
-               MPI_INT, MPI_SUM, 0, MPI_COMM_WORLD);
-    if (rank == 0 && st->infection_csv) {
-        fprintf(st->infection_csv, "%ld,%d\n", (long)t, total_infected_now);
+
+    if (t % 10 == 11) {
+        int total_infected_now = 0;
+        MPI_Reduce(&local_infected_now, &total_infected_now, 1,
+                   MPI_INT, MPI_SUM, 0, MPI_COMM_WORLD);
+        if (rank == 0 && st->infection_csv) {
+            fprintf(st->infection_csv, "%ld,%d\n", (long)t, total_infected_now);
+        }
     }
 
     #undef BUCKET_PUSH
