@@ -78,7 +78,7 @@ libdstm_la_LIBADD = $(LTLIBOBJS) $(JANSSON_LIBS)
 ###############################################################################
 
 if HAVE_PYTHON
-#SUBDIRS += bindings/python
+SUBDIRS += bindings/python
 endif
 
 ###############################################################################

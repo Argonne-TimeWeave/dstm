@@ -1,8 +1,8 @@
 # Copyright 2019 UChicago Argonne, LLC.
 # (c.f. AUTHORS, LICENSE)
 #
-# This file is part of the libnrm project.
-# For more info, see https://github.com/anlsys/libnrm
+# This file is part of the dstm project.
+# For more info, see https://github.com/anlsys/dstm
 #
 # SPDX-License-Identifier: BSD-3-Clause
 import os
@@ -14,7 +14,7 @@ import pytest
 
 import dstm
 
-
+@pytest.mark.mpi
 def test_lifecycle():
     world_size = MPI.COMM_WORLD.Get_size()
     dstm.init()
@@ -26,6 +26,7 @@ def test_lifecycle():
     dstm.finalize()
 
 
+@pytest.mark.mpi(min_size=2)
 def test_darray_simple():
     world_size = MPI.COMM_WORLD.Get_size()
     dstm.init()
@@ -48,6 +49,7 @@ def test_darray_simple():
     dstm.finalize()
 
 
+@pytest.mark.mpi(min_size=2)
 def test_darray_non_uniform():
     rank = MPI.COMM_WORLD.Get_rank()
     world_size = MPI.COMM_WORLD.Get_size()
@@ -75,6 +77,7 @@ def test_darray_non_uniform():
     dstm.finalize()
 
 
+@pytest.mark.mpi(min_size=2)
 def test_darray_range_get_put():
     rank = MPI.COMM_WORLD.Get_rank()
     world_size = MPI.COMM_WORLD.Get_size()
@@ -121,6 +124,7 @@ def test_darray_range_get_put():
     dstm.finalize()
 
 
+@pytest.mark.mpi(min_size=2)
 def test_darray_rangev_get_put():
     rank = MPI.COMM_WORLD.Get_rank()
     world_size = MPI.COMM_WORLD.Get_size()

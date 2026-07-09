@@ -1,13 +1,13 @@
 # Copyright 2019 UChicago Argonne, LLC.
 # (c.f. AUTHORS, LICENSE)
 #
-# This file is part of the libnrm project.
-# For more info, see https://github.com/anlsys/libnrm
+# This file is part of the libdstm project.
+# For more info, see https://github.com/anlsys/dstm
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
 from .dstm import (
-    libnrm,
+    libdstm,
     Darray,
     Distance,
     LOG_QUIET,
@@ -36,7 +36,7 @@ from .dstm import (
 )
 
 __all__ = [
-    "libnrm",
+    "libdstm",
     "Darray",
     "Distance",
     "LOG_QUIET",

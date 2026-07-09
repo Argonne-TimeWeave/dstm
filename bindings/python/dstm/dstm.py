@@ -14,12 +14,12 @@ import numpy as np
 import numpy.typing as npt
 
 if os.environ.get("LIBDSTM_SO_"):
-    libnrm = ct.cdll.LoadLibrary(os.environ.get("LIBDSTM_SO_"))  # type: ignore
+    libdstm = ct.cdll.LoadLibrary(os.environ.get("LIBDSTM_SO_"))  # type: ignore
 else:
     if platform.uname()[0] == "Linux":
-        libnrm = ct.cdll.LoadLibrary("libdstm.so")
+        libdstm = ct.cdll.LoadLibrary("libdstm.so")
     else:
-        libnrm = ct.cdll.LoadLibrary("libdstm.dylib")
+        libdstm = ct.cdll.LoadLibrary("libdstm.dylib")
 
 
 # struct dstm_darray_s {
@@ -82,16 +82,16 @@ class Darray:
         return self.darray.rank_n_elements
 
 
-libnrm.dstm_darray_create.restype = ct.c_int
-libnrm.dstm_darray_create.argtypes = [
+libdstm.dstm_darray_create.restype = ct.c_int
+libdstm.dstm_darray_create.argtypes = [
     # ct.POINTER(ct.c_void_p),
     ct.POINTER(ct.POINTER(_Darray)),
     ct.c_size_t,
     ct.c_size_t,
 ]
 
-libnrm.dstm_darray_put.restype = ct.c_int
-libnrm.dstm_darray_put.argtypes = [
+libdstm.dstm_darray_put.restype = ct.c_int
+libdstm.dstm_darray_put.argtypes = [
     ct.c_void_p,
     ct.c_size_t,
     ct.c_void_p,
@@ -99,8 +99,8 @@ libnrm.dstm_darray_put.argtypes = [
     ct.c_int64,
 ]
 
-libnrm.dstm_darray_get.restype = ct.c_int
-libnrm.dstm_darray_get.argtypes = [
+libdstm.dstm_darray_get.restype = ct.c_int
+libdstm.dstm_darray_get.argtypes = [
     ct.c_void_p,
     ct.c_size_t,
     ct.c_void_p,
@@ -108,8 +108,8 @@ libnrm.dstm_darray_get.argtypes = [
     ct.c_int64,
 ]
 
-libnrm.dstm_darray_allgatherv.restype = ct.c_int
-libnrm.dstm_darray_allgatherv.argtypes = [
+libdstm.dstm_darray_allgatherv.restype = ct.c_int
+libdstm.dstm_darray_allgatherv.argtypes = [
     ct.c_void_p,
     ct.c_void_p,
     ct.c_void_p,
@@ -117,8 +117,8 @@ libnrm.dstm_darray_allgatherv.argtypes = [
     ct.POINTER(ct.c_int64),
 ]
 
-libnrm.dstm_darray_get_range.restype = ct.c_int
-libnrm.dstm_darray_get_range.argtypes = [
+libdstm.dstm_darray_get_range.restype = ct.c_int
+libdstm.dstm_darray_get_range.argtypes = [
     ct.c_void_p,                # dstm_darray_t *darray
     ct.POINTER(ct.c_size_t),    # const size_t *indices
     ct.c_size_t,                # size_t count
@@ -127,8 +127,8 @@ libnrm.dstm_darray_get_range.argtypes = [
     ct.c_int64,                 # dstm_time_t delta
 ]
 
-libnrm.dstm_darray_put_range.restype = ct.c_int
-libnrm.dstm_darray_put_range.argtypes = [
+libdstm.dstm_darray_put_range.restype = ct.c_int
+libdstm.dstm_darray_put_range.argtypes = [
     ct.c_void_p,                # dstm_darray_t *darray
     ct.POINTER(ct.c_size_t),    # const size_t *indices
     ct.c_size_t,                # size_t count
@@ -137,8 +137,8 @@ libnrm.dstm_darray_put_range.argtypes = [
     ct.c_int64,                 # dstm_time_t delta
 ]
 
-libnrm.dstm_darray_get_rangev.restype = ct.c_int
-libnrm.dstm_darray_get_rangev.argtypes = [
+libdstm.dstm_darray_get_rangev.restype = ct.c_int
+libdstm.dstm_darray_get_rangev.argtypes = [
     ct.c_void_p,                # dstm_darray_t *darray
     ct.POINTER(ct.c_size_t),    # const size_t *indices
     ct.c_size_t,                # size_t count
@@ -147,8 +147,8 @@ libnrm.dstm_darray_get_rangev.argtypes = [
     ct.c_int64,                 # dstm_time_t delta
 ]
 
-libnrm.dstm_darray_put_rangev.restype = ct.c_int
-libnrm.dstm_darray_put_rangev.argtypes = [
+libdstm.dstm_darray_put_rangev.restype = ct.c_int
+libdstm.dstm_darray_put_rangev.argtypes = [
     ct.c_void_p,                # dstm_darray_t *darray
     ct.POINTER(ct.c_size_t),    # const size_t *indices
     ct.c_size_t,                # size_t count
@@ -157,37 +157,37 @@ libnrm.dstm_darray_put_rangev.argtypes = [
     ct.c_int64,                 # dstm_time_t delta
 ]
 
-libnrm.dstm_init.restype = ct.c_int
-libnrm.dstm_init.argtypes = [
+libdstm.dstm_init.restype = ct.c_int
+libdstm.dstm_init.argtypes = [
     ct.POINTER(ct.c_int),
     ct.POINTER(ct.POINTER(ct.c_char_p))
     # ct.c_void_p,
     # ct.c_void_p
 ]
 
-libnrm.dstm_finalize.restype = ct.c_int
-libnrm.dstm_finalize.argtypes = []
+libdstm.dstm_finalize.restype = ct.c_int
+libdstm.dstm_finalize.argtypes = []
 
-libnrm.dstm_fini.restype = ct.c_int
-libnrm.dstm_fini.argtypes = [ct.c_int64]
+libdstm.dstm_fini.restype = ct.c_int
+libdstm.dstm_fini.argtypes = [ct.c_int64]
 
-libnrm.dstm_log_setlevel.restype = ct.c_int
-libnrm.dstm_log_setlevel.argtypes = [ct.c_int]
+libdstm.dstm_log_setlevel.restype = ct.c_int
+libdstm.dstm_log_setlevel.argtypes = [ct.c_int]
 
-libnrm.dstm_distance_create_ring.restype = ct.c_int
-libnrm.dstm_distance_create_ring.argtypes = [ct.POINTER(ct.c_void_p), ct.c_size_t]
+libdstm.dstm_distance_create_ring.restype = ct.c_int
+libdstm.dstm_distance_create_ring.argtypes = [ct.POINTER(ct.c_void_p), ct.c_size_t]
 
-libnrm.dstm_distance_get.restype = ct.c_int
-libnrm.dstm_distance_get.argtypes = [ct.c_void_p, ct.c_int, ct.c_int]
+libdstm.dstm_distance_get.restype = ct.c_int
+libdstm.dstm_distance_get.argtypes = [ct.c_void_p, ct.c_int, ct.c_int]
 
-libnrm.dstm_distance_create_complete.restype = ct.c_int
-libnrm.dstm_distance_create_complete.argtypes = [ct.POINTER(ct.c_void_p), ct.c_size_t]
+libdstm.dstm_distance_create_complete.restype = ct.c_int
+libdstm.dstm_distance_create_complete.argtypes = [ct.POINTER(ct.c_void_p), ct.c_size_t]
 
-libnrm.dstm_distance_destroy.restype = None
-libnrm.dstm_distance_destroy.argtypes = [ct.POINTER(ct.c_void_p)]
+libdstm.dstm_distance_destroy.restype = None
+libdstm.dstm_distance_destroy.argtypes = [ct.POINTER(ct.c_void_p)]
 
-libnrm.dstm_start.restype = ct.c_int
-libnrm.dstm_start.argtypes = [ct.c_void_p]
+libdstm.dstm_start.restype = ct.c_int
+libdstm.dstm_start.argtypes = [ct.c_void_p]
 
 
 LOG_QUIET = 0
@@ -227,7 +227,7 @@ def darray_create(dtype, local_elements):
     """
     dtype = np.dtype(dtype)
     handle = ct.POINTER(_Darray)()
-    rc = libnrm.dstm_darray_create(ct.byref(handle), dtype.itemsize, local_elements)
+    rc = libdstm.dstm_darray_create(ct.byref(handle), dtype.itemsize, local_elements)
     _check(rc, "dstm_darray_create")
     darray = Darray(handle, dtype)
     return darray
@@ -249,7 +249,7 @@ def darray_put(darray, global_index, value, time, delta):
             for a remote index).
     """
     arr = np.ascontiguousarray(value, dtype=darray.dtype)
-    rc = libnrm.dstm_darray_put(
+    rc = libdstm.dstm_darray_put(
         darray.handle, global_index, arr.ctypes.data, time, delta
     )
     _check(rc, "dstm_darray_put")
@@ -271,7 +271,7 @@ def darray_get(darray, global_index, dst, time, delta):
         RuntimeError: on a non-zero return code (positive delta, or delta == 0
             for a remote index).
     """
-    rc = libnrm.dstm_darray_get(
+    rc = libdstm.dstm_darray_get(
         darray.handle, global_index, dst.ctypes.data, time, delta
     )
     _check(rc, "dstm_darray_get")
@@ -300,7 +300,7 @@ def darray_allgatherv(darray, src, dst, time, deltas):
     if not (isinstance(dst, np.ndarray) and dst.dtype == darray.dtype and dst.flags.c_contiguous):
         raise TypeError("dst must be a contiguous numpy array with darray.dtype")
     deltas = np.ascontiguousarray(deltas, dtype=np.int64)
-    rc = libnrm.dstm_darray_allgatherv(
+    rc = libdstm.dstm_darray_allgatherv(
         darray.handle,
         src.ctypes.data,
         dst.ctypes.data,
@@ -339,7 +339,7 @@ def darray_get_range(darray, indices, dst, time, delta):
             and dst.flags.c_contiguous and dst.size >= count):
         raise TypeError("dst must be a contiguous numpy array of darray.dtype "
                         "with at least len(indices) elements")
-    rc = libnrm.dstm_darray_get_range(
+    rc = libdstm.dstm_darray_get_range(
         darray.handle, idx_ptr, count, dst.ctypes.data, time, delta
     )
     _check(rc, "dstm_darray_get_range")
@@ -363,7 +363,7 @@ def darray_put_range(darray, indices, src, time, delta):
     """
     idx_ptr, count = _indices_ptr(indices)
     arr = np.ascontiguousarray(src, dtype=darray.dtype)
-    rc = libnrm.dstm_darray_put_range(
+    rc = libdstm.dstm_darray_put_range(
         darray.handle, idx_ptr, count, arr.ctypes.data, time, delta
     )
     _check(rc, "dstm_darray_put_range")
@@ -387,7 +387,7 @@ def darray_get_rangev(darray, indices, dsts, time, delta):
     idx_ptr, count = _indices_ptr(indices)
     # keep the destination arrays referenced for the duration of the call
     ptr_arr = (ct.c_void_p * count)(*[d.ctypes.data for d in dsts])
-    rc = libnrm.dstm_darray_get_rangev(
+    rc = libdstm.dstm_darray_get_rangev(
         darray.handle, idx_ptr, count,
         ct.cast(ptr_arr, ct.POINTER(ct.c_void_p)), time, delta
     )
@@ -414,7 +414,7 @@ def darray_put_rangev(darray, indices, srcs, time, delta):
     # keep the coerced source buffers alive for the duration of the call
     bufs = [np.ascontiguousarray(s, dtype=darray.dtype) for s in srcs]
     ptr_arr = (ct.c_void_p * count)(*[b.ctypes.data for b in bufs])
-    rc = libnrm.dstm_darray_put_rangev(
+    rc = libdstm.dstm_darray_put_rangev(
         darray.handle, idx_ptr, count,
         ct.cast(ptr_arr, ct.POINTER(ct.c_void_p)), time, delta
     )
@@ -436,8 +436,8 @@ def init(argv=None):
     # argv_arr = (ct.c_char_p * (len(encoded) + 1))(*encoded, None)
     # argv_pp = ct.cast(argv_arr, ct.POINTER(ct.c_char_p))
     # argc = ct.c_int(len(encoded))
-    # rc = libnrm.dstm_init(ct.byref(argc), ct.byref(argv_pp))
-    rc = libnrm.dstm_init(None, None)
+    # rc = libdstm.dstm_init(ct.byref(argc), ct.byref(argv_pp))
+    rc = libdstm.dstm_init(None, None)
     _check(rc, "dstm_init")
 
 
@@ -447,7 +447,7 @@ def finalize():
     Raises:
         RuntimeError: on a non-zero return code from the C call.
     """
-    rc = libnrm.dstm_finalize()
+    rc = libdstm.dstm_finalize()
     _check(rc, "dstm_finalize")
 
 
@@ -462,7 +462,7 @@ def fini(last_time: int):
     Raises:
         RuntimeError: on a non-zero return code from the C call.
     """
-    rc = libnrm.dstm_fini(last_time)
+    rc = libdstm.dstm_fini(last_time)
     _check(rc, "dstm_fini")
 
 
@@ -475,7 +475,7 @@ def log_setlevel(level):
     Raises:
         RuntimeError: on a non-zero return code from the C call.
     """
-    rc = libnrm.dstm_log_setlevel(level)
+    rc = libdstm.dstm_log_setlevel(level)
     _check(rc, "dstm_log_setlevel")
 
 
@@ -490,7 +490,7 @@ def distance_get(dist: Distance, i: int, j: int) -> int:
     Returns:
         int: the distance between rank ``i`` and rank ``j``.
     """
-    distance = libnrm.dstm_distance_get(dist.handle, i, j)
+    distance = libdstm.dstm_distance_get(dist.handle, i, j)
     return distance
 
 
@@ -510,7 +510,7 @@ def distance_create_ring(size):
         RuntimeError: on a non-zero return code from the C call.
     """
     handle = ct.c_void_p()
-    rc = libnrm.dstm_distance_create_ring(ct.byref(handle), size)
+    rc = libdstm.dstm_distance_create_ring(ct.byref(handle), size)
     _check(rc, "dstm_distance_create_ring")
     return Distance(handle)
 
@@ -530,7 +530,7 @@ def distance_create_complete(size):
         RuntimeError: on a non-zero return code from the C call.
     """
     handle = ct.c_void_p()
-    rc = libnrm.dstm_distance_create_complete(ct.byref(handle), size)
+    rc = libdstm.dstm_distance_create_complete(ct.byref(handle), size)
     _check(rc, "dstm_distance_create_complete")
     return Distance(handle)
 
@@ -541,7 +541,7 @@ def distance_destroy(dist):
     Args:
         dist: the Distance to destroy; its handle is freed in place.
     """
-    libnrm.dstm_distance_destroy(ct.byref(dist.handle))
+    libdstm.dstm_distance_destroy(ct.byref(dist.handle))
 
 
 def start(dist):
@@ -553,5 +553,5 @@ def start(dist):
     Raises:
         RuntimeError: on a non-zero return code from the C call.
     """
-    rc = libnrm.dstm_start(dist.handle)
+    rc = libdstm.dstm_start(dist.handle)
     _check(rc, "dstm_start")

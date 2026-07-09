@@ -16,6 +16,10 @@ mkShell {
     # python bindings
     python3Packages.flake8
     python3Packages.black
+    python3Packages.mpi4py
+    python3Packages.numpy
+    python3Packages.pytest
+    python3Packages.pytest-mpi
     # extra tools for testing
     jq
     bats
