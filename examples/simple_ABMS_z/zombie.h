@@ -7,12 +7,20 @@
 #include <limits.h>
 #include <stdio.h>
 
-#define CELL_CAPACITY  64    /* per-bundle, only for inter-rank traffic */
+#define CELL_CAPACITY    64
+#define MAX_CELL_SIDE    32   /* max cell_side per rank; strip length cap */
 #define LOGGING 0
 
 typedef struct cell_slot_t {
     int      n_humans;
     human_t  humans[CELL_CAPACITY];
+    /* Border strip counters. Layout is direction-agnostic: the sender
+     * writes the strip of cells facing this particular receiver, and
+     * the receiver reads them back in the same order. Length used per
+     * bundle is min(cell_side, MAX_CELL_SIDE). Corner neighbors only
+     * use index 0. */
+    int      strip_population[MAX_CELL_SIDE];
+    int      strip_zombie_count[MAX_CELL_SIDE];
 } cell_slot_t;
 
 extern cell_slot_t empty_cell;
@@ -70,6 +78,12 @@ typedef struct zombie_state_t {
      * every-tick synchronization pattern. */
     int               *mesh_neighbors;
     int                n_mesh_neighbors;
+
+    /* Ghost view of each mesh neighbor's sub-grid, updated every tick
+     * from the inbound cell_slot_t bundles. Indexed by
+     * [neighbor_slot][local_cell_id_on_that_neighbor]. */
+    int              **ghost_strip_pop;    /* [n_mesh_neighbors][nl] */
+    int              **ghost_strip_zom;  /* [n_mesh_neighbors][nl] */
 } zombie_state_t;
 
 void zombie_init(zombie_state_t *st,
