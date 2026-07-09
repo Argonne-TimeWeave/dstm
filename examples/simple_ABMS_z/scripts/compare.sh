@@ -13,6 +13,12 @@
 #       model.props               <- Repast model config   (template)
 #       results/                  <- created; per-run logs + summary CSV
 #
+# Both binaries are assumed to be linked with the PMPI wrapper
+# (mpi_wrap.c) so each rank drops an mpi_counts_rank<R>.txt file at
+# MPI_Finalize into $MPI_WRAP_OUTDIR (which this script sets to the
+# per-run directory). If the wrapper isn't linked in a binary, the
+# corresponding rows in mpi_summary.csv will be zeros — not an error.
+#
 # Single-node usage (unchanged):
 #   ./compare.sh
 #   ./compare.sh --nprocs 4 --time 200
@@ -79,7 +85,9 @@ DENSITY="$DENSITY_DEFAULT"
 # Multi-node knobs.
 HOSTFILE=""                             # e.g. "$COBALT_NODEFILE"
 MPI_PREFIX_OVERRIDE=""                  # override --prefix arg to mpirun
-MPI_ENV_FORWARD="LD_LIBRARY_PATH PATH"  # space-separated env vars to -x
+# NOTE: MPI_WRAP_OUTDIR appended below so the PMPI wrapper's output dir
+# is forwarded to every rank alongside LD_LIBRARY_PATH / PATH.
+MPI_ENV_FORWARD="LD_LIBRARY_PATH PATH MPI_WRAP_OUTDIR"
 MAP_BY_TEMPLATE=""                      # override the whole --map-by expr
 
 RUN_DSTM=1
@@ -312,6 +320,16 @@ mkdir -p "$OUT_ROOT"
 SUMMARY_CSV="${OUT_ROOT}/summary.csv"
 echo "framework,ranks,ppn,nodes,nh,nz,time,density,nl,seed,repeat,elapsed_s,tps,status" > "$SUMMARY_CSV"
 
+# Sibling CSV with per-run MPI activity, aggregated across ranks.
+# One row per (framework, config, repeat).
+MPI_SUMMARY_CSV="${OUT_ROOT}/mpi_summary.csv"
+echo "framework,ranks,ppn,nodes,nh,nz,time,density,nl,seed,repeat,elapsed_s,\
+n_ranks_seen,\
+isend,irecv,send,recv,wait,waitall,test,\
+barrier,reduce,allreduce,bcast,gather,allgather,alltoall,\
+bytes_sent,bytes_recvd,\
+total_calls,calls_per_rank_per_tick,bytes_per_rank_per_tick" > "$MPI_SUMMARY_CSV"
+
 echo "results -> $OUT_ROOT"
 if (( MULTINODE )); then
     echo "multi-node mode: hostfile=$HOSTFILE prefix=$MPI_PREFIX_OVERRIDE"
@@ -336,6 +354,96 @@ extract_repast_elapsed() {
 }
 
 # --------------------------------------------------------------------------
+# MPI wrap aggregation.
+#
+# Reads every mpi_counts_rank*.txt in $1 (the run dir) and prints a
+# CSV fragment with sums across ranks in the exact column order the
+# MPI_SUMMARY_CSV header expects (starting at n_ranks_seen and ending
+# at bytes_per_rank_per_tick). Prints an all-zeros fragment if no
+# counter files were found (i.e. binary wasn't linked with the wrap).
+#
+# Args: rundir  ranks  timesteps
+# --------------------------------------------------------------------------
+aggregate_mpi_counts() {
+    local rundir=$1 ranks=$2 timesteps=$3
+
+    # Guard: if no counter files, emit zeros and return.
+    if ! ls "$rundir"/mpi_counts_rank*.txt >/dev/null 2>&1; then
+        printf "0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0.0000,0.00\n"
+        return
+    fi
+
+    awk -v timesteps="$timesteps" '
+        BEGIN {
+            n_seen = 0
+            isend = irecv = send = recv = 0
+            wait = waitall = test = 0
+            barrier = reduce = allreduce = 0
+            bcast = gather = allgather = alltoall = 0
+            bytes_s = bytes_r = 0
+        }
+        # counter files look like:
+        #   rank R  elapsed X
+        #   isend I irecv R send S recv V
+        #   wait W waitall WA test T
+        #   barrier B reduce RD allreduce AR bcast BC gather G allgather AG alltoall AT
+        #   bytes_sent BS bytes_recvd BR
+        FNR == 1 { n_seen++ }
+        /^isend/ {
+            isend += $2; irecv += $4; send += $6; recv += $8
+        }
+        /^wait/ {
+            wait += $2; waitall += $4; test += $6
+        }
+        /^barrier/ {
+            barrier   += $2; reduce   += $4; allreduce += $6
+            bcast     += $8; gather   += $10; allgather += $12; alltoall += $14
+        }
+        /^bytes_sent/ {
+            bytes_s += $2; bytes_r += $4
+        }
+        END {
+            total_calls = isend + irecv + send + recv + wait + waitall + test \
+                        + barrier + reduce + allreduce \
+                        + bcast + gather + allgather + alltoall
+
+            if (n_seen > 0 && timesteps > 0) {
+                cpt = total_calls / n_seen / timesteps
+                bpt = bytes_s     / n_seen / timesteps
+            } else {
+                cpt = 0; bpt = 0
+            }
+
+            # awk numbers are doubles; use %.0f (not %lld) for integer output.
+            printf "%d,%.0f,%.0f,%.0f,%.0f,%.0f,%.0f,%.0f,%.0f,%.0f,%.0f,%.0f,%.0f,%.0f,%.0f,%.0f,%.0f,%.0f,%.4f,%.2f\n",
+                n_seen,
+                isend, irecv, send, recv, wait, waitall, test,
+                barrier, reduce, allreduce, bcast, gather, allgather, alltoall,
+                bytes_s, bytes_r,
+                total_calls, cpt, bpt
+        }
+    ' "$rundir"/mpi_counts_rank*.txt
+}
+
+# --------------------------------------------------------------------------
+# Emit one row into MPI_SUMMARY_CSV. Called by both runners after they
+# have parsed elapsed time.
+#
+# Args:
+#   framework ranks ppn nodes nh nz time density nl seed rep elapsed rundir
+# --------------------------------------------------------------------------
+emit_mpi_row() {
+    local framework=$1 ranks=$2 ppn=$3 nodes=$4 nh=$5 nz=$6 time=$7
+    local density=$8 nl=$9 seed=${10} rep=${11} elapsed=${12} rundir=${13}
+
+    local frag
+    frag=$(aggregate_mpi_counts "$rundir" "$ranks" "$time")
+
+    echo "${framework},${ranks},${ppn},${nodes},${nh},${nz},${time},${density},${nl},${seed},${rep},${elapsed},${frag}" \
+        >> "$MPI_SUMMARY_CSV"
+}
+
+# --------------------------------------------------------------------------
 # Runners.
 # --------------------------------------------------------------------------
 run_dstm() {
@@ -356,7 +464,10 @@ run_dstm() {
 
     echo "[dstm  ] ${cmd[*]}"
     local rc=0
-    ( cd "$rundir" && "${cmd[@]}" ) > "$log" 2>&1 || rc=$?
+    # Export MPI_WRAP_OUTDIR to this run's directory so the PMPI wrapper
+    # inside the child ranks writes its counter files here rather than
+    # /tmp. mpirun_cmd() forwards MPI_WRAP_OUTDIR via -x in multinode mode.
+    ( cd "$rundir" && MPI_WRAP_OUTDIR="$rundir" "${cmd[@]}" ) > "$log" 2>&1 || rc=$?
 
     local status="ok" elapsed tps
     if (( rc != 0 )); then status="exit_${rc}"; fi
@@ -371,6 +482,10 @@ run_dstm() {
 
     echo "dstm,$ranks,$ppn,$nodes,$nh,$nz,$time,$density,$nl,$seed,$rep,$elapsed,$tps,$status" >> "$SUMMARY_CSV"
     printf "         elapsed=%ss  tps=%s  status=%s\n" "$elapsed" "$tps" "$status"
+
+    # Emit the MPI-activity row (aggregated across ranks in this rundir).
+    emit_mpi_row "dstm" "$ranks" "$ppn" "$nodes" "$nh" "$nz" "$time" \
+                 "$density" "$nl" "$seed" "$rep" "$elapsed" "$rundir"
 }
 
 render_repast_props() {
@@ -422,7 +537,7 @@ run_repast() {
 
     echo "[repast] ${cmd[*]}"
     local rc=0
-    ( cd "$rundir" && "${cmd[@]}" ) > "$log" 2>&1 || rc=$?
+    ( cd "$rundir" && MPI_WRAP_OUTDIR="$rundir" "${cmd[@]}" ) > "$log" 2>&1 || rc=$?
 
     local status="ok" elapsed tps
     if (( rc != 0 )); then status="exit_${rc}"; fi
@@ -437,6 +552,9 @@ run_repast() {
 
     echo "repast,$ranks,$ppn,$nodes,$nh,$nz,$time,$density,-,$seed,$rep,$elapsed,$tps,$status" >> "$SUMMARY_CSV"
     printf "         elapsed=%ss  tps=%s  status=%s\n" "$elapsed" "$tps" "$status"
+
+    emit_mpi_row "repast" "$ranks" "$ppn" "$nodes" "$nh" "$nz" "$time" \
+                 "$density" "-" "$seed" "$rep" "$elapsed" "$rundir"
 }
 
 # --------------------------------------------------------------------------
@@ -495,4 +613,15 @@ if command -v column >/dev/null 2>&1; then
     column -s, -t < "$SUMMARY_CSV"
 else
     cat "$SUMMARY_CSV"
+fi
+
+echo
+echo "===== MPI activity summary ($MPI_SUMMARY_CSV) ====="
+if command -v column >/dev/null 2>&1; then
+    # Keep only the most useful columns for the on-screen view.
+    awk -F, 'BEGIN{OFS=","} {
+        print $1,$2,$3,$4,$5,$6,$7,$12, $14,$15,$16,$17,$18,$21,$23,$24,$29,$30,$31
+    }' "$MPI_SUMMARY_CSV" | column -s, -t
+else
+    cat "$MPI_SUMMARY_CSV"
 fi

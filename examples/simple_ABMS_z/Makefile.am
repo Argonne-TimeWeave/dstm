@@ -15,6 +15,7 @@ zombies_SOURCES = \
     zombie.h \
     event.h \
     human.h \
+    ../mpi_wrap.c \
     main.c
 
 EXTRA_DIST = README.md
