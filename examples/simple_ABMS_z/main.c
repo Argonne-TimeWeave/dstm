@@ -97,19 +97,38 @@ int main(int argc, char *argv[])
         return -1;
     }
 
+    /* Factor num_ranks into a rows x cols rank grid (as square as possible). */
     int cols = num_ranks;
     for (int r = 1; r * r <= num_ranks; r++) {
         if (num_ranks % r == 0) cols = num_ranks / r;
     }
     int rows = num_ranks / cols;
 
+    /* Rewrite the distance matrix so that Moore-adjacent ranks (the 8
+     * neighbors in the rows x cols rank grid, including diagonals) are
+     * at distance 1, and every other rank is unreachable (-1). Self
+     * stays at 0. This matches Repast HPC's default 2-D Moore ghost
+     * topology: each rank exchanges with up to 8 neighbors per tick. */
     for (int i = 0; i < num_ranks; i++) {
+        int ir = i / cols, ic = i % cols;
         for (int j = 0; j < num_ranks; j++) {
-            if (topology->distances[i * num_ranks + j] > 1) {
-                topology->distances[i * num_ranks + j] = -1;
+            int jr = j / cols, jc = j % cols;
+
+            int dr = ir - jr; if (dr < 0) dr = -dr;
+            int dc = ic - jc; if (dc < 0) dc = -dc;
+
+            int d;
+            if (i == j) {
+                d = 0;                    /* self */
+            } else if (dr <= 1 && dc <= 1) {
+                d = 1;                    /* Moore neighbor (edge or diagonal) */
+            } else {
+                d = -1;                   /* unreachable in this topology */
             }
+            topology->distances[i * num_ranks + j] = d;
+
             if (rank == 0)
-                printf("%d ", topology->distances[i * num_ranks + j]);
+                printf("%3d ", d);
         }
         if (rank == 0)
             printf("\n");
