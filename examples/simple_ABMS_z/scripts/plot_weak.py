@@ -174,8 +174,8 @@ def main():
         df,
         ycol="elapsed_s",
         ylabel="Elapsed wall time (s)" + (", log scale" if log_y else ""),
-        title=build_title(args.csv, df, "Weak scaling: wall-clock time"),
         out_path=outdir / f"{base}_elapsed.png",
+        title="",
         log_y=log_y,
     )
     plot_metric(
