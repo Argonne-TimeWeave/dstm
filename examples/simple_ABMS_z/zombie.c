@@ -269,7 +269,7 @@ void zombie_init(zombie_state_t *st,
     for (int r = 0; r < num_ranks; r++) {
         if (r == rank) continue;
         int d = dstm_distance_get(topology, rank, r);
-        if (d == 1) {
+        if (d != -1) {
             st->mesh_neighbors[st->n_mesh_neighbors++] = r;
         }
     }
@@ -464,6 +464,9 @@ void zombie_timestep(zombie_state_t *st, dstm_time_t t)
     /* 3a — inbound bundles + refresh ghost strips. */
     for (int ni = 0; ni < st->n_mesh_neighbors; ni++) {
         int src = st->mesh_neighbors[ni];
+
+        int delta = dstm_distance_get(st->topology, rank, src);
+        if (delta == -1) continue;
 
         size_t idx = bundle_index(rank, src, num_ranks);
         cell_slot_t recv;
