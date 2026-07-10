@@ -146,15 +146,15 @@ int main(int argc, char *argv[])
 
     if (rank == 0) {
         printf("Zombie sim: %d ranks (%dx%d), %d locals/rank (%dx%d, %d total)\n"
-               "Per rank: %d humans + %d zombies (%d agents)\n"
-               "Totals:   %d humans + %d zombies\n"
-               "Ticks: %d, cell cap=%d, incubation=%d ticks, "
-               "zombie_step=%d, human_step=%d, work=%d\n",
-               num_ranks, rows, cols, nl_actual, cell_side, cell_side, total_cells,
-               nh, nz, total_agents_per_rank,
-               total_humans, total_zombies,
-               timesteps, CELL_CAPACITY, INFECT_TICKS_TO_ZOMBIE,
-               ZOMBIE_STEP, HUMAN_STEP, work);
+                "Per rank: %d humans + %d zombies (%d agents)\n"
+                "Totals:   %d humans + %d zombies\n"
+                "Ticks: %d, cell cap=%d, incubation=%d ticks, "
+                "zombie_step=%d, human_step=%d, work=%d\n",
+                num_ranks, rows, cols, nl_actual, cell_side, cell_side, total_cells,
+                nh, nz, total_agents_per_rank,
+                total_humans, total_zombies,
+                timesteps, CELL_CAPACITY, INFECT_TICKS_TO_ZOMBIE,
+                ZOMBIE_STEP, HUMAN_STEP, work);
     }
 
     status = dstm_start(topology);
@@ -167,8 +167,8 @@ int main(int argc, char *argv[])
     /* Global darray — one bundle per (dest_rank, src_rank). */
     dstm_darray_t *cells;
     status = dstm_darray_create_equal(&cells,
-                                      sizeof(cell_slot_t),
-                                      (size_t)num_ranks * (size_t)num_ranks);
+            sizeof(cell_slot_t),
+            (size_t)num_ranks * (size_t)num_ranks);
     if (status != DSTM_SUCCESS) {
         dstm_log_error("Failed to create cells darray");
         MPI_Finalize();
@@ -186,13 +186,13 @@ int main(int argc, char *argv[])
             fprintf(infection_csv, "tick,number_infected\n");
         } else {
             dstm_log_warning("Could not open %s for infection CSV; skipping",
-                             infcsv_path);
+                    infcsv_path);
         }
     }
 
     zombie_state_t state;
     zombie_init(&state, rank, num_ranks, nl, nh, nz,
-                work, seed + rank, topology, cells, infection_csv);
+            work, seed + rank, topology, cells, infection_csv);
 
     MPI_Barrier(MPI_COMM_WORLD);
     double t_start = MPI_Wtime();
@@ -262,26 +262,26 @@ int main(int argc, char *argv[])
         int total_agents = tot_healthy + tot_infected + tot_zombie;
 
         printf("\n=============== INFECTION SUMMARY ===============\n"
-               "%-10s %10s\n"
-               "Healthy    %10d\n"
-               "Infected   %10d\n"
-               "Zombie     %10d\n"
-               "-------------------------\n"
-               "Total      %10d\n"
-               "=================================================\n",
-               "Status", "Count",
-               tot_healthy, tot_infected, tot_zombie, total_agents);
+                "%-10s %10s\n"
+                "Healthy    %10d\n"
+                "Infected   %10d\n"
+                "Zombie     %10d\n"
+                "-------------------------\n"
+                "Total      %10d\n"
+                "=================================================\n",
+                "Status", "Count",
+                tot_healthy, tot_infected, tot_zombie, total_agents);
 
         double tsps = (elapsed > 0.0) ? (timesteps / elapsed) : 0.0;
         printf("\n=============== RESULTS ===============\n"
-               "Total departures:   %d\n"
-               "Total arrivals:     %d\n"
-               "Total infections:   %d\n"
-               "\n"
-               "Elapsed time:       %.4f seconds\n"
-               "Timesteps/second:   %.2f\n"
-               "========================================\n",
-               total_dep, total_arr, total_inf, elapsed, tsps);
+                "Total departures:   %d\n"
+                "Total arrivals:     %d\n"
+                "Total infections:   %d\n"
+                "\n"
+                "Elapsed time:       %.4f seconds\n"
+                "Timesteps/second:   %.2f\n"
+                "========================================\n",
+                total_dep, total_arr, total_inf, elapsed, tsps);
 
         free(all_dep); free(all_arr); free(all_inf);
     }

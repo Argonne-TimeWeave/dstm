@@ -3,8 +3,8 @@
 Plot MPI activity: totals on the left, composition on the right.
 
 Two panels:
-  Left  : line chart of total MPI calls per rank per tick vs. ranks,
-          with a Repast/DSTM ratio overlay on a secondary y-axis.
+  Left  : line chart of total MPI calls per rank per tick vs. ranks
+          for each framework.
   Right : stacked bar chart of MPI calls per rank per tick, broken
           down by call category. Grouped bars per rank count, with
           DSTM and Repast side by side. Linear y-axis so the size
@@ -88,7 +88,7 @@ def agg(df: pd.DataFrame, ycol: str) -> pd.DataFrame:
 
 
 def draw_totals(ax, df, ranks_vals):
-    """Left panel: total calls/rank/tick vs. ranks, with ratio overlay."""
+    """Left panel: total calls/rank/tick vs. ranks."""
     a = agg(df, "calls_per_rank_per_tick")
 
     for fw, style in FW_STYLE.items():
@@ -105,26 +105,12 @@ def draw_totals(ax, df, ranks_vals):
     ax.set_yscale("log")
     ax.set_xticks(ranks_vals)
     ax.set_xticklabels([str(int(r)) for r in ranks_vals])
-    ax.set_xlabel("MPI ranks (log2)")
-    ax.set_ylabel("MPI calls per rank per tick (log)")
-    ax.set_title("Total MPI activity")
+    ax.set_xlabel("MPI ranks (log$_2$ scale)")
+    ax.set_ylabel("MPI calls per rank per tick (log scale)")
+    ax.set_title("Total MPI calls per rank per tick\n"
+                 f"scaling from {int(min(ranks_vals))} to {int(max(ranks_vals))} ranks")
     ax.grid(True, which="both", ls="--", alpha=0.35)
     ax.legend(loc="upper left", frameon=True)
-
-    # Ratio overlay on secondary y-axis.
-    d = a[a["framework"] == "dstm"].set_index("ranks")["mean"]
-    r = a[a["framework"] == "repast"].set_index("ranks")["mean"]
-    common = sorted(d.index.intersection(r.index))
-    if common:
-        ratio = [r.loc[c] / d.loc[c] for c in common]
-        ax2 = ax.twinx()
-        ax2.plot(common, ratio, color="#555555",
-                 marker="d", markersize=7, linewidth=1.4, linestyle=":",
-                 label="Repast / DSTM ratio")
-        ax2.set_ylabel("Repast / DSTM ratio (log)", color="#555555")
-        ax2.set_yscale("log")
-        ax2.tick_params(axis="y", labelcolor="#555555")
-        ax2.legend(loc="lower right", frameon=True, fontsize=9)
 
 
 def draw_stacked(ax, cat_df, ranks_vals):
@@ -178,7 +164,8 @@ def draw_stacked(ax, cat_df, ranks_vals):
     ax.legend(handles=handles, loc="upper left", fontsize=8,
               frameon=True, ncol=2)
 
-    ax.set_title("MPI call composition per rank per tick")
+    ax.set_title("Per-tick MPI call composition by framework\n"
+                 "(stacked by call category; linear scale)")
 
 
 def main():
@@ -218,9 +205,7 @@ def main():
     draw_totals(axes[0], df, ranks_vals)
     draw_stacked(axes[1], cat_df, ranks_vals)
 
-    fig.suptitle(f"MPI framework activity   |   {param_note}   ({base})",
-                 fontsize=12, y=0.995)
-    fig.subplots_adjust(left=0.06, right=0.94, top=0.90, bottom=0.14, wspace=0.30)
+    fig.subplots_adjust(left=0.06, right=0.98, top=0.86, bottom=0.14, wspace=0.28)
 
     out_path = outdir / f"{base}_mpi_activity.png"
     fig.savefig(out_path, dpi=150)
