@@ -112,6 +112,7 @@ AC_CONFIG_FILES([Makefile
          examples/airport_sim/Makefile
          examples/airport_sim/airports/Makefile
          examples/airport_sim/mpi_air/Makefile
+         examples/airport_sim/simple_dstm/Makefile
          examples/zombies/Makefile
          examples/zombies/dstm_zombies/Makefile
          examples/zombies/mpi_zombies/Makefile
