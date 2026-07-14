@@ -1,0 +1,264 @@
+#!/usr/bin/env python3
+"""
+Plot DSTM vs ROSS throughput crossover from a scale_crossover.sh output.
+
+Accepts EITHER:
+  * the raw CSV (weak per-run rows, includes trials + warmup), OR
+  * the .summary.csv (one row per (build, sync, ranks, planes) with medians)
+
+Auto-detects which one was passed.
+
+One subplot per rank count. X axis: planes per airport (log).
+Y axis: plane-hops per second (log). One line per engine.
+When using raw CSV, error bars show trial min/max; with the summary CSV,
+error bars are omitted (only the median is available).
+
+Background shading marks planes-per-airport regions where DSTM > ROSS(opt).
+
+Usage:
+    python3 plot_crossover.py <csv_or_summary_csv> [--output prefix]
+                              [--metric hops_per_sec|hops_per_sec_per_rank]
+"""
+
+import argparse
+import os
+import sys
+import math
+
+import pandas as pd
+import matplotlib.pyplot as plt
+import numpy as np
+
+ENGINE_STYLE = {
+    ("dstm", "bsp"):  dict(label="DSTM (BSP)",         color="#1f77b4", marker="o"),
+    ("ross", "opt"):  dict(label="ROSS (optimistic)",  color="#d62728", marker="s"),
+    ("ross", "cons"): dict(label="ROSS (conservative)", color="#ff9f2b", marker="^"),
+}
+
+# Human-readable axis labels per metric.
+METRIC_LABEL = {
+    "hops_per_sec":          "plane-hops / second",
+    "hops_per_sec_per_rank": "plane-hops / second / rank",
+}
+
+def is_summary_csv(df):
+    """A summary CSV has median_* columns and no per-trial `trial` column."""
+    return "median_hops_per_sec" in df.columns
+
+def load(csv_path, metric):
+    """
+    Returns a DataFrame with columns:
+        engine (tuple), ranks (int), planes (int),
+        median (float), lo (float), hi (float)
+    Regardless of whether the input was the raw or summary CSV.
+    """
+    df = pd.read_csv(csv_path)
+
+    if is_summary_csv(df):
+        # Summary CSV path: already aggregated, one row per point.
+        median_col = f"median_{metric}"
+        if median_col not in df.columns:
+            sys.exit(f"ERROR: summary CSV missing column '{median_col}'. "
+                     f"Available: {list(df.columns)}")
+        df = df.copy()
+        df["ranks"]  = pd.to_numeric(df["ranks"],  errors="coerce").astype("Int64")
+        df["planes"] = pd.to_numeric(df["planes"], errors="coerce").astype("Int64")
+        df["median"] = pd.to_numeric(df[median_col], errors="coerce")
+        df = df.dropna(subset=["ranks", "planes", "median"])
+        df["engine"] = list(zip(df["build"], df["sync"]))
+        # No per-trial spread available — set lo/hi = median so error bars vanish.
+        df["lo"] = df["median"]
+        df["hi"] = df["median"]
+        return df[["engine", "ranks", "planes", "median", "lo", "hi"]]
+
+    # Raw CSV path: filter, aggregate.
+    if metric not in df.columns:
+        sys.exit(f"ERROR: raw CSV missing column '{metric}'. "
+                 f"Available: {list(df.columns)}")
+
+    # Drop failed runs and warm-up trials.
+    df = df[df["status"] == "ok"].copy()
+    if "warmup" in df.columns:
+        df["warmup"] = pd.to_numeric(df["warmup"], errors="coerce").fillna(0).astype(int)
+        df = df[df["warmup"] == 0]
+
+    df["ranks"]  = pd.to_numeric(df["ranks"],  errors="coerce").astype("Int64")
+    df["planes"] = pd.to_numeric(df["planes"], errors="coerce").astype("Int64")
+    df[metric]   = pd.to_numeric(df[metric],   errors="coerce")
+    df = df.dropna(subset=["ranks", "planes", metric])
+
+    df["engine"] = list(zip(df["build"], df["sync"]))
+
+    # Median + min/max across trials.
+    agg = (df.groupby(["engine", "ranks", "planes"])[metric]
+             .agg(median="median", lo="min", hi="max")
+             .reset_index())
+    return agg
+
+def find_crossover(pivot_dstm, pivot_ross):
+    """Return the planes value where dstm first overtakes ross, or None.
+    Uses log-linear interpolation on planes-axis."""
+    common = sorted(set(pivot_dstm.index) & set(pivot_ross.index))
+    if not common:
+        return None
+    prev_diff = None
+    prev_x    = None
+    for x in common:
+        diff = pivot_dstm[x] - pivot_ross[x]
+        if prev_diff is not None and (prev_diff < 0) and (diff >= 0):
+            lx1, lx2 = math.log(prev_x), math.log(x)
+            frac = -prev_diff / (diff - prev_diff)
+            return math.exp(lx1 + frac * (lx2 - lx1))
+        prev_diff = diff
+        prev_x    = x
+    return None
+
+def plot(agg, out_prefix, metric, title_suffix=""):
+    y_label = METRIC_LABEL.get(metric, metric)
+
+    ranks_list = sorted(agg["ranks"].unique())
+    engines    = sorted(agg["engine"].unique(),
+                        key=lambda e: (e[0] != "dstm", e[0], e[1]))
+    n = len(ranks_list)
+
+    cols = min(n, 2)
+    rows = math.ceil(n / cols)
+
+    fig, axes = plt.subplots(rows, cols,
+                             figsize=(5.2 * cols, 4.0 * rows),
+                             squeeze=False, sharex=True)
+
+    for i, p in enumerate(ranks_list):
+        ax = axes[i // cols][i % cols]
+        sub = agg[agg["ranks"] == p]
+
+        pivots = {}
+        for eng in engines:
+            e_sub = sub[sub["engine"] == eng].sort_values("planes")
+            if e_sub.empty:
+                continue
+            pivots[eng] = e_sub.set_index("planes")["median"]
+
+            style = ENGINE_STYLE.get(eng, dict(label=f"{eng[0]}/{eng[1]}",
+                                               color="gray", marker="x"))
+            yerr = np.vstack([e_sub["median"] - e_sub["lo"],
+                              e_sub["hi"]     - e_sub["median"]])
+            # If summary CSV was used, lo==hi==median, so yerr is all zeros
+            # and errorbar() just draws the line/markers.
+            ax.errorbar(e_sub["planes"], e_sub["median"],
+                        yerr=yerr, capsize=3, linewidth=1.8,
+                        markersize=6, **style)
+
+        # Crossover annotation (DSTM vs ROSS-opt).
+        dstm_key = ("dstm", "bsp")
+        ross_key = ("ross", "opt")
+        if dstm_key in pivots and ross_key in pivots:
+            xc = find_crossover(pivots[dstm_key], pivots[ross_key])
+            if xc is not None:
+                ax.axvline(xc, color="black", linestyle=":", linewidth=1.2,
+                           alpha=0.6)
+                ax.text(xc, 0.05,
+                        f" crossover\n planes≈{xc:.1f}",
+                        va="bottom", ha="left",
+                        fontsize=8, color="black",
+                        transform=ax.get_xaxis_transform())
+
+            # Shade regions where DSTM beats ROSS(opt).
+            xs   = sorted(set(pivots[dstm_key].index) & set(pivots[ross_key].index))
+            dstm = pivots[dstm_key].reindex(xs).values
+            ross = pivots[ross_key].reindex(xs).values
+            wins = dstm > ross
+            for j in range(len(xs) - 1):
+                if wins[j] and wins[j + 1]:
+                    ax.axvspan(xs[j], xs[j + 1], alpha=0.08, color="#1f77b4",
+                               zorder=0)
+
+        ax.set_xscale("log", base=2)
+        ax.set_yscale("log")
+        ax.set_title(f"P = {p} ranks")
+        ax.set_xlabel("planes per airport")
+        ax.set_ylabel(y_label)
+        ax.grid(True, which="both", alpha=0.3)
+        ax.legend(loc="best", fontsize=8)
+
+    for k in range(n, rows * cols):
+        axes[k // cols][k % cols].axis("off")
+
+    fig.suptitle(f"DSTM vs ROSS throughput — planes crossover{title_suffix}",
+                 fontsize=14, y=1.00)
+    fig.tight_layout()
+
+    out = f"{out_prefix}_crossover.png"
+    fig.savefig(out, dpi=150, bbox_inches="tight")
+    print(f"wrote {out}")
+
+    # ---------- Speedup companion figure ----------
+    fig2, ax2 = plt.subplots(figsize=(7, 5))
+    dstm_key = ("dstm", "bsp")
+    ross_key = ("ross", "opt")
+    cmap = plt.cm.viridis
+    ranks_norm = plt.Normalize(vmin=math.log2(min(ranks_list)),
+                               vmax=math.log2(max(ranks_list)))
+    for p in ranks_list:
+        sub = agg[agg["ranks"] == p]
+        d = sub[sub["engine"] == dstm_key].sort_values("planes")
+        r = sub[sub["engine"] == ross_key].sort_values("planes")
+        if d.empty or r.empty:
+            continue
+        merged = pd.merge(d[["planes", "median"]],
+                          r[["planes", "median"]],
+                          on="planes", suffixes=("_d", "_r"))
+        if merged.empty:
+            print(f"  (P={p}: no common planes values between DSTM and ROSS)",
+                  file=sys.stderr)
+            continue
+        merged["speedup"] = merged["median_d"] / merged["median_r"]
+        ax2.plot(merged["planes"], merged["speedup"],
+                 marker="o", linewidth=1.8,
+                 color=cmap(ranks_norm(math.log2(p))),
+                 label=f"P={p}")
+    ax2.axhline(1.0, color="black", linestyle="--", linewidth=1, alpha=0.6)
+    ax2.set_xscale("log", base=2)
+    ax2.set_yscale("log")
+    ax2.set_xlabel("planes per airport")
+    ax2.set_ylabel("DSTM throughput  /  ROSS(opt) throughput")
+    ax2.set_title(f"DSTM speedup over ROSS vs plane density{title_suffix}")
+    ax2.grid(True, which="both", alpha=0.3)
+    ax2.legend(title="ranks", fontsize=9)
+    fig2.tight_layout()
+
+    out2 = f"{out_prefix}_speedup.png"
+    fig2.savefig(out2, dpi=150, bbox_inches="tight")
+    print(f"wrote {out2}")
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("csv",
+                    help="raw CSV or .summary.csv from scale_crossover.sh")
+    ap.add_argument("--output", "-o", default=None,
+                    help="output prefix (default: derived from CSV basename)")
+    ap.add_argument("--metric", default="hops_per_sec",
+                    choices=["hops_per_sec", "hops_per_sec_per_rank"],
+                    help="which throughput metric to plot (default: hops_per_sec)")
+    args = ap.parse_args()
+
+    agg = load(args.csv, args.metric)
+    if agg.empty:
+        print("No usable rows in CSV", file=sys.stderr)
+        sys.exit(1)
+
+    if args.output:
+        prefix = args.output
+    else:
+        # Strip trailing .summary and .csv so both foo.csv and foo.summary.csv
+        # produce clean prefix "foo".
+        base = os.path.splitext(args.csv)[0]
+        if base.endswith(".summary"):
+            base = base[:-len(".summary")]
+        prefix = base
+
+    plot(agg, prefix, args.metric,
+         title_suffix=f" ({METRIC_LABEL[args.metric]})")
+
+if __name__ == "__main__":
+    main()
