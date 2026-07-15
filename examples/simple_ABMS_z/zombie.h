@@ -8,7 +8,7 @@
 #include <stdio.h>
 
 #define CELL_CAPACITY    64
-#define MAX_CELL_SIDE    1024 /* TODO: make this auto-calculate given input; max cell_side per rank; strip length cap */
+#define MAX_CELL_SIDE    32 /* TODO: make this auto-calculate given input; max cell_side per rank; strip length cap */
 #define LOGGING 0
 
 typedef struct cell_slot_t {
