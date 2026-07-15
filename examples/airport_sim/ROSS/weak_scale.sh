@@ -1,57 +1,59 @@
 #!/usr/bin/env bash
-# Weak-scaling sweep comparing (with FAIR timing normalization):
-#   - DSTM airport sim (BSP)
-#   - ROSS airport sim, conservative  (--synch=2)
-#   - ROSS airport sim, optimistic    (--synch=3)
+# 2D weak-scaling sweep: PLANES x RANKS, comparing DSTM (BSP) vs ROSS
+# (optimistic/conservative).
 #
-# WEAK SCALING: per-rank airport count is HELD CONSTANT.
-#   AIRPORTS_PER_RANK = 64
-#   TOTAL_AIRPORTS(P) = 64 * P
+# Purpose: weak-scaling companion to scale_crossover.sh. Each rank always
+# owns the SAME per-rank workload (na=AIRPORTS_PER_RANK, planes/airport
+# swept), so the total problem grows linearly with ranks.
 #
-# FAIR TIMING NOTES
-# -----------------
-# ROSS and DSTM do NOT measure the same "time unit":
-#   * DSTM: integer barrier timesteps; every airport tries to depart once per step.
-#   * ROSS: continuous virtual time with Exp(MEAN_DEPARTURE=30) inter-departures
-#           and rollback-based speculation.
-# So "seconds per --time=128" vs "seconds per --end=128" is meaningless.
+# ENDPOINT MATCHES scale_crossover.sh exactly:
+#   scale_crossover.sh    at (P=256, planes=P_MAX): na=4,  total_airports=1024
+#   scale_weak.sh (this)  at (P=256, planes=P_MAX): na=4,  total_airports=1024
+# All other rank counts differ: crossover keeps total_airports=1024 fixed
+# (strong), this script keeps na=4 fixed (weak).
 #
-# This script normalizes on the atomic unit both perform: the PLANE HOP
-# (one airport -> airport transfer). We report:
-#   hops_per_sec               = committed_departures / wall_time
-#   hops_per_sec_per_rank      = hops_per_sec / P
+# FAIR TIMING NOTES (identical rationale to scale_crossover.sh)
+# -------------------------------------------------------------
+# ROSS and DSTM don't share a "time unit":
+#   * DSTM  : integer barrier timesteps; every airport departs every
+#             plane on the ground each step, up to LANDINGS_PER_STEP
+#             landings per step (matches ROSS's MEAN_LAND queue).
+#   * ROSS  : continuous virtual time with Exp(MEAN_DEPARTURE=30) hops,
+#             Exp(MEAN_LAND=10) runway service, and rollback-based
+#             speculation.
 #
-# We also MATCH THE WORKLOAD so both engines are asked to perform ~the same
-# number of hops:
-#   Expected DSTM hops  ~= TIMESTEPS * total_airports * PLANES
-#   Expected ROSS hops  ~= (ROSS_END / MEAN_DEPARTURE) * total_airports * PLANES
-# so we set ROSS_END = TIMESTEPS * MEAN_DEPARTURE.
+# Normalize on the atomic unit both perform: the PLANE HOP.
+#   hops_per_sec           = committed_departures / wall_time
+#   hops_per_sec_per_rank  = hops_per_sec / P
 #
-# Finally, the first trial per (engine, P) is treated as WARM-UP and dropped
-# from the summary (still logged in the raw CSV with trial=0).
+# We match the workload by setting ROSS_END = TIMESTEPS * MEAN_DEPARTURE.
+# ROSS hop count = Net Events Processed / 3 (each hop = 3 events).
+# First trial per (engine, P, planes) is a warm-up; excluded from summary.
 
 set -u
 
-# ---------- Config ----------
+# ---------- Config (must match scale_crossover.sh where noted) ----------
 RANKS=(4 16 64 256)
+PLANES=(1 4 16 64 256 1024 4096)
 NODES=8
-AIRPORTS_PER_RANK=64
-TIMESTEPS=128                # DSTM --time (bulk rounds)
-PLANES=64                    # ROSS --nplanes and DSTM --planes
-TRIALS=2                     # measured trials (a warm-up trial runs before these)
+
+# WEAK-SCALING KNOB: airports per rank stays constant.
+# Chosen so that at P=256, TOTAL_AIRPORTS = 4*256 = 1024, matching
+# scale_crossover.sh's fixed TOTAL_AIRPORTS=1024 at its P=256 endpoint.
+AIRPORTS_PER_RANK=4
+
+TIMESTEPS=100
+TRIALS=3                            # measured trials (+1 discarded warm-up)
 SEED=42
 EXTRAMEM=200000
 
-# Must match MEAN_DEPARTURE in ROSS's airport.h. If you change it there,
-# change it here.
+# Must match MEAN_DEPARTURE in ROSS's airport.h.
 ROSS_MEAN_DEPARTURE=30.0
 
-# Derived: give ROSS enough virtual time to depart each plane ~TIMESTEPS times,
-# matching the total plane-hop workload DSTM performs.
+# Derived: match total plane-hop workload across engines.
 ROSS_END=$(awk -v t="$TIMESTEPS" -v m="$ROSS_MEAN_DEPARTURE" \
            'BEGIN { printf "%.4f", t*m }')
 
-# When set to 1 (or pass --keep-logs), save every run's stdout+stderr.
 KEEP_LOGS=0
 for a in "$@"; do
     [[ "$a" == "--keep-logs" ]] && KEEP_LOGS=1
@@ -65,14 +67,14 @@ declare -A BUILDS=(
     [ross]="$SCRIPT_DIR/airport"
 )
 
-# Format: "<name>:<sync_mode>"  (sync_mode is only used for ross)
+# Engines to run at every (P, planes) point.
 ENGINE_ORDER=(
     "dstm:bsp"
-    "ross:cons"
     "ross:opt"
+    "ross:cons"
 )
 
-# ---------- Sanity checks ----------
+# ---------- Sanity ----------
 if [[ -z "${COBALT_NODEFILE:-}" ]]; then
     echo "ERROR: \$COBALT_NODEFILE not set. Run inside a Cobalt allocation." >&2
     exit 1
@@ -84,10 +86,6 @@ if (( ALLOCATED_NODES < NODES )); then
     exit 1
 fi
 
-echo "Allocation: $ALLOCATED_NODES nodes"
-cat "$COBALT_NODEFILE"
-echo
-
 for spec in "${ENGINE_ORDER[@]}"; do
     name="${spec%%:*}"
     bin="${BUILDS[$name]}"
@@ -97,38 +95,38 @@ for spec in "${ENGINE_ORDER[@]}"; do
     fi
 done
 
-MPI_PREFIX="$(dirname "$(dirname "$(which mpirun)")")"
-echo "MPI prefix              : $MPI_PREFIX"
-echo "Airports per rank       : $AIRPORTS_PER_RANK   (weak scaling, held constant)"
-echo "DSTM timesteps          : $TIMESTEPS"
-echo "ROSS end virtual time   : $ROSS_END   (= $TIMESTEPS * MEAN_DEPARTURE=$ROSS_MEAN_DEPARTURE)"
-echo "Planes per airport      : $PLANES"
-echo "Measured trials / point : $TRIALS  (+1 discarded warm-up)"
-echo "Rank sweep              : ${RANKS[*]}"
-echo "Keep per-run logs       : $KEEP_LOGS"
-echo
-
-# Verify every P in the sweep yields a perfect-square total airport count.
+# For each P: total_airports = AIRPORTS_PER_RANK * P must be a perfect
+# square (torus layout). Validate up-front and precompute grid sides.
 is_perfect_square() {
     local n="$1"
     local s
     s=$(awk -v n="$n" 'BEGIN { s=int(sqrt(n)+0.5); print (s*s==n)?1:0 }')
     [[ "$s" == "1" ]]
 }
+
+declare -A TOTAL_AIRPORTS_FOR_P
+declare -A GRID_FOR_P
 for p in "${RANKS[@]}"; do
-    total=$(( AIRPORTS_PER_RANK * p ))
-    if ! is_perfect_square "$total"; then
-        echo "ERROR: P=$p * apr=$AIRPORTS_PER_RANK = $total is not a perfect square." >&2
+    ta=$(( AIRPORTS_PER_RANK * p ))
+    if ! is_perfect_square "$ta"; then
+        echo "ERROR: at P=$p, total_airports=$ta (= $AIRPORTS_PER_RANK * $p) is not a perfect square." >&2
+        echo "       Adjust RANKS or AIRPORTS_PER_RANK so every product is a perfect square." >&2
         exit 1
     fi
+    TOTAL_AIRPORTS_FOR_P[$p]=$ta
+    GRID_FOR_P[$p]=$(awk -v n="$ta" 'BEGIN { printf "%d", int(sqrt(n)+0.5) }')
 done
 
+MPI_PREFIX="$(dirname "$(dirname "$(which mpirun)")")"
+
 # ---------- Output filenames ----------
-RANKS_MIN=${RANKS[0]}
-RANKS_MAX=${RANKS[-1]}
+PLANES_MIN=${PLANES[0]}
+PLANES_MAX=${PLANES[-1]}
+PLANES_COUNT=${#PLANES[@]}
 RANKS_COUNT=${#RANKS[@]}
 
-BASE="weak_n${NODES}_apr${AIRPORTS_PER_RANK}_t${TIMESTEPS}_p${PLANES}_tr${TRIALS}_s${SEED}_r${RANKS_MIN}-${RANKS_MAX}x${RANKS_COUNT}_fair"
+BASE="weak_apr${AIRPORTS_PER_RANK}_t${TIMESTEPS}_tr${TRIALS}_s${SEED}"
+BASE="${BASE}_r${RANKS_COUNT}pts_pl${PLANES_MIN}-${PLANES_MAX}x${PLANES_COUNT}_fair"
 CSV="$SCRIPT_DIR/${BASE}.csv"
 
 if [[ -e "$CSV" ]]; then
@@ -141,13 +139,38 @@ SUMMARY_CSV="${CSV%.csv}.summary.csv"
 LOG_DIR="$SCRIPT_DIR/${BASE}_logs"
 mkdir -p "$LOG_DIR"
 
-echo "CSV output  : $CSV"
-echo "Summary CSV : $SUMMARY_CSV"
-echo "Log dir     : $LOG_DIR (populated on failure or --keep-logs)"
+TOTAL_RUNS=$(( ${#RANKS[@]} * ${#PLANES[@]} * ${#ENGINE_ORDER[@]} * (TRIALS + 1) ))
 
-# Raw per-run CSV. trial=0 means warm-up (excluded from summary).
-echo "build,sync,ranks,ppn,nodes_used,na,total_airports,grid_side,timesteps,ross_end,planes,trial,warmup,elapsed_s,committed_hops,hops_per_sec,hops_per_sec_per_rank,ross_events,ross_rollbacks,ross_efficiency,status" > "$CSV"
+echo "=================================================================="
+echo "PLANES x RANKS WEAK scaling sweep  (fair-timing / hops-per-sec)"
+echo "=================================================================="
+echo "Allocation           : $ALLOCATED_NODES nodes"
+echo "Airports per rank    : $AIRPORTS_PER_RANK  (FIXED; total grows with P)"
+for p in "${RANKS[@]}"; do
+    printf "  P=%-4d -> total_airports=%d (%dx%d torus)\n" \
+        "$p" "${TOTAL_AIRPORTS_FOR_P[$p]}" \
+        "${GRID_FOR_P[$p]}" "${GRID_FOR_P[$p]}"
+done
+echo "DSTM timesteps       : $TIMESTEPS"
+echo "ROSS end virt time   : $ROSS_END   (= $TIMESTEPS * MEAN_DEPARTURE=$ROSS_MEAN_DEPARTURE)"
+echo "Measured trials      : $TRIALS  (+1 discarded warm-up per point)"
+echo "Ranks sweep          : ${RANKS[*]}"
+echo "Planes sweep         : ${PLANES[*]}"
+echo "Engines              : ${ENGINE_ORDER[*]}"
+echo "CSV output           : $CSV"
+echo "Summary CSV          : $SUMMARY_CSV"
+echo "Log dir              : $LOG_DIR"
+echo "Total mpirun runs    : $TOTAL_RUNS"
+echo "=================================================================="
+echo "Endpoint (P=${RANKS[-1]}, planes=${PLANES_MAX}) matches scale_crossover.sh"
+echo "  when its TOTAL_AIRPORTS = ${TOTAL_AIRPORTS_FOR_P[${RANKS[-1]}]} at that same P."
+echo "=================================================================="
+echo
 
+# Raw per-run CSV. trial=0 rows are warm-ups (warmup=1), excluded from summary.
+echo "build,sync,ranks,ppn,nodes_used,na,total_airports,grid_side,timesteps,ross_end,planes,trial,warmup,elapsed_s,committed_hops,hops_per_sec,hops_per_sec_per_rank,ross_events,ross_net_events,ross_events_rb,ross_rollbacks,ross_efficiency,status" > "$CSV"
+
+# ---------- Helpers ----------
 compute_placement() {
     local p="$1"
     if (( p < NODES )); then
@@ -156,23 +179,19 @@ compute_placement() {
     else
         PPN=$(( p / NODES ))
         NODES_USED=$NODES
-        if (( p % NODES != 0 )); then
-            echo "WARNING: P=$p not divisible by NODES=$NODES; ppr mapping may fail" >&2
-        fi
     fi
 }
 
 maybe_keep_log() {
-    local tmpf="$1" name="$2" sync="$3" p="$4" trial="$5" status="$6"
+    local tmpf="$1" name="$2" sync="$3" p="$4" planes="$5" trial="$6" status="$7"
     if [[ "$KEEP_LOGS" == "1" ]] || [[ "$status" != "ok" ]]; then
-        local dest="$LOG_DIR/${name}_${sync}_p${p}_trial${trial}_${status}.log"
+        local dest="$LOG_DIR/${name}_${sync}_p${p}_pl${planes}_trial${trial}_${status}.log"
         cp "$tmpf" "$dest"
         echo "    (log saved: $dest)"
     fi
     rm -f "$tmpf"
 }
 
-# fmt_rate: safe division, prints "" on non-numeric or zero-time input.
 fmt_rate() {
     local num="$1" den="$2"
     awk -v n="$num" -v d="$den" 'BEGIN {
@@ -181,33 +200,27 @@ fmt_rate() {
     }'
 }
 
-# --------------------------------------------------------------------------
+# ---------- Runners ----------
 run_dstm() {
     local bin="$1"; local p="$2"; local trial="$3"; local warmup="$4"
-    local na="$5"; local total="$6"; local grid="$7"
+    local na="$5"; local planes="$6"; local total_air="$7"; local grid="$8"
     local sync="bsp"
 
     local tag="dstm/${sync}"
     (( warmup )) && tag="${tag}[warmup]"
-    echo ">>> [${tag}] ranks=$p ppn=$PPN nodes=$NODES_USED trial=$trial  (na=$na total=$total grid=${grid}x${grid})"
+    echo ">>> [${tag}] P=$p planes=$planes trial=$trial (na=$na, total=$total_air)"
 
     local map_arg=""
-    if (( p > 1 )) && (( p % NODES_USED == 0 )); then
-        map_arg="--map-by ppr:${PPN}:node"
-    fi
+    (( p > 1 )) && (( p % NODES_USED == 0 )) && map_arg="--map-by ppr:${PPN}:node"
 
     local tmpf; tmpf=$(mktemp)
 
     mpirun -n "$p" --hostfile "$COBALT_NODEFILE" \
-        --prefix "$MPI_PREFIX" \
-        $map_arg \
+        --prefix "$MPI_PREFIX" $map_arg \
         -x LD_LIBRARY_PATH -x PATH \
         "$bin" \
-        --na "$na" \
-        --time "$TIMESTEPS" \
-        --planes "$PLANES" \
-        --seed "$SEED" \
-        --quiet \
+        --na "$na" --time "$TIMESTEPS" \
+        --planes "$planes" --seed "$SEED" --quiet \
         > "$tmpf" 2>&1
     local rc=$?
 
@@ -220,7 +233,6 @@ run_dstm() {
         dep=$(    grep -E '^Total departures:' "$tmpf" | awk '{print $3}')
         land=$(   grep -E '^Total landings:'   "$tmpf" | awk '{print $3}')
 
-        # For DSTM the atomic hop count is exactly total_departures.
         hops="$dep"
         hps=$(fmt_rate "$hops" "$elapsed")
         hpspr=$(fmt_rate "$hps" "$p")
@@ -228,62 +240,43 @@ run_dstm() {
         [[ -z "$elapsed" ]] && status="parse_fail"
     fi
 
-    echo "dstm,${sync},${p},${PPN},${NODES_USED},${na},${total},${grid},${TIMESTEPS},${ROSS_END},${PLANES},${trial},${warmup},${elapsed},${hops},${hps},${hpspr},,,,${status}" >> "$CSV"
+    echo "dstm,${sync},${p},${PPN},${NODES_USED},${na},${total_air},${grid},${TIMESTEPS},${ROSS_END},${planes},${trial},${warmup},${elapsed},${hops},${hps},${hpspr},,,,,,${status}" >> "$CSV"
 
-    maybe_keep_log "$tmpf" "dstm" "$sync" "$p" "$trial" "$status"
+    maybe_keep_log "$tmpf" "dstm" "$sync" "$p" "$planes" "$trial" "$status"
 }
 
-# --------------------------------------------------------------------------
-# run_ross <bin> <p> <trial> <warmup> <total_airports> <grid_side> <sync_mode>
-#   sync_mode ∈ {cons, opt}
-# --------------------------------------------------------------------------
 run_ross() {
     local bin="$1"; local p="$2"; local trial="$3"; local warmup="$4"
-    local total="$5"; local grid="$6"; local sync="$7"
+    local planes="$5"; local sync="$6"; local total_air="$7"; local grid="$8"
 
-    local synch_flag=""
-    local extra_flags=()
+    local synch_flag="" ; local extra_flags=()
     case "$sync" in
-        cons)
-            synch_flag="--synch=2"
-            extra_flags=( "--lookahead=1.00" )
-            ;;
-        opt)
-            synch_flag="--synch=3"
-            extra_flags=( "--extramem=${EXTRAMEM}" )
-            ;;
-        *)
-            echo "ERROR: unknown ROSS sync mode '$sync'" >&2
-            return 1
-            ;;
+        cons) synch_flag="--synch=2"; extra_flags=( "--lookahead=1.00" ) ;;
+        opt)  synch_flag="--synch=3"; extra_flags=( "--extramem=${EXTRAMEM}" ) ;;
+        *)    echo "ERROR: unknown ROSS sync '$sync'" >&2; return 1 ;;
     esac
 
     local tag="ross/${sync}"
     (( warmup )) && tag="${tag}[warmup]"
-    echo ">>> [${tag}] ranks=$p ppn=$PPN nodes=$NODES_USED trial=$trial  (nairports=$total grid=${grid}x${grid} end=$ROSS_END)"
+    echo ">>> [${tag}] P=$p planes=$planes trial=$trial (end=$ROSS_END, total_air=$total_air)"
 
     local map_arg=""
-    if (( p > 1 )) && (( p % NODES_USED == 0 )); then
-        map_arg="--map-by ppr:${PPN}:node"
-    fi
+    (( p > 1 )) && (( p % NODES_USED == 0 )) && map_arg="--map-by ppr:${PPN}:node"
 
     local tmpf; tmpf=$(mktemp)
 
     mpirun -n "$p" --hostfile "$COBALT_NODEFILE" \
-        --prefix "$MPI_PREFIX" \
-        $map_arg \
+        --prefix "$MPI_PREFIX" $map_arg \
         -x LD_LIBRARY_PATH -x PATH \
-        "$bin" \
-        "$synch_flag" \
-        "${extra_flags[@]}" \
-        --nairports="$total" \
-        --end="$ROSS_END" \
-        --nplanes="$PLANES" \
+        "$bin" "$synch_flag" "${extra_flags[@]}" \
+        --nairports="$total_air" \
+        --end="$ROSS_END" --nplanes="$planes" \
         > "$tmpf" 2>&1
     local rc=$?
 
     local elapsed="" status="ok"
-    local ross_events="" ross_rollbacks="" ross_eff=""
+    local ross_events="" ross_net_events="" ross_events_rb=""
+    local ross_rollbacks="" ross_eff=""
     local hops="" hps="" hpspr=""
 
     if [[ $rc -ne 0 ]]; then
@@ -292,14 +285,14 @@ run_ross() {
         elapsed=$(grep -E 'Running Time[[:space:]]*=' "$tmpf" \
                   | awk -F'=' '{print $2}' | awk '{print $1}' | tail -1)
 
-        ross_events=$(     grep -E 'Total Events Processed'       "$tmpf" | awk '{print $NF}' | head -1)
-        ross_net_events=$( grep -E 'Net Events Processed'         "$tmpf" | awk '{print $NF}')
-        ross_events_rb=$(  grep -E 'Events Rolled Back'           "$tmpf" | awk '{print $NF}')
-        ross_rollbacks=$(  grep -E '^[[:space:]]*Total Roll Backs' "$tmpf" | awk '{print $NF}')
-        ross_eff=$(        grep -E '^[[:space:]]*Efficiency'      "$tmpf" | awk '{print $(NF-1)}')
+        ross_events=$(     grep -E 'Total Events Processed'         "$tmpf" | awk '{print $NF}' | head -1)
+        ross_net_events=$( grep -E 'Net Events Processed'           "$tmpf" | awk '{print $NF}')
+        ross_events_rb=$(  grep -E 'Events Rolled Back'             "$tmpf" | awk '{print $NF}')
+        ross_rollbacks=$(  grep -E '^[[:space:]]*Total Roll Backs'  "$tmpf" | awk '{print $NF}')
+        ross_eff=$(        grep -E '^[[:space:]]*Efficiency'        "$tmpf" | awk '{print $(NF-1)}')
 
-        # Each plane hop = DEPARTURE + ARRIVAL + LAND, so 3 committed events per hop.
-        # ROSS already computed Net = Total - EventsRolledBack; trust its number.
+        # Committed hops = Net Events Processed / 3
+        # (each plane hop = DEPARTURE + ARRIVAL + LAND).
         if [[ -n "$ross_net_events" ]]; then
             hops=$(awk -v c="$ross_net_events" 'BEGIN { printf "%d", int(c/3.0 + 0.5) }')
         fi
@@ -310,75 +303,89 @@ run_ross() {
         [[ -z "$elapsed" ]] && status="parse_fail"
     fi
 
-    echo "ross,${sync},${p},${PPN},${NODES_USED},,${total},${grid},${TIMESTEPS},${ROSS_END},${PLANES},${trial},${warmup},${elapsed},${hops},${hps},${hpspr},${ross_events},${ross_rollbacks},${ross_eff},${status}" >> "$CSV"
+    echo "ross,${sync},${p},${PPN},${NODES_USED},,${total_air},${grid},${TIMESTEPS},${ROSS_END},${planes},${trial},${warmup},${elapsed},${hops},${hps},${hpspr},${ross_events},${ross_net_events},${ross_events_rb},${ross_rollbacks},${ross_eff},${status}" >> "$CSV"
 
-    maybe_keep_log "$tmpf" "ross" "$sync" "$p" "$trial" "$status"
+    maybe_keep_log "$tmpf" "ross" "$sync" "$p" "$planes" "$trial" "$status"
 }
 
-# --------------------------------------------------------------------------
-# Main sweep: for each P and each engine, run 1 warm-up + TRIALS measured runs.
-# --------------------------------------------------------------------------
+# ---------- Main sweep ----------
+# Outer:  RANKS  (placement setup; total_airports is derived per-P)
+# Middle: PLANES
+# Inner:  trial, then engine (interleave so noise hits all engines equally)
+# For each (P, planes) we do 1 warm-up per engine first, then TRIALS measured.
 for p in "${RANKS[@]}"; do
     NA=$AIRPORTS_PER_RANK
-    TOTAL=$(( NA * p ))
-    GRID=$(awk -v n="$TOTAL" 'BEGIN { printf "%d", int(sqrt(n)+0.5) }')
-
+    TOTAL_AIR=${TOTAL_AIRPORTS_FOR_P[$p]}
+    GRID=${GRID_FOR_P[$p]}
     compute_placement "$p"
 
     echo
-    echo "=== P=$p  na=$NA  total_airports=$TOTAL  grid=${GRID}x${GRID} ==="
+    echo "########## P=$p  na=$NA  total_airports=$TOTAL_AIR (${GRID}x${GRID}) ##########"
 
-    for spec in "${ENGINE_ORDER[@]}"; do
-        name="${spec%%:*}"
-        sync="${spec##*:}"
-        bin="${BUILDS[$name]}"
+    for planes in "${PLANES[@]}"; do
+        echo
+        echo "---- planes=$planes ----"
 
-        # Warm-up (trial=0, warmup=1) — excluded from summary.
-        case "$name" in
-            dstm) run_dstm "$bin" "$p" 0 1 "$NA" "$TOTAL" "$GRID" ;;
-            ross) run_ross "$bin" "$p" 0 1 "$TOTAL" "$GRID" "$sync" ;;
-        esac
-
-        # Measured trials.
-        for trial in $(seq 1 "$TRIALS"); do
+        # Warm-up trial per engine (trial=0, warmup=1) — excluded from summary.
+        for spec in "${ENGINE_ORDER[@]}"; do
+            name="${spec%%:*}"; sync="${spec##*:}"
+            bin="${BUILDS[$name]}"
             case "$name" in
-                dstm) run_dstm "$bin" "$p" "$trial" 0 "$NA" "$TOTAL" "$GRID" ;;
-                ross) run_ross "$bin" "$p" "$trial" 0 "$TOTAL" "$GRID" "$sync" ;;
-                *)    echo "ERROR: unknown engine $name" >&2; exit 1 ;;
+                dstm) run_dstm "$bin" "$p" 0 1 "$NA" "$planes" "$TOTAL_AIR" "$GRID" ;;
+                ross) run_ross "$bin" "$p" 0 1 "$planes" "$sync" "$TOTAL_AIR" "$GRID" ;;
             esac
+        done
+
+        # Measured trials, interleaved by engine.
+        for trial in $(seq 1 "$TRIALS"); do
+            for spec in "${ENGINE_ORDER[@]}"; do
+                name="${spec%%:*}"; sync="${spec##*:}"
+                bin="${BUILDS[$name]}"
+                case "$name" in
+                    dstm) run_dstm "$bin" "$p" "$trial" 0 "$NA" "$planes" "$TOTAL_AIR" "$GRID" ;;
+                    ross) run_ross "$bin" "$p" "$trial" 0 "$planes" "$sync" "$TOTAL_AIR" "$GRID" ;;
+                esac
+            done
         done
     done
 done
 
-# --------------------------------------------------------------------------
-# Summarize: median hops/sec per (build, sync, ranks), excluding warm-ups.
-# --------------------------------------------------------------------------
-echo "build,sync,ranks,n_trials,median_elapsed_s,median_hops,median_hops_per_sec,median_hops_per_sec_per_rank" > "$SUMMARY_CSV"
+# ----------------------------------------------------------------------
+# Summarize: median per (build, sync, ranks, planes), excluding warm-ups.
+# Field indices (must match the CSV header above):
+#   1  build          8  grid_side       15 committed_hops       22 ross_efficiency
+#   2  sync           9  timesteps       16 hops_per_sec         23 status
+#   3  ranks         10  ross_end        17 hops_per_sec_per_rank
+#   4  ppn           11  planes          18 ross_events
+#   5  nodes_used    12  trial           19 ross_net_events
+#   6  na            13  warmup          20 ross_events_rb
+#   7  total_air     14  elapsed_s       21 ross_rollbacks
+# ----------------------------------------------------------------------
+echo "build,sync,ranks,planes,n_trials,median_elapsed_s,median_hops,median_hops_per_sec,median_hops_per_sec_per_rank" > "$SUMMARY_CSV"
 
 awk -F, '
-    NR == 1 { next }                          # skip header
-    $13 == "1" { next }                       # skip warm-up rows
-    $21 != "ok" { next }                      # skip failed rows
+    NR == 1 { next }
+    $13 == "1" { next }        # skip warm-ups
+    $23 != "ok" { next }        # skip failed rows (status is field 23)
     {
-        key = $1 "," $2 "," $3
-        el[key]  = el[key]  " " $14
-        hp[key]  = hp[key]  " " $15
-        hps[key] = hps[key] " " $16
+        # key: build,sync,ranks,planes
+        key = $1 "," $2 "," $3 "," $11
+        el[key]    = el[key]    " " $14
+        hp[key]    = hp[key]    " " $15
+        hps[key]   = hps[key]   " " $16
         hpspr[key] = hpspr[key] " " $17
         cnt[key]++
     }
-    function median(list,   a, n, i, j, k, v) {
+    function median(list,   a, n, i, j, kk, v) {
         n = split(list, a, " ")
-        # split leaves a[1]="" from the leading space; compact it.
         j = 0
         for (i = 1; i <= n; i++) if (a[i] != "") { j++; a[j] = a[i]+0 }
         n = j
         if (n == 0) return ""
-        # insertion sort (n is tiny)
         for (i = 2; i <= n; i++) {
-            v = a[i]; k = i - 1
-            while (k >= 1 && a[k] > v) { a[k+1] = a[k]; k-- }
-            a[k+1] = v
+            v = a[i]; kk = i - 1
+            while (kk >= 1 && a[kk] > v) { a[kk+1] = a[kk]; kk-- }
+            a[kk+1] = v
         }
         if (n % 2) return a[(n+1)/2]
         return (a[n/2] + a[n/2+1]) / 2.0
@@ -387,21 +394,25 @@ awk -F, '
         for (k in cnt) {
             printf "%s,%d,%.6f,%.0f,%.2f,%.2f\n",
                 k, cnt[k],
-                median(el[k])  + 0,
-                median(hp[k])  + 0,
-                median(hps[k]) + 0,
+                median(el[k])    + 0,
+                median(hp[k])    + 0,
+                median(hps[k])   + 0,
                 median(hpspr[k]) + 0
         }
     }
-' "$CSV" | sort -t, -k1,1 -k2,2 -k3,3n >> "$SUMMARY_CSV"
+' "$CSV" | sort -t, -k1,1 -k2,2 -k3,3n -k4,4n >> "$SUMMARY_CSV"
 
 rm -f ross.csv
 rm -rf ross_all_lp_stats
 
 echo
+echo "=================================================================="
 echo "Done."
 echo "Raw CSV     : $CSV"
 echo "Summary CSV : $SUMMARY_CSV"
 echo "Logs        : $LOG_DIR"
 echo
-echo "Primary comparison metric: median_hops_per_sec_per_rank in $SUMMARY_CSV"
+echo "Primary metric: median_hops_per_sec (and median_hops_per_sec_per_rank)"
+echo "To plot:"
+echo "  python3 $SCRIPT_DIR/plot_crossover.py $SUMMARY_CSV"
+echo "=================================================================="
