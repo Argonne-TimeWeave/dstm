@@ -6,18 +6,28 @@
 # Produces ONE results directory with a single summary.csv and
 # mpi_summary.csv, matching the schema written by compare.sh.
 #
+# Defaults are chosen so that the FINAL point in SWEEP_CONFIG
+# (256:32:8) matches the weak-scaling comparison invocation:
+#
+#   ./compare.sh --hostfile "$COBALT_NODEFILE" \
+#       --sweep-config "1:1:1 2:1:2 4:1:4 8:1:8 16:2:8 32:4:8 64:8:8 128:16:8 256:32:8" \
+#       --nh 512 --time 256 --density 1.0 --repeats 4
+#
+# At 256 ranks: N/ranks = 132352/256 = 517 = nh(512) + nz(5). Exact.
+# All other rank counts pack the same 132352 total agents across fewer ranks.
+#
 # usage:
-#   ./strong_scale.sh                       # defaults: N=4000, TIME=200
-#   ./strong_scale.sh 8000 400
+#   ./strong_scale.sh                       # defaults: N=132352, TIME=256
+#   ./strong_scale.sh 132352 256
 #   N=16000 TIME=200 SWEEP_CONFIG="4:4:1 8:8:1 16:16:1" ./strong_scale.sh
 #
 # Env knobs (all optional):
-#   N              total agents across all ranks         (default 4000)
-#   TIME           ticks to simulate                     (default 200)
+#   N              total agents across all ranks         (default 132352)
+#   TIME           ticks to simulate                     (default 256)
 #   NZ             zombies per rank                      (default 5)
 #   SEED           RNG seed                              (default 42)
 #   WORK           DSTM synthetic-work knob              (default 0)
-#   REPEATS        repeats per (ranks) point             (default 1)
+#   REPEATS        repeats per (ranks) point             (default 4)
 #   DENSITY        agents/cell target                    (default 1.0)
 #   SWEEP_CONFIG   "ranks:ppn:nodes ..." points to sweep
 #   ONLY           dstm | repast | both                  (default both)
@@ -35,7 +45,7 @@
 #       results/
 #
 
-set -uo pipefail
+#set -uo pipefail
 
 export LD_LIBRARY_PATH=~/sfw/Boost/Boost_1.83/lib:${LD_LIBRARY_PATH:-}
 
@@ -53,19 +63,29 @@ REPAST_MODEL_TMPL="${REPAST_MODEL_TMPL:-${SCRIPT_DIR}/model.props}"
 MPIRUN="${MPIRUN:-mpirun}"
 
 # --------------------------------------------------------------------------
-# Config (positional args + env overrides).
+# DSTM header we rewrite per-iteration to size the strip arrays.
 # --------------------------------------------------------------------------
-N="${1:-${N:-524288}}"
-TIME="${2:-${TIME:-100}}"
+DSTM_HEADER="${DSTM_HEADER:-${ROOT_DIR}/zombie.h}"
+DSTM_BUILD_DIR="${DSTM_BUILD_DIR:-${ROOT_DIR}}"
+
+# --------------------------------------------------------------------------
+# Config (positional args + env overrides).
+#
+# Chosen so that at ranks=256 (the last SWEEP_CONFIG point below):
+#   per_rank_total = N / ranks = 132352 / 256 = 517
+#   nh = 517 - NZ(5) = 512   <-- matches --nh 512 in compare.sh invocation
+# --------------------------------------------------------------------------
+N="${1:-${N:-132352}}"
+TIME="${2:-${TIME:-256}}"
 
 NZ="${NZ:-5}"
 SEED="${SEED:-42}"
 WORK="${WORK:-0}"
-REPEATS="${REPEATS:-5}"
-DENSITY="${DENSITY:-1}"
+REPEATS="${REPEATS:-4}"
+DENSITY="${DENSITY:-1.0}"
 ONLY="${ONLY:-both}"
 
-SWEEP_CONFIG="${SWEEP_CONFIG:-4:4:1 8:8:1 16:16:1 32:32:1 64:32:2 128:32:4 256:32:8}"
+SWEEP_CONFIG="${SWEEP_CONFIG:-4:1:4 8:1:8 16:2:8 32:4:8 64:8:8 128:16:8 256:32:8}"
 HOSTFILE="${HOSTFILE:-${COBALT_NODEFILE:-}}"
 
 case "$ONLY" in
@@ -74,6 +94,31 @@ case "$ONLY" in
     both)   RUN_DSTM=1; RUN_REPAST=1 ;;
     *) echo "bad ONLY value: $ONLY (want dstm|repast|both)" >&2; exit 1 ;;
 esac
+
+if (( RUN_DSTM )); then
+    if [[ ! -w "$DSTM_HEADER" ]]; then
+        echo "!! DSTM header not writable: $DSTM_HEADER" >&2
+        exit 1
+    fi
+fi
+
+# Snapshot the current MAX_CELL_SIDE line so we can restore it on exit.
+ORIG_MCS_LINE=""
+if (( RUN_DSTM )); then
+    ORIG_MCS_LINE="$(grep -E '^[[:space:]]*#define[[:space:]]+MAX_CELL_SIDE[[:space:]]+' "$DSTM_HEADER" | head -n1)"
+    if [[ -z "$ORIG_MCS_LINE" ]]; then
+        echo "!! could not find '#define MAX_CELL_SIDE ...' in $DSTM_HEADER" >&2
+        exit 1
+    fi
+fi
+
+restore_header() {
+    if [[ -n "$ORIG_MCS_LINE" ]]; then
+        sed -i -E "s|^[[:space:]]*#define[[:space:]]+MAX_CELL_SIDE[[:space:]]+[0-9]+.*|${ORIG_MCS_LINE}|" "$DSTM_HEADER"
+        echo "[cleanup] restored MAX_CELL_SIDE line in $DSTM_HEADER"
+    fi
+}
+trap restore_header EXIT
 
 if [[ -z "$HOSTFILE" ]]; then
     echo "!! HOSTFILE not set and \$COBALT_NODEFILE empty" >&2
@@ -165,6 +210,44 @@ compute_geometry() {
 }
 
 # --------------------------------------------------------------------------
+# Compute the smallest cell_side such that cell_side^2 >= nl.
+# Mirrors zombie_init's ceil-sqrt logic exactly.
+# --------------------------------------------------------------------------
+cell_side_for_nl() {
+    local nl=$1
+    local s=1
+    while (( s * s < nl )); do s=$(( s + 1 )); done
+    echo "$s"
+}
+
+# --------------------------------------------------------------------------
+# Rewrite MAX_CELL_SIDE in the DSTM header, then rebuild.
+# --------------------------------------------------------------------------
+set_max_cell_side_and_build() {
+    local new_val=$1
+    local header=$DSTM_HEADER
+
+    local cur_val
+    cur_val="$(grep -E '^[[:space:]]*#define[[:space:]]+MAX_CELL_SIDE[[:space:]]+' "$header" \
+               | head -n1 | awk '{print $3}')"
+
+    if [[ "$cur_val" == "$new_val" && -x "$DSTM_EXE" ]]; then
+        echo "[build] MAX_CELL_SIDE already $new_val and executable present; skipping rebuild"
+        return 0
+    fi
+
+    echo "[build] setting MAX_CELL_SIDE=$new_val in $header (was $cur_val)"
+    sed -i -E "s|^([[:space:]]*#define[[:space:]]+MAX_CELL_SIDE[[:space:]]+)[0-9]+.*|\1${new_val} /* auto-set by strong_scale.sh */|" \
+        "$header"
+
+    echo "[build] make -C $DSTM_BUILD_DIR"
+    if ! ( cd "$DSTM_BUILD_DIR" && make ) >"${OUT_ROOT}/build_mcs${new_val}.log" 2>&1; then
+        echo "!! build failed (MAX_CELL_SIDE=$new_val); see ${OUT_ROOT}/build_mcs${new_val}.log" >&2
+        exit 1
+    fi
+}
+
+# --------------------------------------------------------------------------
 # mpirun invocation prefix for (ranks, ppn).
 # --------------------------------------------------------------------------
 mpirun_cmd() {
@@ -205,6 +288,9 @@ total_calls,calls_per_rank_per_tick,bytes_per_rank_per_tick" > "$MPI_SUMMARY_CSV
 echo "strong-scaling sweep"
 echo "  N (total agents) = $N"
 echo "  TIME             = $TIME"
+echo "  REPEATS          = $REPEATS"
+echo "  DENSITY          = $DENSITY"
+echo "  NZ (per rank)    = $NZ"
 echo "  SWEEP_CONFIG     = $SWEEP_CONFIG"
 echo "  hostfile         = $HOSTFILE"
 echo "  results          -> $OUT_ROOT"
@@ -414,6 +500,11 @@ for entry in $SWEEP_CONFIG; do
 
     apr=$(( nh + nz ))
     read -r nl_auto rmin rmax < <(compute_geometry "$ranks" "$apr" "$DENSITY")
+
+    if (( RUN_DSTM )); then
+        needed_cs=$(cell_side_for_nl "$nl_auto")
+        set_max_cell_side_and_build "$needed_cs"
+    fi
 
     for (( rep=1; rep<=REPEATS; rep++ )); do
         echo "===== ranks=$ranks ppn=$ppn nodes=$nodes N=$N nh=$nh nz=$nz time=$TIME density=$DENSITY nl=$nl_auto repast=[${rmin},${rmax}]^2 rep=$rep ====="
