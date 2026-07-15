@@ -10,9 +10,9 @@ Two panels:
           DSTM and Repast side by side. Linear y-axis so the size
           difference between the two stacks is visually literal.
 
-Repast's recv counts are 0 in the wrapper output because Boost.MPI's
-internal receive path bypasses the standard MPI_Irecv/MPI_Recv symbols.
-The Repast stack should be read as a LOWER BOUND on true MPI activity.
+The old single "Progress" category is now split into Wait / Waitall / Test
+so we can see which progress mechanism dominates. Any of those three that
+is zero across every row is dropped from the stack and the legend.
 
 Usage:
     python plot_mpi.py <mpi_summary.csv> [--outdir DIR]
@@ -28,12 +28,19 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 
 
+# Category -> (label, color, source columns to sum).
+# Ordering here determines stack order (bottom -> top).
 CATEGORY_STYLE = {
-    "p2p_send":    {"label": "P2P send",     "color": "#1f77b4"},
-    "p2p_recv":    {"label": "P2P recv",     "color": "#6baed6"},
-    "barrier":     {"label": "Barrier",      "color": "#ff7f0e"},
-    "collective":  {"label": "Collectives",  "color": "#2ca02c"},
-    "progress":    {"label": "Progress",     "color": "#7f7f7f"},
+    "p2p_send":   {"label": "P2P send",    "color": "#1f77b4", "cols": ["isend", "send"]},
+    "p2p_recv":   {"label": "P2P recv",    "color": "#6baed6", "cols": ["irecv", "recv"]},
+    "barrier":    {"label": "Barrier",     "color": "#ff7f0e", "cols": ["barrier"]},
+    "collective": {"label": "Collectives", "color": "#2ca02c",
+                   "cols": ["reduce", "allreduce", "bcast",
+                            "gather", "allgather", "alltoall"]},
+    # Progress split into its three components.
+    "wait":       {"label": "Wait",        "color": "#9e9e9e", "cols": ["wait"]},
+    "waitall":    {"label": "Waitall",     "color": "#616161", "cols": ["waitall"]},
+    "test":       {"label": "Test",        "color": "#bdbdbd", "cols": ["test"]},
 }
 
 FW_STYLE = {
@@ -62,22 +69,27 @@ def per_rank_per_tick(row, cols):
     denom = row["n_ranks_seen"] * row["time"]
     if denom <= 0:
         return 0.0
-    return sum(row[c] for c in cols) / denom
+    return sum(row[c] for c in cols)/ denom
 
 
 def compute_categories(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
-    df["p2p_send"]   = df.apply(lambda r: per_rank_per_tick(r, ["isend", "send"]),           axis=1)
-    df["p2p_recv"]   = df.apply(lambda r: per_rank_per_tick(r, ["irecv", "recv"]),           axis=1)
-    df["barrier"]    = df.apply(lambda r: per_rank_per_tick(r, ["barrier"]),                 axis=1)
-    df["collective"] = df.apply(lambda r: per_rank_per_tick(r, ["reduce", "allreduce",
-                                                                "bcast", "gather",
-                                                                "allgather", "alltoall"]),   axis=1)
-    df["progress"]   = df.apply(lambda r: per_rank_per_tick(r, ["wait", "waitall", "test"]), axis=1)
+    for cat, style in CATEGORY_STYLE.items():
+        cols = style["cols"]
+        df[cat] = df.apply(lambda r, cs=cols: per_rank_per_tick(r, cs), axis=1)
 
     cats = list(CATEGORY_STYLE.keys())
     g = df.groupby(["framework", "ranks"])[cats].mean().reset_index()
     return g
+
+
+def active_categories(cat_df: pd.DataFrame) -> list:
+    """Return the subset of CATEGORY_STYLE keys whose values are >0 anywhere."""
+    active = []
+    for cat in CATEGORY_STYLE.keys():
+        if cat in cat_df.columns and (cat_df[cat].fillna(0.0) > 0).any():
+            active.append(cat)
+    return active
 
 
 def agg(df: pd.DataFrame, ycol: str) -> pd.DataFrame:
@@ -113,7 +125,7 @@ def draw_totals(ax, df, ranks_vals):
     ax.legend(loc="upper left", frameon=True)
 
 
-def draw_stacked(ax, cat_df, ranks_vals):
+def draw_stacked(ax, cat_df, ranks_vals, active_cats):
     """Right panel: grouped stacked bars per rank count, LINEAR y-axis."""
     n_ranks = len(ranks_vals)
     x = np.arange(n_ranks, dtype=float)
@@ -126,12 +138,11 @@ def draw_stacked(ax, cat_df, ranks_vals):
         sub = cat_df[cat_df["framework"] == fw].set_index("ranks").reindex(ranks_vals)
         bottom = np.zeros(n_ranks)
 
-        for cat, style in CATEGORY_STYLE.items():
+        for cat in active_cats:
+            style = CATEGORY_STYLE[cat]
             vals = sub[cat].fillna(0.0).to_numpy()
-            hatch = "////" if (fw == "repast" and cat == "p2p_recv") else None
             ax.bar(x + offset, vals, width=width, bottom=bottom,
-                   color=style["color"], edgecolor="black", linewidth=0.4,
-                   hatch=hatch)
+                   color=style["color"], edgecolor="black", linewidth=0.4)
             bottom += vals
 
         stack_totals.extend(bottom.tolist())
@@ -155,12 +166,10 @@ def draw_stacked(ax, cat_df, ranks_vals):
 
     ax.grid(True, axis="y", ls="--", alpha=0.35)
 
-    handles = [mpatches.Patch(facecolor=s["color"], edgecolor="black",
-                              label=s["label"])
-               for s in CATEGORY_STYLE.values()]
-    handles.append(mpatches.Patch(facecolor="#6baed6", edgecolor="black",
-                                  hatch="////",
-                                  label="Repast recv (undercounted*)"))
+    handles = [mpatches.Patch(facecolor=CATEGORY_STYLE[c]["color"],
+                              edgecolor="black",
+                              label=CATEGORY_STYLE[c]["label"])
+               for c in active_cats]
     ax.legend(handles=handles, loc="upper left", fontsize=8,
               frameon=True, ncol=2)
 
@@ -188,6 +197,15 @@ def main():
     ranks_vals = sorted(int(r) for r in df["ranks"].dropna().unique())
     cat_df = compute_categories(df)
 
+    # Determine which categories actually have any activity in this dataset.
+    # Anything all-zero (e.g. wait/waitall in a test-only build) is dropped
+    # from both the stack and the legend.
+    active_cats = active_categories(cat_df)
+    dropped = [CATEGORY_STYLE[c]["label"]
+               for c in CATEGORY_STYLE if c not in active_cats]
+    if dropped:
+        print(f"note: dropping unused categories from stack: {', '.join(dropped)}")
+
     fixed = []
     for col, fmt in (("nh", "nh={}"), ("nz", "nz={}"),
                      ("time", "T={}"), ("density", "d={}")):
@@ -203,7 +221,7 @@ def main():
                              gridspec_kw={"width_ratios": [1.0, 1.35]})
 
     draw_totals(axes[0], df, ranks_vals)
-    draw_stacked(axes[1], cat_df, ranks_vals)
+    draw_stacked(axes[1], cat_df, ranks_vals, active_cats)
 
     fig.subplots_adjust(left=0.06, right=0.98, top=0.86, bottom=0.14, wspace=0.28)
 
@@ -215,7 +233,7 @@ def main():
     # Companion numeric table.
     print()
     header = f"{'ranks':>6}  {'fw':>7}  " + \
-             "  ".join(f"{c:>10}" for c in CATEGORY_STYLE) + \
+             "  ".join(f"{CATEGORY_STYLE[c]['label']:>11}" for c in active_cats) + \
              f"  {'total':>10}  {'elapsed_s':>10}"
     print(header)
     for r in ranks_vals:
@@ -225,9 +243,9 @@ def main():
                 continue
             row = row.iloc[0]
             elapsed = df[(df["framework"] == fw) & (df["ranks"] == r)]["elapsed_s"].mean()
-            total = sum(row[c] for c in CATEGORY_STYLE)
+            total = sum(row[c] for c in active_cats)
             print(f"{r:>6}  {fw:>7}  " +
-                  "  ".join(f"{row[c]:>10.3f}" for c in CATEGORY_STYLE) +
+                  "  ".join(f"{row[c]:>11.3f}" for c in active_cats) +
                   f"  {total:>10.3f}  {elapsed:>10.4f}")
 
 
