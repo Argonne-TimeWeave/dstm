@@ -184,8 +184,8 @@ def plot(agg, out_prefix, metric, title_suffix=""):
     for k in range(n, rows * cols):
         axes[k // cols][k % cols].axis("off")
 
-    fig.suptitle(f"DSTM vs ROSS throughput — planes crossover{title_suffix}",
-                 fontsize=14, y=1.00)
+    #fig.suptitle(f"DSTM vs ROSS throughput — planes crossover{title_suffix}",
+    #             fontsize=14, y=1.00)
     fig.tight_layout()
 
     out = f"{out_prefix}_crossover.png"
@@ -222,7 +222,7 @@ def plot(agg, out_prefix, metric, title_suffix=""):
     ax2.set_yscale("log")
     ax2.set_xlabel("planes per airport")
     ax2.set_ylabel("DSTM throughput  /  ROSS(opt) throughput")
-    ax2.set_title(f"DSTM speedup over ROSS vs plane density{title_suffix}")
+    #ax2.set_title(f"DSTM speedup over ROSS vs plane density{title_suffix}")
     ax2.grid(True, which="both", alpha=0.3)
     ax2.legend(title="ranks", fontsize=9)
     fig2.tight_layout()

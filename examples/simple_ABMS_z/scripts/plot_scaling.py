@@ -198,7 +198,7 @@ def plot_pair(strong_df: pd.DataFrame, weak_df: pd.DataFrame,
         log_y=log_y,
     )
 
-    fig.suptitle(sup_title, fontsize=13)
+    #fig.suptitle(sup_title, fontsize=13)
     fig.tight_layout(rect=[0, 0, 1, 0.96])
     fig.savefig(out_path, dpi=150)
     plt.close(fig)
