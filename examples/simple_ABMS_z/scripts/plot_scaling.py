@@ -12,7 +12,7 @@ Usage:
     python plot_scaling.py \
         --strong results/strong_20260715/summary.csv \
         --weak   results/20260710_190100/summary.csv \
-        [--outdir DIR] [--linear-y]
+        [--outdir DIR] [--linear-y] [--font-scale 1.0]
 
 Expected CSV columns (produced by compare.sh / strong_scale.sh):
     framework,ranks,ppn,nodes,nh,nz,time,density,nl,seed,repeat,
@@ -35,6 +35,38 @@ STYLE = {
     "dstm":   {"label": "DSTM",        "color": "#1f77b4", "marker": "o"},
     "repast": {"label": "Repast HPC",  "color": "#d62728", "marker": "s"},
 }
+
+
+# Base font sizes tuned for a double-column paper column width (~3.5 in wide
+# per column). Every text element scales from BASE_FONT via --font-scale.
+BASE_FONT = 18
+
+
+def configure_fonts(scale: float = 1.0):
+    """Set global matplotlib rcParams so all text renders large enough
+    to be readable when the figure is shrunk into a double-column layout."""
+    s = BASE_FONT * scale
+    plt.rcParams.update({
+        "font.size":         s,
+        "axes.titlesize":    s * 1.05,
+        "axes.labelsize":    s * 1.05,
+        "xtick.labelsize":   s * 0.95,
+        "ytick.labelsize":   s * 0.95,
+        "legend.fontsize":   s * 0.90,
+        "legend.title_fontsize": s * 0.95,
+        "figure.titlesize":  s * 1.15,
+        # Thicker lines + bigger ticks/markers so they read at the scaled
+        # font sizes; matplotlib defaults look wispy next to large text.
+        "lines.linewidth":   2.4,
+        "lines.markersize":  9,
+        "axes.linewidth":    1.2,
+        "xtick.major.width": 1.2,
+        "ytick.major.width": 1.2,
+        "xtick.major.size":  6,
+        "ytick.major.size":  6,
+        "xtick.minor.width": 0.9,
+        "ytick.minor.width": 0.9,
+    })
 
 
 def load_csv(path: Path, tag: str) -> pd.DataFrame:
@@ -91,9 +123,11 @@ def draw_on_axis(ax: plt.Axes, df: pd.DataFrame, ycol: str,
             label=style["label"],
             color=style["color"],
             marker=style["marker"],
-            markersize=7,
-            linewidth=1.8,
-            capsize=3,
+            markersize=plt.rcParams["lines.markersize"],
+            linewidth=plt.rcParams["lines.linewidth"],
+            capsize=5,
+            capthick=1.5,
+            elinewidth=1.4,
         )
 
     # Frameworks in the CSV that we don't have styling for.
@@ -104,7 +138,10 @@ def draw_on_axis(ax: plt.Axes, df: pd.DataFrame, ycol: str,
             sub["ranks"], sub["mean"],
             yerr=[sub["err_lo"], sub["err_hi"]],
             label=str(framework),
-            marker="x", markersize=7, linewidth=1.8, capsize=3,
+            marker="x",
+            markersize=plt.rcParams["lines.markersize"],
+            linewidth=plt.rcParams["lines.linewidth"],
+            capsize=5, capthick=1.5, elinewidth=1.4,
         )
 
     ax.set_xscale("log", base=2)
@@ -178,8 +215,10 @@ def summarise_params(df: pd.DataFrame, mode: str) -> str:
 def plot_pair(strong_df: pd.DataFrame, weak_df: pd.DataFrame,
               ycol: str, ylabel: str, sup_title: str,
               out_path: Path, log_y: bool):
+    # Larger canvas so the enlarged text has room to breathe without
+    # overlapping. Preserves the ~2.55:1 aspect ratio of the original.
     fig, (ax_strong, ax_weak) = plt.subplots(
-        1, 2, figsize=(14, 5.5), sharey=False
+        1, 2, figsize=(18, 7.5), sharey=False
     )
 
     strong_params = summarise_params(strong_df, mode="strong")
@@ -188,19 +227,19 @@ def plot_pair(strong_df: pd.DataFrame, weak_df: pd.DataFrame,
     draw_on_axis(
         ax_strong, strong_df, ycol,
         ylabel=ylabel,
-        subplot_title=f"Strong scaling\n{strong_params}",
+        subplot_title=f"Strong scaling",
         log_y=log_y,
     )
     draw_on_axis(
         ax_weak, weak_df, ycol,
         ylabel=ylabel,
-        subplot_title=f"Weak scaling\n{weak_params}",
+        subplot_title=f"Weak scaling",
         log_y=log_y,
     )
 
-    #fig.suptitle(sup_title, fontsize=13)
-    fig.tight_layout(rect=[0, 0, 1, 0.96])
-    fig.savefig(out_path, dpi=150)
+    # fig.suptitle(sup_title, fontsize=plt.rcParams["figure.titlesize"])
+    fig.tight_layout(rect=[0, 0, 1, 0.97], pad=1.5, w_pad=3.0)
+    fig.savefig(out_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
     print(f"wrote {out_path}")
 
@@ -215,6 +254,9 @@ def main():
                     help="output directory (default: parent of --strong)")
     ap.add_argument("--linear-y", action="store_true",
                     help="use a linear y-axis instead of log")
+    ap.add_argument("--font-scale", type=float, default=1.0,
+                    help=f"multiplier on base font size ({BASE_FONT}pt); "
+                         "use e.g. 1.2 to go even bigger, 0.8 for smaller")
     args = ap.parse_args()
 
     for label, path in (("strong", args.strong), ("weak", args.weak)):
@@ -223,6 +265,9 @@ def main():
 
     outdir = args.outdir or args.strong.parent
     outdir.mkdir(parents=True, exist_ok=True)
+
+    # Apply the global font scaling BEFORE any figures are created.
+    configure_fonts(args.font_scale)
 
     strong_df = load_csv(args.strong, tag="strong")
     weak_df   = load_csv(args.weak,   tag="weak")

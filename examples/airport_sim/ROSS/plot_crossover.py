@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Plot DSTM vs ROSS throughput crossover from a scale_crossover.sh output.
+Plot DSTM vs ROSS throughput from a scale_crossover.sh output.
 
 Accepts EITHER:
   * the raw CSV (weak per-run rows, includes trials + warmup), OR
@@ -13,11 +13,10 @@ Y axis: plane-hops per second (log). One line per engine.
 When using raw CSV, error bars show trial min/max; with the summary CSV,
 error bars are omitted (only the median is available).
 
-Background shading marks planes-per-airport regions where DSTM > ROSS(opt).
-
 Usage:
     python3 plot_crossover.py <csv_or_summary_csv> [--output prefix]
                               [--metric hops_per_sec|hops_per_sec_per_rank]
+                              [--font-scale 1.0]
 """
 
 import argparse
@@ -30,8 +29,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 ENGINE_STYLE = {
-    ("dstm", "bsp"):  dict(label="DSTM (BSP)",         color="#1f77b4", marker="o"),
-    ("ross", "opt"):  dict(label="ROSS (optimistic)",  color="#d62728", marker="s"),
+    ("dstm", "bsp"):  dict(label="DSTM (BSP)",          color="#1f77b4", marker="o"),
+    ("ross", "opt"):  dict(label="ROSS (optimistic)",   color="#d62728", marker="s"),
     ("ross", "cons"): dict(label="ROSS (conservative)", color="#ff9f2b", marker="^"),
 }
 
@@ -41,9 +40,43 @@ METRIC_LABEL = {
     "hops_per_sec_per_rank": "plane-hops / second / rank",
 }
 
+
+# Base font size tuned for a double-column paper column width.
+# Every text element scales from BASE_FONT via --font-scale.
+BASE_FONT = 18
+
+
+def configure_fonts(scale: float = 1.0):
+    """Set global matplotlib rcParams so all text renders large enough
+    to be readable when the figure is shrunk into a double-column layout."""
+    s = BASE_FONT * scale
+    plt.rcParams.update({
+        "font.size":         s,
+        "axes.titlesize":    s * 1.05,
+        "axes.labelsize":    s * 1.05,
+        "xtick.labelsize":   s * 0.95,
+        "ytick.labelsize":   s * 0.95,
+        "legend.fontsize":   s * 0.85,
+        "legend.title_fontsize": s * 0.95,
+        "figure.titlesize":  s * 1.15,
+        # Thicker lines + bigger ticks/markers so they read at the scaled
+        # font sizes; matplotlib defaults look wispy next to large text.
+        "lines.linewidth":   2.4,
+        "lines.markersize":  10,
+        "axes.linewidth":    1.2,
+        "xtick.major.width": 1.2,
+        "ytick.major.width": 1.2,
+        "xtick.major.size":  6,
+        "ytick.major.size":  6,
+        "xtick.minor.width": 0.9,
+        "ytick.minor.width": 0.9,
+    })
+
+
 def is_summary_csv(df):
     """A summary CSV has median_* columns and no per-trial `trial` column."""
     return "median_hops_per_sec" in df.columns
+
 
 def load(csv_path, metric):
     """
@@ -95,23 +128,6 @@ def load(csv_path, metric):
              .reset_index())
     return agg
 
-def find_crossover(pivot_dstm, pivot_ross):
-    """Return the planes value where dstm first overtakes ross, or None.
-    Uses log-linear interpolation on planes-axis."""
-    common = sorted(set(pivot_dstm.index) & set(pivot_ross.index))
-    if not common:
-        return None
-    prev_diff = None
-    prev_x    = None
-    for x in common:
-        diff = pivot_dstm[x] - pivot_ross[x]
-        if prev_diff is not None and (prev_diff < 0) and (diff >= 0):
-            lx1, lx2 = math.log(prev_x), math.log(x)
-            frac = -prev_diff / (diff - prev_diff)
-            return math.exp(lx1 + frac * (lx2 - lx1))
-        prev_diff = diff
-        prev_x    = x
-    return None
 
 def plot(agg, out_prefix, metric, title_suffix=""):
     y_label = METRIC_LABEL.get(metric, metric)
@@ -124,20 +140,19 @@ def plot(agg, out_prefix, metric, title_suffix=""):
     cols = min(n, 2)
     rows = math.ceil(n / cols)
 
+    # Larger canvas per subplot so the enlarged text has room to breathe.
     fig, axes = plt.subplots(rows, cols,
-                             figsize=(5.2 * cols, 4.0 * rows),
+                             figsize=(7.5 * cols, 6.0 * rows),
                              squeeze=False, sharex=True)
 
     for i, p in enumerate(ranks_list):
         ax = axes[i // cols][i % cols]
         sub = agg[agg["ranks"] == p]
 
-        pivots = {}
         for eng in engines:
             e_sub = sub[sub["engine"] == eng].sort_values("planes")
             if e_sub.empty:
                 continue
-            pivots[eng] = e_sub.set_index("planes")["median"]
 
             style = ENGINE_STYLE.get(eng, dict(label=f"{eng[0]}/{eng[1]}",
                                                color="gray", marker="x"))
@@ -146,32 +161,11 @@ def plot(agg, out_prefix, metric, title_suffix=""):
             # If summary CSV was used, lo==hi==median, so yerr is all zeros
             # and errorbar() just draws the line/markers.
             ax.errorbar(e_sub["planes"], e_sub["median"],
-                        yerr=yerr, capsize=3, linewidth=1.8,
-                        markersize=6, **style)
-
-        # Crossover annotation (DSTM vs ROSS-opt).
-        dstm_key = ("dstm", "bsp")
-        ross_key = ("ross", "opt")
-        if dstm_key in pivots and ross_key in pivots:
-            xc = find_crossover(pivots[dstm_key], pivots[ross_key])
-            if xc is not None:
-                ax.axvline(xc, color="black", linestyle=":", linewidth=1.2,
-                           alpha=0.6)
-                ax.text(xc, 0.05,
-                        f" crossover\n planes≈{xc:.1f}",
-                        va="bottom", ha="left",
-                        fontsize=8, color="black",
-                        transform=ax.get_xaxis_transform())
-
-            # Shade regions where DSTM beats ROSS(opt).
-            xs   = sorted(set(pivots[dstm_key].index) & set(pivots[ross_key].index))
-            dstm = pivots[dstm_key].reindex(xs).values
-            ross = pivots[ross_key].reindex(xs).values
-            wins = dstm > ross
-            for j in range(len(xs) - 1):
-                if wins[j] and wins[j + 1]:
-                    ax.axvspan(xs[j], xs[j + 1], alpha=0.08, color="#1f77b4",
-                               zorder=0)
+                        yerr=yerr,
+                        capsize=5, capthick=1.5, elinewidth=1.4,
+                        linewidth=plt.rcParams["lines.linewidth"],
+                        markersize=plt.rcParams["lines.markersize"],
+                        **style)
 
         ax.set_xscale("log", base=2)
         ax.set_yscale("log")
@@ -179,21 +173,19 @@ def plot(agg, out_prefix, metric, title_suffix=""):
         ax.set_xlabel("planes per airport")
         ax.set_ylabel(y_label)
         ax.grid(True, which="both", alpha=0.3)
-        ax.legend(loc="best", fontsize=8)
+        ax.legend(loc="best")
 
     for k in range(n, rows * cols):
         axes[k // cols][k % cols].axis("off")
 
-    #fig.suptitle(f"DSTM vs ROSS throughput — planes crossover{title_suffix}",
-    #             fontsize=14, y=1.00)
-    fig.tight_layout()
+    fig.tight_layout(pad=1.5, w_pad=3.0, h_pad=2.0)
 
     out = f"{out_prefix}_crossover.png"
     fig.savefig(out, dpi=150, bbox_inches="tight")
     print(f"wrote {out}")
 
     # ---------- Speedup companion figure ----------
-    fig2, ax2 = plt.subplots(figsize=(7, 5))
+    fig2, ax2 = plt.subplots(figsize=(10, 7))
     dstm_key = ("dstm", "bsp")
     ross_key = ("ross", "opt")
     cmap = plt.cm.viridis
@@ -214,22 +206,24 @@ def plot(agg, out_prefix, metric, title_suffix=""):
             continue
         merged["speedup"] = merged["median_d"] / merged["median_r"]
         ax2.plot(merged["planes"], merged["speedup"],
-                 marker="o", linewidth=1.8,
+                 marker="o",
+                 linewidth=plt.rcParams["lines.linewidth"],
+                 markersize=plt.rcParams["lines.markersize"],
                  color=cmap(ranks_norm(math.log2(p))),
                  label=f"P={p}")
-    ax2.axhline(1.0, color="black", linestyle="--", linewidth=1, alpha=0.6)
+    ax2.axhline(1.0, color="black", linestyle="--", linewidth=1.4, alpha=0.6)
     ax2.set_xscale("log", base=2)
     ax2.set_yscale("log")
     ax2.set_xlabel("planes per airport")
     ax2.set_ylabel("DSTM throughput  /  ROSS(opt) throughput")
-    #ax2.set_title(f"DSTM speedup over ROSS vs plane density{title_suffix}")
     ax2.grid(True, which="both", alpha=0.3)
-    ax2.legend(title="ranks", fontsize=9)
+    ax2.legend(title="ranks")
     fig2.tight_layout()
 
     out2 = f"{out_prefix}_speedup.png"
     fig2.savefig(out2, dpi=150, bbox_inches="tight")
     print(f"wrote {out2}")
+
 
 def main():
     ap = argparse.ArgumentParser()
@@ -240,7 +234,13 @@ def main():
     ap.add_argument("--metric", default="hops_per_sec",
                     choices=["hops_per_sec", "hops_per_sec_per_rank"],
                     help="which throughput metric to plot (default: hops_per_sec)")
+    ap.add_argument("--font-scale", type=float, default=1.0,
+                    help=f"multiplier on base font size ({BASE_FONT}pt); "
+                         "use e.g. 1.2 to go even bigger, 0.8 for smaller")
     args = ap.parse_args()
+
+    # Apply font scaling BEFORE any figures are created.
+    configure_fonts(args.font_scale)
 
     agg = load(args.csv, args.metric)
     if agg.empty:
@@ -259,6 +259,7 @@ def main():
 
     plot(agg, prefix, args.metric,
          title_suffix=f" ({METRIC_LABEL[args.metric]})")
+
 
 if __name__ == "__main__":
     main()
