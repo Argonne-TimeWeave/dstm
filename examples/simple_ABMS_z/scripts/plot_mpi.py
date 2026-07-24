@@ -15,7 +15,7 @@ so we can see which progress mechanism dominates. Any of those three that
 is zero across every row is dropped from the stack and the legend.
 
 Usage:
-    python plot_mpi.py <mpi_summary.csv> [--outdir DIR]
+    python plot_mpi.py <mpi_summary.csv> [--outdir DIR] [--font-scale 1.0]
 """
 
 import argparse
@@ -49,6 +49,38 @@ FW_STYLE = {
 }
 
 
+# Base font sizes tuned for a double-column paper column width.
+# Every text element scales from BASE_FONT via --font-scale.
+BASE_FONT = 18
+
+
+def configure_fonts(scale: float = 1.0):
+    """Set global matplotlib rcParams so all text renders large enough
+    to be readable when the figure is shrunk into a double-column layout."""
+    s = BASE_FONT * scale
+    plt.rcParams.update({
+        "font.size":         s,
+        "axes.titlesize":    s * 1.05,
+        "axes.labelsize":    s * 1.05,
+        "xtick.labelsize":   s * 0.95,
+        "ytick.labelsize":   s * 0.95,
+        "legend.fontsize":   s * 0.85,
+        "legend.title_fontsize": s * 0.95,
+        "figure.titlesize":  s * 1.15,
+        # Thicker lines + bigger ticks/markers so they read at the scaled
+        # font sizes; matplotlib defaults look wispy next to large text.
+        "lines.linewidth":   2.4,
+        "lines.markersize":  10,
+        "axes.linewidth":    1.2,
+        "xtick.major.width": 1.2,
+        "ytick.major.width": 1.2,
+        "xtick.major.size":  6,
+        "ytick.major.size":  6,
+        "xtick.minor.width": 0.9,
+        "ytick.minor.width": 0.9,
+    })
+
+
 def load(path: Path) -> pd.DataFrame:
     df = pd.read_csv(path)
     numeric = ("ranks", "ppn", "nodes", "nh", "nz", "time", "elapsed_s",
@@ -69,7 +101,7 @@ def per_rank_per_tick(row, cols):
     denom = row["n_ranks_seen"] * row["time"]
     if denom <= 0:
         return 0.0
-    return sum(row[c] for c in cols)/ denom
+    return sum(row[c] for c in cols) / denom
 
 
 def compute_categories(df: pd.DataFrame) -> pd.DataFrame:
@@ -110,8 +142,10 @@ def draw_totals(ax, df, ranks_vals):
         ax.errorbar(sub["ranks"], sub["mean"],
                     yerr=[sub["err_lo"], sub["err_hi"]],
                     label=style["label"], color=style["color"],
-                    marker=style["marker"], markersize=8, linewidth=1.8,
-                    capsize=3)
+                    marker=style["marker"],
+                    markersize=plt.rcParams["lines.markersize"],
+                    linewidth=plt.rcParams["lines.linewidth"],
+                    capsize=5, capthick=1.5, elinewidth=1.4)
 
     ax.set_xscale("log", base=2)
     ax.set_yscale("log")
@@ -119,10 +153,9 @@ def draw_totals(ax, df, ranks_vals):
     ax.set_xticklabels([str(int(r)) for r in ranks_vals])
     ax.set_xlabel("MPI ranks (log$_2$ scale)")
     ax.set_ylabel("MPI calls per rank per tick (log scale)")
-    ax.set_title("Total MPI calls per rank per tick\n"
-                 f"scaling from {int(min(ranks_vals))} to {int(max(ranks_vals))} ranks")
+    ax.set_title("Total MPI calls per rank per tick")
     ax.grid(True, which="both", ls="--", alpha=0.35)
-    ax.legend(loc="upper left", frameon=True)
+    ax.legend(loc="upper right", frameon=True)
 
 
 def draw_stacked(ax, cat_df, ranks_vals, active_cats):
@@ -133,6 +166,9 @@ def draw_stacked(ax, cat_df, ranks_vals, active_cats):
 
     stack_totals = []
 
+    # Font size for D/R tags above stacks — scales with the global base.
+    tag_fontsize = plt.rcParams["font.size"] * 0.75
+
     for fw, offset in [("dstm", -width/2 - 0.02),
                        ("repast", +width/2 + 0.02)]:
         sub = cat_df[cat_df["framework"] == fw].set_index("ranks").reindex(ranks_vals)
@@ -142,7 +178,7 @@ def draw_stacked(ax, cat_df, ranks_vals, active_cats):
             style = CATEGORY_STYLE[cat]
             vals = sub[cat].fillna(0.0).to_numpy()
             ax.bar(x + offset, vals, width=width, bottom=bottom,
-                   color=style["color"], edgecolor="black", linewidth=0.4)
+                   color=style["color"], edgecolor="black", linewidth=0.6)
             bottom += vals
 
         stack_totals.extend(bottom.tolist())
@@ -152,7 +188,7 @@ def draw_stacked(ax, cat_df, ranks_vals, active_cats):
             if total > 0:
                 ax.text(x[xi] + offset, total + max(stack_totals) * 0.015,
                         FW_STYLE[fw]["label"][0],
-                        ha="center", va="bottom", fontsize=8,
+                        ha="center", va="bottom", fontsize=tag_fontsize,
                         color=FW_STYLE[fw]["color"], fontweight="bold")
 
     ax.set_xticks(x)
@@ -161,8 +197,10 @@ def draw_stacked(ax, cat_df, ranks_vals, active_cats):
     ax.set_ylabel("MPI calls per rank per tick")
 
     # Linear y-axis with a bit of headroom above the tallest stack.
+    # Extra headroom (25%) so the taller legend at larger font sizes
+    # doesn't overlap the tallest stack.
     if stack_totals:
-        ax.set_ylim(0, max(stack_totals) * 1.15)
+        ax.set_ylim(0, max(stack_totals) * 1.25)
 
     ax.grid(True, axis="y", ls="--", alpha=0.35)
 
@@ -170,21 +208,26 @@ def draw_stacked(ax, cat_df, ranks_vals, active_cats):
                               edgecolor="black",
                               label=CATEGORY_STYLE[c]["label"])
                for c in active_cats]
-    ax.legend(handles=handles, loc="upper left", fontsize=8,
+    ax.legend(handles=handles, loc="upper right",
               frameon=True, ncol=2)
 
-    ax.set_title("Per-tick MPI call composition by framework\n"
-                 "(stacked by call category; linear scale)")
+    ax.set_title("Per-tick MPI call composition by framework")
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("csv", type=Path)
     ap.add_argument("--outdir", type=Path, default=None)
+    ap.add_argument("--font-scale", type=float, default=1.0,
+                    help=f"multiplier on base font size ({BASE_FONT}pt); "
+                         "use e.g. 1.2 to go even bigger, 0.8 for smaller")
     args = ap.parse_args()
 
     if not args.csv.is_file():
         sys.exit(f"CSV not found: {args.csv}")
+
+    # Apply font scaling BEFORE any figures are created.
+    configure_fonts(args.font_scale)
 
     df = load(args.csv)
     if df.empty:
@@ -217,16 +260,18 @@ def main():
             fixed.append(fmt.format(v))
     param_note = "   ".join(fixed)
 
-    fig, axes = plt.subplots(1, 2, figsize=(16, 6),
+    # Larger canvas so the enlarged text has room without overlapping.
+    # Preserves ~2.4:1 aspect ratio of the original.
+    fig, axes = plt.subplots(1, 2, figsize=(20, 8),
                              gridspec_kw={"width_ratios": [1.0, 1.35]})
 
     draw_totals(axes[0], df, ranks_vals)
     draw_stacked(axes[1], cat_df, ranks_vals, active_cats)
 
-    fig.subplots_adjust(left=0.06, right=0.98, top=0.86, bottom=0.14, wspace=0.28)
+    fig.tight_layout(pad=1.5, w_pad=3.0)
 
     out_path = outdir / f"{base}_mpi_activity.png"
-    fig.savefig(out_path, dpi=150)
+    fig.savefig(out_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
     print(f"wrote {out_path}")
 
