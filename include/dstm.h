@@ -284,7 +284,10 @@ void dstm_distance_destroy(dstm_distance_t **dist);
 
 /* type alias to a timestamp, this is logical time (within the simulation), not
  * real time. */
+#ifndef DSTM_TIME_T_DEFINED
+#define DSTM_TIME_T_DEFINED 1
 typedef int64_t dstm_time_t;
+#endif
 
 /*******************************************************************************
  * DSTM START/FINISH

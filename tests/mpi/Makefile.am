@@ -28,6 +28,7 @@ COMPILED_TESTS = \
 		local_delta \
 		msg \
 		multi_session \
+        dgraph \
 		put_after_get
 
 check_PROGRAMS = $(COMPILED_TESTS)

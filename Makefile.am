@@ -41,6 +41,7 @@ include_HEADERS = include/dstm.h
 include_dstmdir=$(includedir)/dstm
 include_dstm_HEADERS = \
 		      include/dstm/error.h \
+              include/dstm/dgraph.h \
 		      include/dstm/version.h
 
 noinst_include_internaldir = $(includedir)/internal
@@ -69,6 +70,7 @@ libdstm_la_SOURCES = \
 		    src/ops.c \
 		    src/msg.c \
 		    src/region.c \
+            src/dgraph.c \
 		    src/request.c
 
 libdstm_la_LIBADD = $(LTLIBOBJS) $(JANSSON_LIBS)
