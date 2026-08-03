@@ -30,6 +30,7 @@ extern "C" {
 // clang-format off
 #include "dstm/error.h"
 #include "dstm/version.h"
+#include "dstm/dgraph.h"
 // clang-format on
 
 /*******************************************************************************

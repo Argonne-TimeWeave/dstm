@@ -100,9 +100,17 @@ void dstm_perror(const char *msg);
 #define DSTM_ENOTFOUND 8
 
 /**
+ * The resource (e.g. a graph edge) already exists at the observed
+ * version and cannot be created again.  Returned by insertion
+ * operations such as dstm_dgraph_edge_add when the target already
+ * exists at the effective time.
+ **/
+#define DSTM_EEXIST 9
+
+/**
  * Max allowed value for errors.
  **/
-#define DSTM_ERROR_MAX 9
+#define DSTM_ERROR_MAX 10
 
 /**
  * @}
