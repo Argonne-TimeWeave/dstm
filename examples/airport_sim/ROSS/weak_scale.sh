@@ -34,7 +34,7 @@ set -u
 
 # ---------- Config (must match scale_crossover.sh where noted) ----------
 RANKS=(4 16 64 256)
-PLANES=(1 4 16 64 256 1024 4096)
+PLANES=(1 4 16 64 256 1024 4096 16384)
 NODES=8
 
 # WEAK-SCALING KNOB: airports per rank stays constant.
@@ -127,16 +127,16 @@ RANKS_COUNT=${#RANKS[@]}
 
 BASE="weak_apr${AIRPORTS_PER_RANK}_t${TIMESTEPS}_tr${TRIALS}_s${SEED}"
 BASE="${BASE}_r${RANKS_COUNT}pts_pl${PLANES_MIN}-${PLANES_MAX}x${PLANES_COUNT}_fair"
-CSV="$SCRIPT_DIR/${BASE}.csv"
+CSV="$SCRIPT_DIR/results/${BASE}.csv"
 
 if [[ -e "$CSV" ]]; then
     i=2
-    while [[ -e "$SCRIPT_DIR/${BASE}_${i}.csv" ]]; do i=$(( i + 1 )); done
-    CSV="$SCRIPT_DIR/${BASE}_${i}.csv"
+    while [[ -e "$SCRIPT_DIR/results/${BASE}_${i}.csv" ]]; do i=$(( i + 1 )); done
+    CSV="$SCRIPT_DIR/results/${BASE}_${i}.csv"
 fi
 SUMMARY_CSV="${CSV%.csv}.summary.csv"
 
-LOG_DIR="$SCRIPT_DIR/${BASE}_logs"
+LOG_DIR="$SCRIPT_DIR/results/${BASE}_logs"
 mkdir -p "$LOG_DIR"
 
 TOTAL_RUNS=$(( ${#RANKS[@]} * ${#PLANES[@]} * ${#ENGINE_ORDER[@]} * (TRIALS + 1) ))
