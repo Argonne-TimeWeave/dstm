@@ -14,6 +14,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+#include <stdbool.h>
 
 #include "dstm.h"
 #include "dstm/dgraph.h"
@@ -49,10 +50,6 @@
  *   vertex's window, slots are sorted by ascending dst, enabling
  *   binary search in dstm_dgraph_edge_{get,put}. dst is immutable
  *   after construction; only user_state is mutated by edge_put.
- *
- * All three slabs share one region, so vertex and edge state use the
- * same (time, delta) versioning. Row pointers and dst fields are
- * effectively immutable but cost only one snapshot at t=0.
  *
  * Slab base offsets are cached in vertex_state_off / edge_row_ptr_off
  * / edge_slot_off so dstm_ptr_t values can be built by addition.
@@ -107,17 +104,22 @@ struct dstm_dgraph_s {
         intptr_t *rank_edge_slot_off;
         size_t   *rank_edge_slot_stride;
 
-        /* Fully-replicated topology cache: on every rank, the sorted
-         * dst arrays for every rank's local edges. Indexed as
-         * rank_edge_dsts[r][slot] where slot is in [0, rank_local_edge_count[r]).
-         * Topology is immutable, so this is built once at create time
-         * from local data + MPI_Allgatherv, avoiding the need to do
-         * DSTM gets on topology after t=0 ages out. */
+        /* Sparse replicated topology cache: entries are non-NULL only
+         * for ranks in the local neighborhood (self and any rank that
+         * shares an edge with self, in either direction). Non-neighbor
+         * entries are NULL. Indexed by global rank id. */
         dgraph_vid_t **rank_edge_dsts;
-
-        /* Fully-replicated row pointer cache. Indexed as
-         * rank_row_ptrs[r][i] for i in [0, rank_local_vertices[r]]. */
         dgraph_vid_t **rank_row_ptrs;
+
+        /* Neighbor-rank membership. is_neighbor_rank[r] == 1 iff rank r
+         * is self or shares at least one edge with self. Always includes
+         * self. Length world_size. */
+        uint8_t *is_neighbor_rank;
+
+        /* Convenience: sorted list of neighbor ranks (including self)
+         * and its length, for cheap iteration. */
+        int *neighbor_ranks;
+        int  neighbor_rank_count;
 };
 
 /* ---------------------------------------------------------------------------
@@ -208,6 +210,29 @@ size_t dstm_dgraph_local_edge_count(dstm_dgraph_t *g)
         return g ? g->local_edge_count : 0;
 }
 
+int dstm_dgraph_is_neighbor_rank(dstm_dgraph_t *g, int rank)
+{
+        if (g == NULL || rank < 0 || rank >= g->world_size)
+                return -DSTM_EINVAL;
+        return g->is_neighbor_rank[rank] ? 1 : 0;
+}
+
+int dstm_dgraph_neighbor_ranks_get(dstm_dgraph_t *g, int *out_ranks,
+                                   size_t *io_count)
+{
+        if (g == NULL || io_count == NULL) return -DSTM_EINVAL;
+        size_t need = (size_t)g->neighbor_rank_count;
+
+        if (out_ranks == NULL || *io_count < need) {
+                *io_count = need;
+                return -DSTM_ENOMEM;
+        }
+        for (int i = 0; i < g->neighbor_rank_count; i++)
+                out_ranks[i] = g->neighbor_ranks[i];
+        *io_count = need;
+        return DSTM_SUCCESS;
+}
+
 /* ---------------------------------------------------------------------------
  * Creation
  * ------------------------------------------------------------------------- */
@@ -245,6 +270,11 @@ int dstm_dgraph_create(dstm_dgraph_t **ret,
         int self       = dstm_global_context.rank;
         MPI_Comm comm  = dstm_global_context.comm;
 
+        /* Tracks whether the backing region has been successfully
+         * allocated. Every other resource is either NULL (never
+         * allocated) or a heap pointer safe to free unconditionally. */
+        bool region_allocated = false;
+
         dstm_dgraph_t *g = calloc(1, sizeof(*g));
         if (g == NULL) { *ret = NULL; return -DSTM_ENOMEM; }
 
@@ -270,27 +300,27 @@ int dstm_dgraph_create(dstm_dgraph_t **ret,
         g->rank_edge_row_ptr_off  = calloc(world_size, sizeof(intptr_t));
         g->rank_edge_slot_off     = calloc(world_size, sizeof(intptr_t));
         g->rank_edge_slot_stride  = calloc(world_size, sizeof(size_t));
-        g->rank_vertex_offsets     = calloc((size_t)world_size + 1,
-                                            sizeof(size_t));
+        g->rank_vertex_offsets    = calloc((size_t)world_size + 1,
+                                           sizeof(size_t));
 
         if (!g->rank_local_vertices || !g->rank_local_edge_count ||
             !g->rank_vertex_state_off || !g->rank_edge_row_ptr_off ||
             !g->rank_edge_slot_off   || !g->rank_edge_slot_stride  ||
             !g->rank_vertex_offsets) {
                 err = -DSTM_ENOMEM;
-                goto err_free_arrays;
+                goto err_cleanup;
         }
 
         /* --- Exchange vertex counts to build global partitioning ---------- */
         err = MPI_Allgather(&local_vertices, 1, MPI_UNSIGNED_LONG_LONG,
                             g->rank_local_vertices, 1,
                             MPI_UNSIGNED_LONG_LONG, comm);
-        if (err != MPI_SUCCESS) { err = -DSTM_FAILURE; goto err_free_arrays; }
+        if (err != MPI_SUCCESS) { err = -DSTM_FAILURE; goto err_cleanup; }
 
         err = MPI_Allgather(&local_edge_count, 1, MPI_UNSIGNED_LONG_LONG,
                             g->rank_local_edge_count, 1,
                             MPI_UNSIGNED_LONG_LONG, comm);
-        if (err != MPI_SUCCESS) { err = -DSTM_FAILURE; goto err_free_arrays; }
+        if (err != MPI_SUCCESS) { err = -DSTM_FAILURE; goto err_cleanup; }
 
         /* Build prefix sum of vertex counts (length world_size + 1). */
         size_t total_v = 0, total_e = 0;
@@ -313,11 +343,14 @@ int dstm_dgraph_create(dstm_dgraph_t **ret,
                         if (deg > 0) {
                                 if (cursor == NULL) {
                                         err = -DSTM_EINVAL;
-                                        goto err_free_arrays;
+                                        goto err_cleanup;
                                 }
                                 int rc = validate_neighbors(cursor, deg,
                                                             total_v);
-                                if (rc != 0) { err = rc; goto err_free_arrays; }
+                                if (rc != 0) {
+                                        err = rc;
+                                        goto err_cleanup;
+                                }
                         }
                         cursor += deg;
                 }
@@ -340,8 +373,9 @@ int dstm_dgraph_create(dstm_dgraph_t **ret,
                                                              : DGRAPH_ALIGN);
         if (dstm_ptr_isnull(base)) {
                 err = -DSTM_ENOMEM;
-                goto err_free_arrays;
+                goto err_cleanup;
         }
+        region_allocated = true;
 
         g->vertex_state_off = base.offset;
         g->edge_row_ptr_off = base.offset + (intptr_t)vs_padded;
@@ -351,7 +385,7 @@ int dstm_dgraph_create(dstm_dgraph_t **ret,
         g->row_ptrs = calloc(local_vertices + 1, sizeof(dgraph_vid_t));
         if (g->row_ptrs == NULL) {
                 err = -DSTM_ENOMEM;
-                goto err_free_region;
+                goto err_cleanup;
         }
         {
                 dgraph_vid_t acc = 0;
@@ -365,84 +399,255 @@ int dstm_dgraph_create(dstm_dgraph_t **ret,
         /* --- Exchange each rank's slab base offsets --------------------- */
         err = MPI_Allgather(&g->vertex_state_off, 1, MPI_AINT,
                             g->rank_vertex_state_off, 1, MPI_AINT, comm);
-        if (err != MPI_SUCCESS) { err = -DSTM_FAILURE; goto err_free_rowptrs; }
+        if (err != MPI_SUCCESS) { err = -DSTM_FAILURE; goto err_cleanup; }
 
         err = MPI_Allgather(&g->edge_row_ptr_off, 1, MPI_AINT,
                             g->rank_edge_row_ptr_off, 1, MPI_AINT, comm);
-        if (err != MPI_SUCCESS) { err = -DSTM_FAILURE; goto err_free_rowptrs; }
+        if (err != MPI_SUCCESS) { err = -DSTM_FAILURE; goto err_cleanup; }
 
         err = MPI_Allgather(&g->edge_slot_off, 1, MPI_AINT,
                             g->rank_edge_slot_off, 1, MPI_AINT, comm);
-        if (err != MPI_SUCCESS) { err = -DSTM_FAILURE; goto err_free_rowptrs; }
+        if (err != MPI_SUCCESS) { err = -DSTM_FAILURE; goto err_cleanup; }
 
         err = MPI_Allgather(&g->edge_slot_stride, 1, MPI_UNSIGNED_LONG_LONG,
                             g->rank_edge_slot_stride, 1,
                             MPI_UNSIGNED_LONG_LONG, comm);
-        if (err != MPI_SUCCESS) { err = -DSTM_FAILURE; goto err_free_rowptrs; }
+        if (err != MPI_SUCCESS) { err = -DSTM_FAILURE; goto err_cleanup; }
 
-                /* --- Replicate topology on every rank ---------------------------- */
+        /* --- Discover neighbor ranks -------------------------------------
+         *
+         * Phase 1: build local_touched[r] = 1 iff any of self's outgoing
+         * edges lands on a vertex owned by rank r. This uses only local
+         * data (local_edge_dsts + rank_vertex_offsets, already built). */
+        g->is_neighbor_rank = calloc(world_size, sizeof(uint8_t));
+        if (g->is_neighbor_rank == NULL) {
+                err = -DSTM_ENOMEM;
+                goto err_cleanup;
+        }
+
+        {
+                uint8_t *local_touched = calloc(world_size, sizeof(uint8_t));
+                if (local_touched == NULL) {
+                        err = -DSTM_ENOMEM;
+                        goto err_cleanup;
+                }
+                const size_t *cursor = local_edge_dsts;
+                for (size_t i = 0; i < local_vertices; i++) {
+                        size_t deg = local_out_degrees[i];
+                        for (size_t k = 0; k < deg; k++) {
+                                int r = dgraph_find_rank(g, cursor[k]);
+                                local_touched[r] = 1;
+                        }
+                        cursor += deg;
+                }
+                local_touched[self] = 1;   /* self is always a neighbor */
+
+                /* Phase 2: symmetrize with an Allreduce-style
+                 * transpose. We need to know who touches *us*, not
+                 * just who we touch. Cheapest correct way: gather
+                 * every rank's local_touched row, then OR row i with
+                 * column i. Cost is O(world_size^2) bytes at setup
+                 * only -- same cost as derive_distance today, but
+                 * with 1-byte elements. */
+                uint8_t *touch_matrix =
+                        calloc((size_t)world_size * (size_t)world_size,
+                               sizeof(uint8_t));
+                if (touch_matrix == NULL) {
+                        free(local_touched);
+                        err = -DSTM_ENOMEM;
+                        goto err_cleanup;
+                }
+                err = MPI_Allgather(local_touched, world_size, MPI_UINT8_T,
+                                    touch_matrix, world_size, MPI_UINT8_T,
+                                    comm);
+                free(local_touched);
+                if (err != MPI_SUCCESS) {
+                        free(touch_matrix);
+                        err = -DSTM_FAILURE;
+                        goto err_cleanup;
+                }
+
+                /* Neighbor of self = anyone self touches OR anyone
+                 * who touches self. Row `self` of touch_matrix is
+                 * self's outgoing; column `self` is incoming. */
+                for (int r = 0; r < world_size; r++) {
+                        if (touch_matrix[self * world_size + r] ||
+                            touch_matrix[r * world_size + self]) {
+                                g->is_neighbor_rank[r] = 1;
+                        }
+                }
+                g->is_neighbor_rank[self] = 1;
+                free(touch_matrix);
+        }
+
+        /* Build the compact neighbor-ranks list. */
+        {
+                int nc = 0;
+                for (int r = 0; r < world_size; r++)
+                        if (g->is_neighbor_rank[r]) nc++;
+                g->neighbor_rank_count = nc;
+                g->neighbor_ranks = malloc((size_t)nc * sizeof(int));
+                if (g->neighbor_ranks == NULL) {
+                        err = -DSTM_ENOMEM;
+                        goto err_cleanup;
+                }
+                int j = 0;
+                for (int r = 0; r < world_size; r++)
+                        if (g->is_neighbor_rank[r])
+                                g->neighbor_ranks[j++] = r;
+        }
+
+        /* --- Sparse topology replication ---------------------------------
+         *
+         * Allocate the outer arrays as world_size-sized so lookup by
+         * global rank id is direct; leave non-neighbor slots NULL. */
         g->rank_row_ptrs  = calloc(world_size, sizeof(dgraph_vid_t *));
         g->rank_edge_dsts = calloc(world_size, sizeof(dgraph_vid_t *));
         if (!g->rank_row_ptrs || !g->rank_edge_dsts) {
                 err = -DSTM_ENOMEM;
-                goto err_free_topocache;
+                goto err_cleanup;
         }
 
-        /* Row pointers: build displacements and counts for Allgatherv. */
+        /* Always populate self's entries locally from row_ptrs and the
+         * caller-supplied local_edge_dsts, without going through MPI. */
         {
-                int *rp_counts = malloc((size_t)world_size * sizeof(int));
-                int *rp_displs = malloc((size_t)world_size * sizeof(int));
-                if (!rp_counts || !rp_displs) {
-                        free(rp_counts); free(rp_displs);
+                size_t n_rp = local_vertices + 1;
+                g->rank_row_ptrs[self] = malloc(n_rp * sizeof(dgraph_vid_t));
+                if (g->rank_row_ptrs[self] == NULL) {
                         err = -DSTM_ENOMEM;
-                        goto err_free_topocache;
+                        goto err_cleanup;
                 }
-                size_t total_rp = 0;
-                for (int r = 0; r < world_size; r++) {
-                        rp_counts[r] = (int)(g->rank_local_vertices[r] + 1);
-                        rp_displs[r] = (int)total_rp;
-                        total_rp += (size_t)rp_counts[r];
-                }
-                dgraph_vid_t *rp_all = malloc(total_rp * sizeof(dgraph_vid_t));
-                if (rp_all == NULL) {
-                        free(rp_counts); free(rp_displs);
-                        err = -DSTM_ENOMEM;
-                        goto err_free_topocache;
-                }
-                err = MPI_Allgatherv(g->row_ptrs,
-                                     (int)(local_vertices + 1),
-                                     MPI_UINT64_T,
-                                     rp_all, rp_counts, rp_displs,
-                                     MPI_UINT64_T, comm);
-                if (err != MPI_SUCCESS) {
-                        free(rp_counts); free(rp_displs); free(rp_all);
-                        err = -DSTM_FAILURE;
-                        goto err_free_topocache;
-                }
-                for (int r = 0; r < world_size; r++) {
-                        size_t n = g->rank_local_vertices[r] + 1;
-                        g->rank_row_ptrs[r] =
-                                malloc(n * sizeof(dgraph_vid_t));
-                        if (g->rank_row_ptrs[r] == NULL) {
-                                free(rp_counts); free(rp_displs); free(rp_all);
+                memcpy(g->rank_row_ptrs[self], g->row_ptrs,
+                       n_rp * sizeof(dgraph_vid_t));
+
+                if (local_edge_count > 0) {
+                        g->rank_edge_dsts[self] =
+                                malloc(local_edge_count
+                                       * sizeof(dgraph_vid_t));
+                        if (g->rank_edge_dsts[self] == NULL) {
                                 err = -DSTM_ENOMEM;
-                                goto err_free_topocache;
+                                goto err_cleanup;
                         }
-                        memcpy(g->rank_row_ptrs[r],
-                               rp_all + rp_displs[r],
-                               n * sizeof(dgraph_vid_t));
+                        for (size_t s = 0; s < local_edge_count; s++)
+                                g->rank_edge_dsts[self][s] =
+                                        (dgraph_vid_t)local_edge_dsts[s];
                 }
-                free(rp_counts); free(rp_displs); free(rp_all);
         }
+
+        /* --- Neighbor-only topology exchange -----------------------------
+         *
+         * For each rank r != self that is one of our neighbors, we need
+         * a copy of r's row_ptrs and r's edge_dsts. Because "neighbor"
+         * is symmetric (built via OR of touched rows), r also considers
+         * us a neighbor and will be issuing a matching receive. Use
+         * nonblocking point-to-point: one Isend of row_ptrs + one Isend
+         * of edge_dsts to each neighbor, matched by two Irecvs from
+         * each neighbor.
+         *
+         * Tags:
+         *   TAG_ROW_PTRS = 0x100
+         *   TAG_EDGE_DSTS = 0x101
+         */
+        {
+                enum { TAG_ROW_PTRS = 0x100, TAG_EDGE_DSTS = 0x101 };
+
+                int nc = g->neighbor_rank_count;
+                /* Exclude self from the exchange count. */
+                int peer_count = nc - 1;
+
+                MPI_Request *reqs = NULL;
+                int req_n = 0;
+                if (peer_count > 0) {
+                        /* Up to 4 requests per peer: 1 rp send, 1 ed send,
+                         * 1 rp recv, 1 ed recv. */
+                        reqs = malloc((size_t)peer_count * 4
+                                      * sizeof(MPI_Request));
+                        if (reqs == NULL) {
+                                err = -DSTM_ENOMEM;
+                                goto err_cleanup;
+                        }
+                }
+
+                int block_err = 0;
+
+                /* Post Isends of our own topology to each peer. */
+                for (int i = 0; i < nc; i++) {
+                        int r = g->neighbor_ranks[i];
+                        if (r == self) continue;
+
+                        MPI_Isend(g->rank_row_ptrs[self],
+                                  (int)(local_vertices + 1),
+                                  MPI_UINT64_T, r, TAG_ROW_PTRS, comm,
+                                  &reqs[req_n++]);
+
+                        if (local_edge_count > 0) {
+                                MPI_Isend(g->rank_edge_dsts[self],
+                                          (int)local_edge_count,
+                                          MPI_UINT64_T, r, TAG_EDGE_DSTS,
+                                          comm, &reqs[req_n++]);
+                        }
+                }
+
+                /* Allocate recv buffers (sizes are known from the
+                 * earlier Allgathers of rank_local_vertices /
+                 * rank_local_edge_count) and post Irecvs. */
+                for (int i = 0; i < nc; i++) {
+                        int r = g->neighbor_ranks[i];
+                        if (r == self) continue;
+
+                        size_t n_rp = g->rank_local_vertices[r] + 1;
+                        size_t n_ed = g->rank_local_edge_count[r];
+
+                        g->rank_row_ptrs[r] =
+                                malloc(n_rp * sizeof(dgraph_vid_t));
+                        if (g->rank_row_ptrs[r] == NULL) {
+                                block_err = -DSTM_ENOMEM;
+                                break;
+                        }
+                        MPI_Irecv(g->rank_row_ptrs[r], (int)n_rp,
+                                  MPI_UINT64_T, r, TAG_ROW_PTRS, comm,
+                                  &reqs[req_n++]);
+
+                        if (n_ed > 0) {
+                                g->rank_edge_dsts[r] =
+                                        malloc(n_ed * sizeof(dgraph_vid_t));
+                                if (g->rank_edge_dsts[r] == NULL) {
+                                        block_err = -DSTM_ENOMEM;
+                                        break;
+                                }
+                                MPI_Irecv(g->rank_edge_dsts[r], (int)n_ed,
+                                          MPI_UINT64_T, r, TAG_EDGE_DSTS,
+                                          comm, &reqs[req_n++]);
+                        }
+                }
+
+                if (req_n > 0) {
+                        int rc = MPI_Waitall(req_n, reqs,
+                                             MPI_STATUSES_IGNORE);
+                        if (rc != MPI_SUCCESS && block_err == 0)
+                                block_err = -DSTM_FAILURE;
+                }
+                free(reqs);
+
+                if (block_err != 0) {
+                        err = block_err;
+                        goto err_cleanup;
+                }
+        } 
 
         /* Edge dsts: same pattern. */
         {
-                int *ed_counts = malloc((size_t)world_size * sizeof(int));
-                int *ed_displs = malloc((size_t)world_size * sizeof(int));
+                int *ed_counts = NULL;
+                int *ed_displs = NULL;
+                dgraph_vid_t *local_dsts = NULL;
+                dgraph_vid_t *ed_all = NULL;
+                int block_err = 0;
+
+                ed_counts = malloc((size_t)world_size * sizeof(int));
+                ed_displs = malloc((size_t)world_size * sizeof(int));
                 if (!ed_counts || !ed_displs) {
-                        free(ed_counts); free(ed_displs);
-                        err = -DSTM_ENOMEM;
-                        goto err_free_topocache;
+                        block_err = -DSTM_ENOMEM;
+                        goto ed_block_end;
                 }
                 size_t total_ed = 0;
                 for (int r = 0; r < world_size; r++) {
@@ -450,33 +655,34 @@ int dstm_dgraph_create(dstm_dgraph_t **ret,
                         ed_displs[r] = (int)total_ed;
                         total_ed += (size_t)ed_counts[r];
                 }
-                dgraph_vid_t *local_dsts =
-                        malloc(local_edge_count * sizeof(dgraph_vid_t));
-                if (local_edge_count > 0 && local_dsts == NULL) {
-                        free(ed_counts); free(ed_displs);
-                        err = -DSTM_ENOMEM;
-                        goto err_free_topocache;
-                }
-                for (size_t s = 0; s < local_edge_count; s++)
-                        local_dsts[s] = (dgraph_vid_t)local_edge_dsts[s];
 
-                dgraph_vid_t *ed_all = total_ed
-                        ? malloc(total_ed * sizeof(dgraph_vid_t))
-                        : NULL;
-                if (total_ed > 0 && ed_all == NULL) {
-                        free(ed_counts); free(ed_displs); free(local_dsts);
-                        err = -DSTM_ENOMEM;
-                        goto err_free_topocache;
+                if (local_edge_count > 0) {
+                        local_dsts = malloc(local_edge_count
+                                            * sizeof(dgraph_vid_t));
+                        if (local_dsts == NULL) {
+                                block_err = -DSTM_ENOMEM;
+                                goto ed_block_end;
+                        }
+                        for (size_t s = 0; s < local_edge_count; s++)
+                                local_dsts[s] =
+                                        (dgraph_vid_t)local_edge_dsts[s];
                 }
-                err = MPI_Allgatherv(local_dsts, (int)local_edge_count,
-                                     MPI_UINT64_T,
-                                     ed_all, ed_counts, ed_displs,
-                                     MPI_UINT64_T, comm);
-                free(local_dsts);
-                if (err != MPI_SUCCESS) {
-                        free(ed_counts); free(ed_displs); free(ed_all);
-                        err = -DSTM_FAILURE;
-                        goto err_free_topocache;
+
+                if (total_ed > 0) {
+                        ed_all = malloc(total_ed * sizeof(dgraph_vid_t));
+                        if (ed_all == NULL) {
+                                block_err = -DSTM_ENOMEM;
+                                goto ed_block_end;
+                        }
+                }
+
+                int rc = MPI_Allgatherv(local_dsts, (int)local_edge_count,
+                                        MPI_UINT64_T,
+                                        ed_all, ed_counts, ed_displs,
+                                        MPI_UINT64_T, comm);
+                if (rc != MPI_SUCCESS) {
+                        block_err = -DSTM_FAILURE;
+                        goto ed_block_end;
                 }
                 for (int r = 0; r < world_size; r++) {
                         size_t n = g->rank_local_edge_count[r];
@@ -487,15 +693,22 @@ int dstm_dgraph_create(dstm_dgraph_t **ret,
                         g->rank_edge_dsts[r] =
                                 malloc(n * sizeof(dgraph_vid_t));
                         if (g->rank_edge_dsts[r] == NULL) {
-                                free(ed_counts); free(ed_displs); free(ed_all);
-                                err = -DSTM_ENOMEM;
-                                goto err_free_topocache;
+                                block_err = -DSTM_ENOMEM;
+                                goto ed_block_end;
                         }
                         memcpy(g->rank_edge_dsts[r],
                                ed_all + ed_displs[r],
                                n * sizeof(dgraph_vid_t));
                 }
-                free(ed_counts); free(ed_displs); free(ed_all);
+        ed_block_end:
+                free(ed_counts);
+                free(ed_displs);
+                free(local_dsts);
+                free(ed_all);
+                if (block_err != 0) {
+                        err = block_err;
+                        goto err_cleanup;
+                }
         }
 
         /* --- Publish initial state at time 0 ------------------------------ */
@@ -504,7 +717,7 @@ int dstm_dgraph_create(dstm_dgraph_t **ret,
                 dstm_ptr_t rp_ptr = make_ptr(g->region_id, g->edge_row_ptr_off);
                 int rc = dstm_put(self, g->region_id, 0, 0, rp_ptr,
                                   g->row_ptrs, g->edge_row_ptr_bytes);
-                if (rc != DSTM_SUCCESS) { err = rc; goto err_free_rowptrs; }
+                if (rc != DSTM_SUCCESS) { err = rc; goto err_cleanup; }
         }
 
         /* Vertex state. */
@@ -514,13 +727,13 @@ int dstm_dgraph_create(dstm_dgraph_t **ret,
                              : calloc(1, g->vertex_state_bytes);
                 if (vbuf == NULL) {
                         err = -DSTM_ENOMEM;
-                        goto err_free_rowptrs;
+                        goto err_cleanup;
                 }
                 dstm_ptr_t vp = make_ptr(g->region_id, g->vertex_state_off);
                 int rc = dstm_put(self, g->region_id, 0, 0, vp, vbuf,
                                   g->vertex_state_bytes);
                 if (vbuf != local_vertex_states) free(vbuf);
-                if (rc != DSTM_SUCCESS) { err = rc; goto err_free_rowptrs; }
+                if (rc != DSTM_SUCCESS) { err = rc; goto err_cleanup; }
         }
 
         /* Edge slots: build one contiguous packed buffer of stride entries
@@ -529,7 +742,7 @@ int dstm_dgraph_create(dstm_dgraph_t **ret,
                 char *ebuf = calloc(local_edge_count, g->edge_slot_stride);
                 if (ebuf == NULL) {
                         err = -DSTM_ENOMEM;
-                        goto err_free_rowptrs;
+                        goto err_cleanup;
                 }
                 const size_t *dcursor = local_edge_dsts;
                 const char *scursor   = (const char *)local_edge_states;
@@ -550,13 +763,15 @@ int dstm_dgraph_create(dstm_dgraph_t **ret,
                 int rc = dstm_put(self, g->region_id, 0, 0, ep, ebuf,
                                   g->edge_slot_bytes);
                 free(ebuf);
-                if (rc != DSTM_SUCCESS) { err = rc; goto err_free_rowptrs; }
+                if (rc != DSTM_SUCCESS) { err = rc; goto err_cleanup; }
         }
 
         *ret = g;
         return DSTM_SUCCESS;
 
-err_free_topocache:
+err_cleanup:
+        /* Replicated topology cache. Outer arrays were calloc'd, so
+         * any inner entry not yet allocated is NULL. */
         if (g->rank_row_ptrs) {
                 for (int r = 0; r < world_size; r++)
                         free(g->rank_row_ptrs[r]);
@@ -567,19 +782,18 @@ err_free_topocache:
                         free(g->rank_edge_dsts[r]);
                 free(g->rank_edge_dsts);
         }
+
+        /* Host-side row-pointer cache. */
         free(g->row_ptrs);
-        goto err_free_region_only;
-err_free_region_only:
-err_free_rowptrs:
-        free(g->row_ptrs);
-err_free_region:
-        /* We cannot easily rebuild the base dstm_ptr_t here because we
-         * discarded it; reconstruct from vertex_state_off. */
-        {
-                dstm_ptr_t base_p = make_ptr(g->region_id, g->vertex_state_off);
+
+        /* Backing region, only if we got as far as allocating it. */
+        if (region_allocated) {
+                dstm_ptr_t base_p = make_ptr(g->region_id,
+                                             g->vertex_state_off);
                 dstm_region_free(g->region, base_p);
         }
-err_free_arrays:
+
+        /* Per-rank metadata arrays. */
         free(g->rank_local_vertices);
         free(g->rank_local_edge_count);
         free(g->rank_vertex_state_off);
@@ -587,6 +801,9 @@ err_free_arrays:
         free(g->rank_edge_slot_off);
         free(g->rank_edge_slot_stride);
         free(g->rank_vertex_offsets);
+        free(g->is_neighbor_rank);
+        free(g->neighbor_ranks);
+
         free(g);
         *ret = NULL;
         return err;
@@ -643,6 +860,8 @@ void dstm_dgraph_destroy(dstm_dgraph_t **dgraph)
         free(g->rank_edge_row_ptr_off);
         free(g->rank_edge_slot_off);
         free(g->rank_edge_slot_stride);
+        free(g->is_neighbor_rank);
+        free(g->neighbor_ranks);
         free(g);
         *dgraph = NULL;
 }
@@ -706,20 +925,21 @@ int dstm_dgraph_vertex_get_or_default(dstm_dgraph_t *g, size_t vertex_id,
  * the row-pointer slab for remote ranks.
  * ------------------------------------------------------------------------- */
 
-/* Topology is fully replicated on every rank, so no DSTM traffic is
- * needed here. (time, delta) are ignored -- topology is immutable. */
+/* Return topology for `rank`. Requires `rank` to be a neighbor of self;
+ * returns -DSTM_ENOTLOCAL otherwise. */
 static int fetch_row_range(dstm_dgraph_t *g, int rank, size_t local_idx,
                            dstm_time_t time, dstm_time_t delta,
                            dgraph_vid_t *out_start, dgraph_vid_t *out_end)
 {
         (void)time;
         (void)delta;
+        if (!g->is_neighbor_rank[rank] || g->rank_row_ptrs[rank] == NULL)
+                return -DSTM_ENOTLOCAL;
         *out_start = g->rank_row_ptrs[rank][local_idx];
         *out_end   = g->rank_row_ptrs[rank][local_idx + 1];
         return DSTM_SUCCESS;
 }
 
-/* Binary search in the fully-replicated dst cache; no DSTM traffic. */
 static int find_edge_slot(dstm_dgraph_t *g, int rank,
                           dgraph_vid_t row_start, dgraph_vid_t row_end,
                           size_t v, dstm_time_t time, dstm_time_t delta,
@@ -727,6 +947,11 @@ static int find_edge_slot(dstm_dgraph_t *g, int rank,
 {
         (void)time;
         (void)delta;
+        if (!g->is_neighbor_rank[rank])
+                return -DSTM_ENOTLOCAL;
+        if (g->rank_edge_dsts[rank] == NULL)
+                return -DSTM_ENOTFOUND;
+
         const dgraph_vid_t *dsts = g->rank_edge_dsts[rank];
         dgraph_vid_t lo = row_start;
         dgraph_vid_t hi = row_end;

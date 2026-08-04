@@ -164,6 +164,23 @@ size_t dstm_dgraph_local_edge_count(dstm_dgraph_t *dgraph);
 /** MPI rank that owns @p vertex_id. */
 int dstm_dgraph_vertex_owner(dstm_dgraph_t *dgraph, size_t vertex_id);
 
+/**
+ * Return 1 if @p rank is a topology-neighbor of the local rank (i.e.,
+ * the local rank holds a replica of @p rank's topology and can perform
+ * edge lookups against vertices owned by @p rank without additional
+ * MPI traffic). Returns 1 for the local rank itself, 0 otherwise.
+ * Returns -DSTM_EINVAL on invalid input.
+ */
+int dstm_dgraph_is_neighbor_rank(dstm_dgraph_t *dgraph, int rank);
+
+/**
+ * Fill @p out_ranks with the sorted list of neighbor ranks (including
+ * the local rank). Same two-call capacity pattern as neighbors_get.
+ */
+int dstm_dgraph_neighbor_ranks_get(dstm_dgraph_t *dgraph,
+                                   int *out_ranks,
+                                   size_t *io_count);
+
 /*******************************************************************************
  * Vertex state operations
  ******************************************************************************/

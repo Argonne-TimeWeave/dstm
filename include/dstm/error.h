@@ -107,10 +107,12 @@ void dstm_perror(const char *msg);
  **/
 #define DSTM_EEXIST 9
 
+#define DSTM_ENOTLOCAL 10
+
 /**
  * Max allowed value for errors.
  **/
-#define DSTM_ERROR_MAX 10
+#define DSTM_ERROR_MAX 11
 
 /**
  * @}
