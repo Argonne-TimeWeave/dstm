@@ -29,6 +29,7 @@ COMPILED_TESTS = \
 		msg \
 		multi_session \
         dgraph \
+        mini_airport \
 		put_after_get
 
 check_PROGRAMS = $(COMPILED_TESTS)

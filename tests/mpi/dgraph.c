@@ -390,89 +390,21 @@ static void test_vertex_roundtrip_cross_rank(void)
         const size_t per_rank = 4;
         const dstm_time_t t_put = 0;
         const dstm_time_t t_get = 2;
-
-        fprintf(stderr,
-                "\n===== test_vertex_roundtrip_cross_rank (rank %d/%d) =====\n"
-                "  per_rank=%zu  t_put=%lld (delta=+1, eff=%lld)  "
-                "t_get=%lld (delta=-1, eff=%lld)\n",
-                rank, world_size, per_rank,
-                (long long)t_put, (long long)(t_put + 1),
-                (long long)t_get, (long long)(t_get - 1));
-        fflush(stderr);
-
-        fprintf(stderr, "[rank %d] opening dstm session\n", rank);
-        fflush(stderr);
         dstm_distance_t *dist = session_begin();
-
-        fprintf(stderr, "[rank %d] building ring graph (per_rank=%zu, "
-                "total=%zu)\n", rank, per_rank,
-                per_rank * (size_t)world_size);
-        fflush(stderr);
         dstm_dgraph_t *g = build_ring(per_rank);
 
         size_t off = dstm_dgraph_local_vertex_offset(g);
-        fprintf(stderr,
-                "[rank %d] graph built: local_vertex_offset=%zu, "
-                "local_vertices=%zu, owns global vids [%zu..%zu]\n",
-                rank, off, dstm_dgraph_local_vertex_count(g),
-                off, off + per_rank - 1);
-        fflush(stderr);
-
-        /* ---- Barrier so the phase banners don't interleave. ---- */
-        MPI_Barrier(MPI_COMM_WORLD);
-        if (rank == 0) {
-                fprintf(stderr,
-                        "\n---- PHASE 1: every rank puts its local slice "
-                        "at (t=%lld, delta=1) -> effective t=%lld ----\n",
-                        (long long)t_put, (long long)(t_put + 1));
-                fflush(stderr);
-        }
-        MPI_Barrier(MPI_COMM_WORLD);
 
         /* Every rank publishes its local slice. */
         for (size_t i = 0; i < per_rank; i++) {
                 int val = (int)((off + i) * 10 + 2);
-                fprintf(stderr,
-                        "[rank %d] PUT  vid=%zu (local_idx=%zu) "
-                        "val=%d  at (time=%lld, delta=1) eff_t=%lld  "
-                        "[LOCAL WRITE]\n",
-                        rank, off + i, i, val,
-                        (long long)t_put, (long long)(t_put + 1));
-                fflush(stderr);
                 int rc = dstm_dgraph_vertex_put(g, off + i, &val, t_put, 1);
-                fprintf(stderr,
-                        "[rank %d] PUT  vid=%zu -> rc=%d %s\n",
-                        rank, off + i, rc,
-                        rc == DSTM_SUCCESS ? "OK" : "FAILED");
-                fflush(stderr);
                 assert(rc == DSTM_SUCCESS);
         }
-
-        /* ---- Barrier so all puts complete before any get starts. ---- */
-        MPI_Barrier(MPI_COMM_WORLD);
-        if (rank == 0) {
-                fprintf(stderr,
-                        "\n---- PHASE 2: every rank reads the FIRST vertex "
-                        "of every rank at (t=%lld, delta=-1) -> effective "
-                        "t=%lld ----\n",
-                        (long long)t_get, (long long)(t_get - 1));
-                fflush(stderr);
-        }
-        MPI_Barrier(MPI_COMM_WORLD);
 
         /* Then every rank reads the FIRST vertex of every rank. */
         for (int r = 0; r < world_size; r++) {
                 size_t vid = (size_t)r * per_rank;
-                int owner = dstm_dgraph_vertex_owner(g, vid);
-                int is_local = (owner == rank);
-                fprintf(stderr,
-                        "[rank %d] GET  vid=%zu  owner=rank %d  %s  "
-                        "at (time=%lld, delta=-1) eff_t=%lld\n",
-                        rank, vid, owner,
-                        is_local ? "[LOCAL READ]"
-                                 : "[REMOTE READ over MPI]",
-                        (long long)t_get, (long long)(t_get - 1));
-                fflush(stderr);
 
                 int got = -1;
                 int rc = dstm_dgraph_vertex_get(g, vid, &got, t_get, -1);
@@ -489,25 +421,7 @@ static void test_vertex_roundtrip_cross_rank(void)
                 assert(rc == DSTM_SUCCESS);
                 assert(got == expected);
         }
-
-        MPI_Barrier(MPI_COMM_WORLD);
-        if (rank == 0) {
-                fprintf(stderr,
-                        "\n---- TEARDOWN: destroy graph, close session with "
-                        "last_time=%lld ----\n",
-                        (long long)(t_put + 1));
-                fflush(stderr);
-        }
-        MPI_Barrier(MPI_COMM_WORLD);
-
-        fprintf(stderr, "[rank %d] destroying graph\n", rank);
-        fflush(stderr);
         dstm_dgraph_destroy(&g);
-
-        fprintf(stderr,
-                "[rank %d] closing session (dstm_fini last_time=%lld)\n",
-                rank, (long long)(t_put + 1));
-        fflush(stderr);
         session_end(&dist, t_put + 1);
 
         MPI_Barrier(MPI_COMM_WORLD);

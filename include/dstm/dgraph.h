@@ -337,6 +337,31 @@ int dstm_dgraph_derive_distance(dstm_dgraph_t *dgraph,
                                 dstm_distance_t **ret,
                                 int default_delta);
 
+
+/**
+ * Build a DSTM distance matrix directly from local CSR topology,
+ * without requiring an existing dgraph or a started session.
+ *
+ * Use this instead of dstm_dgraph_derive_distance when the matrix is
+ * needed to start the very session that will host the graph:
+ * dstm_dgraph_create publishes initial state via dstm_put and therefore
+ * requires a live session, so a matrix derived from a finished graph
+ * can never be that session's matrix.
+ *
+ * Arguments mirror dstm_dgraph_create; the same partitioning rule is
+ * applied, so the resulting rank-level reachability matches the graph
+ * that will later be built from these arrays.
+ *
+ * Collective; all ranks must call.
+ *
+ * @return DSTM_SUCCESS, -DSTM_EINVAL, -DSTM_ENOMEM, -DSTM_FAILURE.
+ */
+int dstm_dgraph_distance_from_topology(dstm_distance_t **ret,
+                                       size_t local_vertices,
+                                       const size_t *local_out_degrees,
+                                       const size_t *local_edge_dsts,
+                                       int default_delta);
+
 #ifdef __cplusplus
 }
 #endif

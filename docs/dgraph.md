@@ -46,28 +46,78 @@ Each rank owns one DSTM region divided into three fixed-size slabs:
   each vertex's window. `dst` is written once at `(t=0, δ=0)`;
   `user_state` is mutable via `dstm_dgraph_edge_put`.
 
+**Region ids are not rank ids.** A `dstm_ptr_t` names a
+`(region, offset)` pair, and `dstm_get`/`dstm_put` take the owning rank
+and the region id as separate arguments. Nothing guarantees rank `r`'s
+region id equals `r`, so every rank's region id is gathered at create
+time and resolved through the single accessor `dgraph_region_of()`. If
+`dstm_get`/`dstm_put` ever change to expect a rank in that position,
+that one function is the only thing to edit.
+
 ### Replicated topology cache
 
-Even though topology lives inside a DSTM region, it is also fully
-replicated on every rank as plain host memory (via `MPI_Allgatherv`
-during `dstm_dgraph_create`):
+Topology also lives in plain host memory, replicated **only across
+neighbor ranks** — self, plus any rank sharing at least one edge with
+self in either direction:
 
-- `rank_row_ptrs[r][i]` — every rank's row pointer array
-- `rank_edge_dsts[r][slot]` — every rank's edge destinations
+- `rank_row_ptrs[r][i]` — rank `r`'s CSR row pointers
+- `rank_edge_dsts[r][slot]` — rank `r`'s edge destinations
 
-**Rationale.** DSTM uses a sliding version window; old versions age
-out. Topology was published at `(t=0, δ=0)` and needs to be readable
-at arbitrary later times. Trying to serve topology reads via
-`dstm_get` after t=0 has been reclaimed causes indefinite stalls.
-Because topology is immutable, small (O(V+E) integers), and needed on
-the hot path, full replication is standard practice and eliminates
-DSTM traffic entirely for topology queries.
+Both are indexed by global rank id and are `NULL` for non-neighbors.
+Population happens during `dstm_dgraph_create`: membership comes from a
+single `MPI_Allgather` of a 1-byte-per-rank "touched" row, OR'd with its
+transpose to symmetrize; the payload is then exchanged with
+point-to-point `Isend`/`Irecv` between neighbor pairs only.
+
+**Rationale.** DSTM uses a sliding version window; old versions age out.
+Topology is published at effective time 0 and must stay readable at
+arbitrary later times, so serving it through `dstm_get` would stall once
+version 0 is reclaimed. Topology is immutable and small (O(V+E)
+integers), so replication removes DSTM traffic from every topology
+query. Restricting replication to neighbors keeps cost proportional to
+the local neighborhood rather than O(total\_edges) per rank — which is
+the whole point of the sparse communication structure DSTM assumes.
 
 Topology helpers (`fetch_row_range`, `find_edge_slot`,
-`dstm_dgraph_neighbors_get`, `dstm_dgraph_derive_distance`) all read
-from these host-side caches and never call DSTM.
+`dstm_dgraph_degree_get`, `dstm_dgraph_neighbors_get`) read these caches
+and never call DSTM.
+
+**Consequence: topology queries are neighborhood-scoped.** Any call that
+must resolve topology for a vertex owned by a non-neighbor rank returns
+`-DSTM_ENOTLOCAL`. This affects `degree_get`, `neighbors_get`,
+`edge_get`, and `edge_put`. Vertex state operations are unaffected: they
+need no topology and work against any rank. Use
+`dstm_dgraph_is_neighbor_rank` to test before querying.
 
 ---
+
+## Collective usage inside a live session
+
+A DSTM get is request–reply, and a rank only services incoming DSTM
+requests while it is *inside* a DSTM call. A rank that finishes its own
+gets and parks in `MPI_Barrier` will never answer a peer's outstanding
+read: the fast ranks block in the barrier, the slow rank blocks waiting
+for a reply, and the job hangs until it is killed.
+
+**Rule: a bare `MPI_Barrier` / `MPI_Allreduce` / `MPI_Allgather` in
+application or test code is only safe when no rank can have an
+outstanding DSTM operation targeting another rank.** In practice that
+means before the first remote get, or after `dstm_fini`. Never between.
+
+If a mid-session synchronization point is genuinely needed, use
+`dstm_barrier(t)`, which pumps DSTM traffic while it blocks.
+`dstm_fini` does the same and is the natural drain point at teardown.
+
+`dstm_dgraph_create` runs its own collectives, which is safe because
+every rank enters it with nothing pending. It must be called by all
+ranks. Per-rank failures are agreed on via `MPI_Allreduce` at four
+checkpoints, so a rank that fails validation locally causes every rank
+to return an error (`-DSTM_FAILURE` on ranks that were themselves
+healthy) rather than deadlocking the survivors.
+
+**Teardown ordering.** `dstm_dgraph_destroy` calls `dstm_region_free`.
+Call it before `dstm_fini` only once you are certain no peer still has a
+read in flight against this rank's region.
 
 ## API surface
 
@@ -92,7 +142,7 @@ dstm\_dgraph\_create\_equal splits total\_vertices as evenly as possible: the fi
 
 Neighbor lists supplied via local\_edge\_dsts must be strictly ascending and in [0, total\_vertices).
 
-## Introspection
+### Introspection
 
 ```C
 size_t dstm_dgraph_vertex_count(dstm_dgraph_t *);
@@ -101,9 +151,23 @@ size_t dstm_dgraph_local_vertex_offset(dstm_dgraph_t *);
 size_t dstm_dgraph_edge_count(dstm_dgraph_t *);
 size_t dstm_dgraph_local_edge_count(dstm_dgraph_t *);
 int    dstm_dgraph_vertex_owner(dstm_dgraph_t *, size_t vertex_id);
+```c
+int dstm_dgraph_is_neighbor_rank(dstm_dgraph_t *, int rank);
+int dstm_dgraph_neighbor_ranks_get(dstm_dgraph_t *, int *out_ranks,
+                                   size_t *io_count);
 ```
 
-## Vertex State
+`is_neighbor_rank` returns 1 if the local rank holds a topology replica
+for `rank` (always true for the local rank itself), 0 if not, and
+`-DSTM_EINVAL` for an out-of-range rank. `neighbor_ranks_get` fills a
+sorted list including self, using the same two-call capacity pattern as
+`neighbors_get`.
+
+`vertex_owner` returns `-DSTM_EINVAL` (a negative value) for
+`vertex_id >= total_vertices`; check the sign before using the result as
+a rank.
+
+### Vertex State
 ```C
 int dstm_dgraph_vertex_get(dstm_dgraph_t *, size_t vid, void *dst,
                            dstm_time_t time, dstm_time_t delta);
@@ -122,7 +186,7 @@ put: delta >= 0; effective time is time + delta
 delta == 0 requires the owning rank to be the local rank
 get\_or\_default short-circuits when time + delta < 0 and returns the caller-supplied default without contacting the owning rank
 
-## Edge State
+### Edge State
 
 ```C
 int dstm_dgraph_edge_get(dstm_dgraph_t *, size_t u, size_t v, void *dst,
@@ -133,7 +197,7 @@ int dstm_dgraph_edge_put(dstm_dgraph_t *, size_t u, size_t v, void *src,
 
 Internally, resolving the (u, v) slot is a purely-local binary-search into the replicated topology cache. The actual state transfer is a single dstm\_get/dstm\_put with the caller's (time, delta). Returns -DSTM\_ENOTFOUND if the edge was never declared.
 
-## Neighborhood queries
+### Neighborhood queries
 
 ```C
 int dstm_dgraph_degree_get(dstm_dgraph_t *, size_t u, size_t *out_degree);
@@ -143,20 +207,69 @@ int dstm_dgraph_neighbors_get(dstm_dgraph_t *, size_t u,
 
 Both are topology-only and never call DSTM. neighbors\_get supports a two-call capacity-query pattern: pass out\_neighbors == NULL (or an undersized buffer with \*io\_count < deg) and it returns -DSTM\_ENOMEM after writing the required capacity into \*io\_count.
 
-## Distance-matrix derivation
+### Distance-matrix derivation
 
-```C
+```c
+/* Pre-session: operates on raw CSR arrays, no graph required. */
+int dstm_dgraph_distance_from_topology(dstm_distance_t **ret,
+                                       size_t local_vertices,
+                                       const size_t *local_out_degrees,
+                                       const size_t *local_edge_dsts,
+                                       int default_delta);
+
+/* Post-hoc: operates on a built graph. */
 int dstm_dgraph_derive_distance(dstm_dgraph_t *, dstm_distance_t **ret,
                                 int default_delta);
 ```
 
-Builds a world\_size × world\_size symmetric reachability matrix from the graph's rank-to-rank edges and materializes a dstm\_distance\_t suitable for future dstm\_start\_custom calls: 0 on the diagonal, default\_delta on reachable off-diagonal pairs, -1 elsewhere.
+Both build a symmetric `world_size × world_size` rank reachability
+matrix: `0` on the diagonal, `default_delta` on reachable off-diagonal
+pairs, `-1` elsewhere. Both are collective.
+
+**Use `distance_from_topology` for the session that will host the
+graph.** `dstm_dgraph_create` issues puts and therefore requires an
+already-started session, so a matrix derived from a finished graph can
+never be the matrix that graph's own session was started with.
+`derive_distance` is for inspection or for a subsequent session.
+
+> **BROKEN — do not use either function yet.** Both delegate to
+> `dstm_distance_create_from_matrix`, which currently returns
+> `-DSTM_EINVAL` for every input tested (verified on 4 ranks). Suspected
+> cause: an element-type mismatch on the matrix parameter (`int *`
+> passed where `dstm_time_t *` is expected), which C accepts with only a
+> warning and which makes the callee read interleaved garbage. Until
+> that is resolved, build the matrix directly — see
+> `build_torus_distance()` in `tests/mpi/mini_airport.c` and
+> `build_rank_adjacency()` in `examples/airport/main.c`, both of which
+> start from a working constructor and overwrite `distances[]` through
+> `internal/distance.h`.
 
 ## Interaction with DSTM's time model
 Two DSTM contract rules directly shape how dgraph must be used:
 
-Put-before-get phase rule. Within one dstm session, once a get at (t, δ=0) has been issued to a region, no more puts at (t, δ=0) to that region are permitted.
-Sliding version window. Old versions may be reclaimed as logical time advances; a get targeting a version that has been reclaimed will stall.
+**Put-before-get phase rule.** A version is identified by its *effective
+time* (`time + delta`), not by the literal `(time, delta)` pair. Once
+any get on effective time `T` has been issued against a rank's region,
+that version is READABLE and no further put to effective time `T` is
+accepted — the runtime aborts with `dstm_put contract violation: target
+version is no longer WRITABLE (status=1)`.
+
+Versions are tracked per region, not per index, so a get on one vertex
+seals effective time `T` against puts to *every* vertex and edge on that
+rank. Structure each tick so all puts to a given effective time precede
+any get on it. The usual shape is strict alternation — tick `t` reads
+effective `t` and writes effective `t+1`:
+
+```
+create:  put 0
+tick 0:  get 0   put 1
+tick 1:  get 1   put 2
+...
+```
+
+A put with `delta = 0` issued after a get at the same `time` in the same
+tick violates this, even though the two calls target different objects.
+
 dstm\_dgraph\_create publishes initial topology and (optional) initial state via puts at (t=0, δ=0). Two consequences:
 
 One dgraph per session. Creating a second dgraph in the same DSTM session may collide at (t=0, δ=0) with reads issued by the first, corrupting state. Callers should open a fresh dstm\_start / dstm\_fini session per dgraph instance for independent tests or phases. The test harness enforces this via a run\_isolated() wrapper (see below).
@@ -164,7 +277,26 @@ Topology cache pays for immutability. Because topology reads can be needed at ar
 
 # Known constraints
 
-One dgraph per DSTM session. As described above, multiple concurrent dgraphs within a single dstm\_start/dstm\_fini session will collide at (t=0, δ=0). The test harness enforces isolation via run\_isolated.
+**One dgraph per session.** `dstm_dgraph_create` publishes topology and
+initial state at effective time 0. If an earlier graph in the same
+session has already read effective time 0, the second create's puts are
+rejected. Open a fresh `dstm_start` / `dstm_fini` session per graph. The
+test harness enforces this with `run_isolated()`.
 Topology is immutable. There is no API for adding, removing, or reordering edges after create. If you need dynamic topology, destroy and rebuild the graph in a fresh session.
 Neighbor lists must be sorted ascending and unique at create time. Validation happens in dstm\_dgraph\_create and rejects violating inputs with -DSTM\_EINVAL.
 Vertex/edge state sizes of 0 are legal. get/put calls short-circuit to DSTM\_SUCCESS without touching DSTM. This is useful for topology-only graphs.
+
+- **Topology queries are neighborhood-scoped.** `degree_get`,
+  `neighbors_get`, `edge_get`, and `edge_put` return `-DSTM_ENOTLOCAL`
+  for vertices owned by non-neighbor ranks. Vertex state operations have
+  no such restriction.
+- **Every rank must own at least one vertex.** `local_vertices == 0`
+  returns `-DSTM_EINVAL`. Note that `create_equal` produces empty ranks
+  when `total_vertices < world_size`.
+- **Edge existence is validated even when `edge_state_size == 0`.**
+  `edge_get`/`edge_put` resolve `(u, v)` first and can still return
+  `-DSTM_ENOTFOUND` or `-DSTM_ENOTLOCAL`; only the state transfer is
+  skipped. Vertex operations short-circuit after bounds checking.
+- **`neighbors_get` on a zero-degree vertex returns `DSTM_SUCCESS`**
+  with `*io_count == 0`, not `-DSTM_ENOMEM`, even when
+  `out_neighbors == NULL`. Adjust the two-call pattern accordingly.
