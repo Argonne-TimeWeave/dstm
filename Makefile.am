@@ -41,7 +41,6 @@ include_HEADERS = include/dstm.h
 include_dstmdir=$(includedir)/dstm
 include_dstm_HEADERS = \
 		      include/dstm/error.h \
-              include/dstm/dgraph.h \
 		      include/dstm/version.h
 
 noinst_include_internaldir = $(includedir)/internal

@@ -17,7 +17,6 @@
 #include <string.h>
 
 #include "dstm.h"
-#include "dstm/dgraph.h"
 
 #include "internal/globals.h"
 #include "internal/region.h"
@@ -198,6 +197,89 @@ static inline dstm_ptr_t make_ptr(int region_id, intptr_t off)
 }
 
 /* ---------------------------------------------------------------------------
+ * Initial-state seeding
+ *
+ * Reads and writes go through per-version buffers (see
+ * dstm_region_version_s), each a full-size copy of the region, created
+ * *uninitialized*. Initial graph state must therefore be stamped into
+ * version 0's buffer explicitly; writing region->buffer alone would be
+ * invisible to every dstm_get.
+ *
+ * We do this with the internal region API rather than dstm_put because
+ * this is pre-simulation state: it predates the timeline instead of
+ * being an event on it, so routing it through the put/get visibility
+ * contract only created an effective time we then had to reason about.
+ * ------------------------------------------------------------------------- */
+
+/* Write all three slabs into one region-sized buffer. `region_buffer` is
+ * the base of the buffer; slab offsets are region-relative and index it
+ * directly. */
+static void dgraph_seed_slabs(const dstm_dgraph_t *g, char *region_buffer,
+                              const size_t *local_edge_dsts,
+                              const void *local_vertex_states,
+                              const void *local_edge_states)
+{
+        char *vs = region_buffer + g->vertex_state_off;
+        char *rp = region_buffer + g->edge_row_ptr_off;
+        char *es = region_buffer + g->edge_slot_off;
+
+        /* Version buffers are malloc'd, not calloc'd. Clear our whole
+         * allocation first: this covers inter-slab padding, intra-slot
+         * padding, and the NULL-means-zero-init contract for both state
+         * arrays. Only our own bytes are touched. */
+        memset(region_buffer + g->vertex_state_off, 0, g->region_bytes);
+
+        /* CSR row pointers. Immutable for the graph's lifetime; kept
+         * in-region so a future revision can serve remote topology reads
+         * without the host cache. */
+        memcpy(rp, g->row_ptrs, g->edge_row_ptr_bytes);
+
+        /* Vertex state (already zeroed if the caller passed NULL). */
+        if (g->vertex_state_bytes > 0 && local_vertex_states != NULL)
+                memcpy(vs, local_vertex_states, g->vertex_state_bytes);
+
+        /* Edge slots: [dst | user_state | pad] per slot, built in place. */
+        for (size_t slot = 0; slot < g->local_edge_count; slot++) {
+                char        *entry = es + slot * g->edge_slot_stride;
+                dgraph_vid_t d     = (dgraph_vid_t)local_edge_dsts[slot];
+
+                memcpy(entry, &d, sizeof(dgraph_vid_t));
+
+                if (g->edge_state_size > 0 && local_edge_states != NULL)
+                        memcpy(entry + sizeof(dgraph_vid_t),
+                               (const char *)local_edge_states
+                               + slot * g->edge_state_size,
+                               g->edge_state_size);
+        }
+}
+
+/* Stamp initial state into version 0 and into the region's own buffer.
+ * Version 0 is what dstm_get at effective time 0 will read; region->buffer
+ * is seeded too so that any code path deriving a fresh version from it
+ * inherits the same bytes. */
+static int dgraph_seed_initial_state(dstm_dgraph_t *g,
+                                     const size_t *local_edge_dsts,
+                                     const void *local_vertex_states,
+                                     const void *local_edge_states)
+{
+        dstm_region_version_t *v0 =
+                dstm_region_version_find_or_create(g->region, 0);
+
+        if (v0 == NULL || v0->buffer == NULL)
+                return -DSTM_ENOMEM;
+
+        dgraph_seed_slabs(g, (char *)v0->buffer, local_edge_dsts,
+                          local_vertex_states, local_edge_states);
+
+        if (g->region->buffer != NULL)
+                dgraph_seed_slabs(g, (char *)g->region->buffer,
+                                  local_edge_dsts, local_vertex_states,
+                                  local_edge_states);
+
+        return DSTM_SUCCESS;
+}
+
+/* ---------------------------------------------------------------------------
  * Collective error consensus
  *
  * Any rank that bails out of create() must make every other rank bail
@@ -370,6 +452,11 @@ int dstm_dgraph_create(dstm_dgraph_t **ret,
         g->edge_slot_stride  = compute_edge_slot_stride(edge_state_size);
         g->local_vertices    = local_vertices;
 
+        if (g->region == NULL) {
+                free(g);
+                return -DSTM_EINVAL;
+        }
+
         /* --- Compute local_edge_count ------------------------------------ */
         {
                 size_t local_edge_count = 0;
@@ -435,12 +522,16 @@ int dstm_dgraph_create(dstm_dgraph_t **ret,
                 size_t es_padded = align_up(g->edge_slot_bytes, DGRAPH_ALIGN);
 
                 g->region_bytes = vs_padded + rp_padded + es_padded;
+                if (g->region_bytes == 0)
+                        g->region_bytes = DGRAPH_ALIGN;
 
-                /* --- Single region allocation ---------------------------- */
-                dstm_ptr_t base =
-                        dstm_region_malloc(g->region,
-                                           g->region_bytes ? g->region_bytes
-                                                           : DGRAPH_ALIGN);
+                /* --- Single region allocation ----------------------------
+                 *
+                 * region_bytes is kept in sync with what was actually
+                 * requested: dgraph_seed_slabs memsets exactly this many
+                 * bytes, so the two must not diverge. */
+                dstm_ptr_t base = dstm_region_malloc(g->region,
+                                                     g->region_bytes);
                 if (dstm_ptr_isnull(base)) {
                         err = -DSTM_ENOMEM;
                         goto consensus_setup;
@@ -461,10 +552,8 @@ consensus_setup:
 
         /* --- Single layout exchange --------------------------------------
          *
-         * Replaces the seven separate Allgathers of the previous
-         * implementation, and uses only fixed-width fields so we never
-         * have to claim that size_t is MPI_UNSIGNED_LONG_LONG or that
-         * intptr_t is MPI_AINT. */
+         * Fixed-width fields only, so we never have to claim that size_t
+         * is MPI_UNSIGNED_LONG_LONG or that intptr_t is MPI_AINT. */
         memset(&self_info, 0, sizeof(self_info));
         self_info.local_vertices   = (uint64_t)g->local_vertices;
         self_info.local_edge_count = (uint64_t)g->local_edge_count;
@@ -567,43 +656,23 @@ consensus_setup:
                  * not just who we touch. Gather every rank's row, then OR
                  * row `self` with column `self`. O(world_size^2) bytes at
                  * setup only. Every rank must enter this Allgather even if
-                 * it has already failed, hence the zeroed fallback. */
-                {
-                        uint8_t *sendbuf = local_touched;
-                        uint8_t *recvbuf = touch_matrix;
-                        uint8_t  dummy_send = 0;
-
-                        if (sendbuf == NULL || recvbuf == NULL) {
-                                /* Cannot participate meaningfully; still
-                                 * must not skip the collective. Use a
-                                 * one-element degenerate exchange only if
-                                 * both buffers are unusable. */
-                                (void)dummy_send;
-                        }
-
-                        if (sendbuf != NULL && recvbuf != NULL) {
-                                if (MPI_Allgather(sendbuf, world_size,
-                                                  MPI_UINT8_T,
-                                                  recvbuf, world_size,
-                                                  MPI_UINT8_T, comm)
-                                    != MPI_SUCCESS)
-                                        err = -DSTM_FAILURE;
-                        } else {
-                                /* Allocate a throwaway so the collective
-                                 * still matches; failure is reported via
-                                 * the consensus below. */
-                                uint8_t *tmp_s = calloc((size_t)world_size, 1);
-                                uint8_t *tmp_r =
-                                        calloc((size_t)world_size *
-                                               (size_t)world_size, 1);
-                                if (tmp_s && tmp_r)
-                                        MPI_Allgather(tmp_s, world_size,
-                                                      MPI_UINT8_T, tmp_r,
-                                                      world_size, MPI_UINT8_T,
-                                                      comm);
-                                free(tmp_s);
-                                free(tmp_r);
-                        }
+                 * it has already failed, hence the throwaway fallback. */
+                if (local_touched != NULL && touch_matrix != NULL) {
+                        if (MPI_Allgather(local_touched, world_size,
+                                          MPI_UINT8_T, touch_matrix,
+                                          world_size, MPI_UINT8_T, comm)
+                            != MPI_SUCCESS)
+                                err = -DSTM_FAILURE;
+                } else {
+                        uint8_t *tmp_s = calloc((size_t)world_size, 1);
+                        uint8_t *tmp_r = calloc((size_t)world_size *
+                                                (size_t)world_size, 1);
+                        if (tmp_s && tmp_r)
+                                MPI_Allgather(tmp_s, world_size, MPI_UINT8_T,
+                                              tmp_r, world_size, MPI_UINT8_T,
+                                              comm);
+                        free(tmp_s);
+                        free(tmp_r);
                 }
 
                 if (err == 0) {
@@ -702,8 +771,10 @@ consensus_setup:
 
         /* --- Neighbor-only topology exchange -----------------------------
          *
-         * "Neighbor" is symmetric by construction (OR of touched rows), so
-         * every peer we send to is issuing the matching receive. */
+         * Plain MPI: this is setup-time metadata, not simulation state, so
+         * it has no place on the versioned timeline. "Neighbor" is
+         * symmetric by construction (OR of touched rows), so every peer we
+         * send to is issuing the matching receive. */
         {
                 enum { TAG_ROW_PTRS = 0x100, TAG_EDGE_DSTS = 0x101 };
 
@@ -763,77 +834,16 @@ consensus_setup:
         if (err != 0)
                 goto err_cleanup;
 
-        /* --- Publish initial state at time 0 ------------------------------
+        /* --- Seed initial state into version 0 ---------------------------
          *
-         * All three puts are local (self's own slabs) at (t=0, delta=0),
-         * which is the only legal form for a local write to the current
-         * version. */
-        {
-                int    my_region = dgraph_region_of(g, self);
-                size_t est       = edge_state_size;
+         * No dstm_put anywhere in this function. Version 0's buffer is
+         * written directly; see dgraph_seed_initial_state for why that is
+         * both necessary (version buffers are separate and uninitialized)
+         * and sufficient (dstm_get reads exactly this buffer). */
+        err = dgraph_seed_initial_state(g, local_edge_dsts,
+                                        local_vertex_states,
+                                        local_edge_states);
 
-                /* Row pointers. */
-                dstm_ptr_t rp_ptr = make_ptr(my_region, g->edge_row_ptr_off);
-                int rc = dstm_put(self, my_region, 0, 0, rp_ptr, g->row_ptrs,
-                                  g->edge_row_ptr_bytes);
-                if (rc != DSTM_SUCCESS) {
-                        err = rc;
-                        goto publish_done;
-                }
-
-                /* Vertex state. */
-                if (g->vertex_state_bytes > 0) {
-                        void *vbuf = local_vertex_states
-                                     ? (void *)local_vertex_states
-                                     : calloc(1, g->vertex_state_bytes);
-                        if (vbuf == NULL) {
-                                err = -DSTM_ENOMEM;
-                                goto publish_done;
-                        }
-                        dstm_ptr_t vp = make_ptr(my_region,
-                                                 g->vertex_state_off);
-                        rc = dstm_put(self, my_region, 0, 0, vp, vbuf,
-                                      g->vertex_state_bytes);
-                        if (vbuf != local_vertex_states)
-                                free(vbuf);
-                        if (rc != DSTM_SUCCESS) {
-                                err = rc;
-                                goto publish_done;
-                        }
-                }
-
-                /* Edge slots: build one contiguous packed buffer of
-                 * [dst | user_state | pad] entries, then a single put. */
-                if (g->local_edge_count > 0) {
-                        char *ebuf = calloc(g->local_edge_count,
-                                            g->edge_slot_stride);
-                        if (ebuf == NULL) {
-                                err = -DSTM_ENOMEM;
-                                goto publish_done;
-                        }
-                        const char *scursor = (const char *)local_edge_states;
-                        for (size_t slot = 0; slot < g->local_edge_count;
-                             slot++) {
-                                char *entry = ebuf +
-                                              slot * g->edge_slot_stride;
-                                dgraph_vid_t d =
-                                        (dgraph_vid_t)local_edge_dsts[slot];
-                                memcpy(entry, &d, sizeof(dgraph_vid_t));
-                                if (est > 0 && scursor != NULL)
-                                        memcpy(entry + sizeof(dgraph_vid_t),
-                                               scursor + slot * est, est);
-                                /* else: already zeroed by calloc */
-                        }
-                        dstm_ptr_t ep = make_ptr(my_region, g->edge_slot_off);
-                        rc = dstm_put(self, my_region, 0, 0, ep, ebuf,
-                                      g->edge_slot_bytes);
-                        free(ebuf);
-                        if (rc != DSTM_SUCCESS)
-                                err = rc;
-                }
-        }
-
-publish_done:
         err = dgraph_consensus(comm, err);
         if (err != 0)
                 goto err_cleanup;

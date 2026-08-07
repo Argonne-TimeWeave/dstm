@@ -91,34 +91,6 @@ need no topology and work against any rank. Use
 
 ---
 
-## Collective usage inside a live session
-
-A DSTM get is request–reply, and a rank only services incoming DSTM
-requests while it is *inside* a DSTM call. A rank that finishes its own
-gets and parks in `MPI_Barrier` will never answer a peer's outstanding
-read: the fast ranks block in the barrier, the slow rank blocks waiting
-for a reply, and the job hangs until it is killed.
-
-**Rule: a bare `MPI_Barrier` / `MPI_Allreduce` / `MPI_Allgather` in
-application or test code is only safe when no rank can have an
-outstanding DSTM operation targeting another rank.** In practice that
-means before the first remote get, or after `dstm_fini`. Never between.
-
-If a mid-session synchronization point is genuinely needed, use
-`dstm_barrier(t)`, which pumps DSTM traffic while it blocks.
-`dstm_fini` does the same and is the natural drain point at teardown.
-
-`dstm_dgraph_create` runs its own collectives, which is safe because
-every rank enters it with nothing pending. It must be called by all
-ranks. Per-rank failures are agreed on via `MPI_Allreduce` at four
-checkpoints, so a rank that fails validation locally causes every rank
-to return an error (`-DSTM_FAILURE` on ranks that were themselves
-healthy) rather than deadlocking the survivors.
-
-**Teardown ordering.** `dstm_dgraph_destroy` calls `dstm_region_free`.
-Call it before `dstm_fini` only once you are certain no peer still has a
-read in flight against this rank's region.
-
 ## API surface
 
 ### Creation / destruction
@@ -245,6 +217,8 @@ never be the matrix that graph's own session was started with.
 > `internal/distance.h`.
 
 ## Interaction with DSTM's time model
+
+### Section should be removed. Information is generally useful for claude since it makes this mistake over and over again. Will remove soon.
 Two DSTM contract rules directly shape how dgraph must be used:
 
 **Put-before-get phase rule.** A version is identified by its *effective
@@ -277,11 +251,6 @@ Topology cache pays for immutability. Because topology reads can be needed at ar
 
 # Known constraints
 
-**One dgraph per session.** `dstm_dgraph_create` publishes topology and
-initial state at effective time 0. If an earlier graph in the same
-session has already read effective time 0, the second create's puts are
-rejected. Open a fresh `dstm_start` / `dstm_fini` session per graph. The
-test harness enforces this with `run_isolated()`.
 Topology is immutable. There is no API for adding, removing, or reordering edges after create. If you need dynamic topology, destroy and rebuild the graph in a fresh session.
 Neighbor lists must be sorted ascending and unique at create time. Validation happens in dstm\_dgraph\_create and rejects violating inputs with -DSTM\_EINVAL.
 Vertex/edge state sizes of 0 are legal. get/put calls short-circuit to DSTM\_SUCCESS without touching DSTM. This is useful for topology-only graphs.
@@ -297,6 +266,3 @@ Vertex/edge state sizes of 0 are legal. get/put calls short-circuit to DSTM\_SUC
   `edge_get`/`edge_put` resolve `(u, v)` first and can still return
   `-DSTM_ENOTFOUND` or `-DSTM_ENOTLOCAL`; only the state transfer is
   skipped. Vertex operations short-circuit after bounds checking.
-- **`neighbors_get` on a zero-degree vertex returns `DSTM_SUCCESS`**
-  with `*io_count == 0`, not `-DSTM_ENOMEM`, even when
-  `out_neighbors == NULL`. Adjust the two-call pattern accordingly.
