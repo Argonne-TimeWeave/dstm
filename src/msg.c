@@ -343,6 +343,24 @@ int dstm_msg_test(dstm_msg_t msg)
 }
 
 /*******************************************************************************
+ * Collective error consensus
+ ******************************************************************************/
+
+int dstm_msg_consensus(MPI_Comm comm, int err)
+{
+        int local_bad = (err != 0) ? 1 : 0;
+        int any_bad   = 0;
+
+        if (MPI_Allreduce(&local_bad, &any_bad, 1, MPI_INT, MPI_MAX, comm)
+            != MPI_SUCCESS)
+                return (err != 0) ? err : -DSTM_FAILURE;
+
+        if (err != 0)
+                return err;
+        return any_bad ? -DSTM_FAILURE : 0;
+}
+
+/*******************************************************************************
  * Formatting helpers
  ******************************************************************************/
 

@@ -928,6 +928,17 @@ int dstm_ptr_isnull(dstm_ptr_t ptr);
 int dstm_get_local_region_id(void);
 dstm_region_t *dstm_get_local_region(void);
 
+/* Construct a dstm_ptr_t referring to byte @p offset within region
+ * @p region (which may be a rank id, DSTM_REGIONID_LOCAL, or
+ * DSTM_REGIONID_INVALID). Performs no validation. */
+static inline dstm_ptr_t dstm_ptr_make(int region, intptr_t offset)
+{
+        dstm_ptr_t p;
+        p.region = region;
+        p.offset = offset;
+        return p;
+}
+
 /*******************************************************************************
  * DSTM BASIC OPERATIONS
  ******************************************************************************/

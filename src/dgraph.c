@@ -20,6 +20,7 @@
 
 #include "internal/globals.h"
 #include "internal/region.h"
+#include "internal/msg.h"
 
 /*******************************************************************************
  * Internal layout (static topology)
@@ -169,31 +170,43 @@ static inline size_t compute_edge_slot_stride(size_t edge_state_size)
         return align_up(raw, DGRAPH_ALIGN);
 }
 
-/*
- * SINGLE POINT OF ADAPTATION.
- *
- * Returns the region identifier to use when addressing memory owned by
+/* Returns the region identifier to use when addressing memory owned by
  * `rank`, both for the dstm_ptr_t .region field and for the region
  * argument of dstm_get / dstm_put.
- *
- * If it turns out that your dstm_get/dstm_put actually want a *rank* in
- * that position (i.e. the old `dstm_put(rank, rank, ...)` form was
- * correct by design rather than by coincidence), change the body of
- * this one function to `return rank;` and nothing else in the file
- * needs to move.
  */
 static inline int dgraph_region_of(const dstm_dgraph_t *g, int rank)
 {
         return g->rank_region_id[rank];
 }
 
-/* Build a dstm_ptr_t pointing into `region_id` at byte offset `off`. */
-static inline dstm_ptr_t make_ptr(int region_id, intptr_t off)
+/* Free every heap array hanging off g, plus g itself. Safe on partially
+ * constructed g: all outer arrays are calloc'd, inner entries NULL. */
+static void dgraph_free_all(dstm_dgraph_t *g)
 {
-        dstm_ptr_t p;
-        p.region = region_id;
-        p.offset = off;
-        return p;
+        int ws = g->world_size;   /* set early in create, valid in both paths */
+
+        if (g->rank_row_ptrs) {
+                for (int r = 0; r < ws; r++)
+                        free(g->rank_row_ptrs[r]);
+                free(g->rank_row_ptrs);
+        }
+        if (g->rank_edge_dsts) {
+                for (int r = 0; r < ws; r++)
+                        free(g->rank_edge_dsts[r]);
+                free(g->rank_edge_dsts);
+        }
+        free(g->row_ptrs);
+        free(g->rank_local_vertices);
+        free(g->rank_local_edge_count);
+        free(g->rank_vertex_state_off);
+        free(g->rank_edge_row_ptr_off);
+        free(g->rank_edge_slot_off);
+        free(g->rank_edge_slot_stride);
+        free(g->rank_region_id);
+        free(g->rank_vertex_offsets);
+        free(g->is_neighbor_rank);
+        free(g->neighbor_ranks);
+        free(g);
 }
 
 /* ---------------------------------------------------------------------------
@@ -277,31 +290,6 @@ static int dgraph_seed_initial_state(dstm_dgraph_t *g,
                                   local_edge_states);
 
         return DSTM_SUCCESS;
-}
-
-/* ---------------------------------------------------------------------------
- * Collective error consensus
- *
- * Any rank that bails out of create() must make every other rank bail
- * too, otherwise the survivors block forever in the next collective.
- * Call at each point where a per-rank failure could otherwise cause
- * divergence.
- *
- * Returns the error this rank should propagate: its own if it failed,
- * -DSTM_FAILURE if a peer failed, 0 if everybody is healthy.
- * ------------------------------------------------------------------------- */
-static int dgraph_consensus(MPI_Comm comm, int err)
-{
-        int local_bad = (err != 0) ? 1 : 0;
-        int any_bad   = 0;
-
-        if (MPI_Allreduce(&local_bad, &any_bad, 1, MPI_INT, MPI_MAX, comm)
-            != MPI_SUCCESS)
-                return (err != 0) ? err : -DSTM_FAILURE;
-
-        if (err != 0)
-                return err;
-        return any_bad ? -DSTM_FAILURE : 0;
 }
 
 /* ---------------------------------------------------------------------------
@@ -546,7 +534,7 @@ int dstm_dgraph_create(dstm_dgraph_t **ret,
 consensus_setup:
         /* Everything above is rank-local. Agree on success before the
          * first collective, so a lone failure can't deadlock the job. */
-        err = dgraph_consensus(comm, err);
+        err = dstm_msg_consensus(comm, err);
         if (err != 0)
                 goto err_cleanup;
 
@@ -620,7 +608,7 @@ consensus_setup:
         free(all_info);
         all_info = NULL;
 
-        err = dgraph_consensus(comm, err);
+        err = dstm_msg_consensus(comm, err);
         if (err != 0)
                 goto err_cleanup;
 
@@ -765,7 +753,7 @@ consensus_setup:
                 }
         }
 
-        err = dgraph_consensus(comm, err);
+        err = dstm_msg_consensus(comm, err);
         if (err != 0)
                 goto err_cleanup;
 
@@ -830,21 +818,15 @@ consensus_setup:
                 free(reqs);
         }
 
-        err = dgraph_consensus(comm, err);
+        err = dstm_msg_consensus(comm, err);
         if (err != 0)
                 goto err_cleanup;
 
-        /* --- Seed initial state into version 0 ---------------------------
-         *
-         * No dstm_put anywhere in this function. Version 0's buffer is
-         * written directly; see dgraph_seed_initial_state for why that is
-         * both necessary (version buffers are separate and uninitialized)
-         * and sufficient (dstm_get reads exactly this buffer). */
         err = dgraph_seed_initial_state(g, local_edge_dsts,
                                         local_vertex_states,
                                         local_edge_states);
 
-        err = dgraph_consensus(comm, err);
+        err = dstm_msg_consensus(comm, err);
         if (err != 0)
                 goto err_cleanup;
 
@@ -854,40 +836,15 @@ consensus_setup:
 err_cleanup:
         free(all_info);
 
-        /* Replicated topology cache. Outer arrays were calloc'd, so any
-         * inner entry not yet allocated is NULL. */
-        if (g->rank_row_ptrs) {
-                for (int r = 0; r < world_size; r++)
-                        free(g->rank_row_ptrs[r]);
-                free(g->rank_row_ptrs);
-        }
-        if (g->rank_edge_dsts) {
-                for (int r = 0; r < world_size; r++)
-                        free(g->rank_edge_dsts[r]);
-                free(g->rank_edge_dsts);
-        }
-
-        free(g->row_ptrs);
-
         /* Backing region, only if we got as far as allocating it. */
         if (region_allocated) {
-                dstm_ptr_t base_p = make_ptr(g->region_id,
+                dstm_ptr_t base_p = dstm_ptr_make(g->region_id,
                                              g->vertex_state_off);
                 dstm_region_free(g->region, base_p);
         }
 
-        free(g->rank_local_vertices);
-        free(g->rank_local_edge_count);
-        free(g->rank_vertex_state_off);
-        free(g->rank_edge_row_ptr_off);
-        free(g->rank_edge_slot_off);
-        free(g->rank_edge_slot_stride);
-        free(g->rank_region_id);
-        free(g->rank_vertex_offsets);
-        free(g->is_neighbor_rank);
-        free(g->neighbor_ranks);
+        dgraph_free_all(g);
 
-        free(g);
         *ret = NULL;
         return err;
 }
@@ -923,32 +880,11 @@ void dstm_dgraph_destroy(dstm_dgraph_t **dgraph)
 
         dstm_dgraph_t *g = *dgraph;
 
-        dstm_ptr_t base_p = make_ptr(g->region_id, g->vertex_state_off);
+        dstm_ptr_t base_p = dstm_ptr_make(g->region_id, g->vertex_state_off);
         dstm_region_free(g->region, base_p);
 
-        if (g->rank_row_ptrs) {
-                for (int r = 0; r < g->world_size; r++)
-                        free(g->rank_row_ptrs[r]);
-                free(g->rank_row_ptrs);
-        }
-        if (g->rank_edge_dsts) {
-                for (int r = 0; r < g->world_size; r++)
-                        free(g->rank_edge_dsts[r]);
-                free(g->rank_edge_dsts);
-        }
+        dgraph_free_all(g);
 
-        free(g->row_ptrs);
-        free(g->rank_vertex_offsets);
-        free(g->rank_local_vertices);
-        free(g->rank_local_edge_count);
-        free(g->rank_vertex_state_off);
-        free(g->rank_edge_row_ptr_off);
-        free(g->rank_edge_slot_off);
-        free(g->rank_edge_slot_stride);
-        free(g->rank_region_id);
-        free(g->is_neighbor_rank);
-        free(g->neighbor_ranks);
-        free(g);
         *dgraph = NULL;
 }
 
@@ -956,23 +892,41 @@ void dstm_dgraph_destroy(dstm_dgraph_t **dgraph)
  * Vertex state operations
  * ------------------------------------------------------------------------- */
 
+/* Resolve a vertex to its owning rank, region id, and the dstm_ptr_t
+ * addressing its versioned state. Mirror of resolve_edge_state. */
+static int resolve_vertex_state(const dstm_dgraph_t *g, size_t vertex_id,
+                                int *out_rank, int *out_region,
+                                dstm_ptr_t *out_ptr)
+{
+        if (vertex_id >= g->total_vertices)
+                return -DSTM_EINVAL;
+
+        int    rank      = dgraph_find_rank(g, vertex_id);
+        size_t local_idx = vertex_id - g->rank_vertex_offsets[rank];
+        intptr_t off = g->rank_vertex_state_off[rank] +
+                       (intptr_t)(local_idx * g->vertex_state_size);
+
+        *out_rank   = rank;
+        *out_region = dgraph_region_of(g, rank);
+        *out_ptr    = dstm_ptr_make(*out_region, off);
+        return DSTM_SUCCESS;
+}
+
 int dstm_dgraph_vertex_get(dstm_dgraph_t *g, size_t vertex_id, void *dst,
                            dstm_time_t time, dstm_time_t delta)
 {
         if (g == NULL || dst == NULL)
                 return -DSTM_EINVAL;
-        if (vertex_id >= g->total_vertices)
-                return -DSTM_EINVAL;
         if (g->vertex_state_size == 0)
-                return DSTM_SUCCESS;
+                return (vertex_id < g->total_vertices)
+                               ? DSTM_SUCCESS : -DSTM_EINVAL;
 
-        int    rank      = dgraph_find_rank(g, vertex_id);
-        int    region    = dgraph_region_of(g, rank);
-        size_t local_idx = vertex_id - g->rank_vertex_offsets[rank];
-        intptr_t off = g->rank_vertex_state_off[rank] +
-                       (intptr_t)(local_idx * g->vertex_state_size);
+        int rank, region;
+        dstm_ptr_t src;
+        int rc = resolve_vertex_state(g, vertex_id, &rank, &region, &src);
+        if (rc != DSTM_SUCCESS)
+                return rc;
 
-        dstm_ptr_t src = make_ptr(region, off);
         return dstm_get(rank, region, time, delta, dst, src,
                         g->vertex_state_size);
 }
@@ -982,18 +936,16 @@ int dstm_dgraph_vertex_put(dstm_dgraph_t *g, size_t vertex_id, void *src,
 {
         if (g == NULL || src == NULL)
                 return -DSTM_EINVAL;
-        if (vertex_id >= g->total_vertices)
-                return -DSTM_EINVAL;
         if (g->vertex_state_size == 0)
-                return DSTM_SUCCESS;
+                return (vertex_id < g->total_vertices)
+                               ? DSTM_SUCCESS : -DSTM_EINVAL;
 
-        int    rank      = dgraph_find_rank(g, vertex_id);
-        int    region    = dgraph_region_of(g, rank);
-        size_t local_idx = vertex_id - g->rank_vertex_offsets[rank];
-        intptr_t off = g->rank_vertex_state_off[rank] +
-                       (intptr_t)(local_idx * g->vertex_state_size);
+        int rank, region;
+        dstm_ptr_t dst;
+        int rc = resolve_vertex_state(g, vertex_id, &rank, &region, &dst);
+        if (rc != DSTM_SUCCESS)
+                return rc;
 
-        dstm_ptr_t dst = make_ptr(region, off);
         return dstm_put(rank, region, time, delta, dst, src,
                         g->vertex_state_size);
 }
@@ -1123,7 +1075,7 @@ int dstm_dgraph_edge_get(dstm_dgraph_t *g, size_t u, size_t v, void *dst,
                 return DSTM_SUCCESS;
 
         int        region = dgraph_region_of(g, rank);
-        dstm_ptr_t src    = make_ptr(region, off);
+        dstm_ptr_t src    = dstm_ptr_make(region, off);
 
         return dstm_get(rank, region, time, delta, dst, src,
                         g->edge_state_size);
@@ -1145,7 +1097,7 @@ int dstm_dgraph_edge_put(dstm_dgraph_t *g, size_t u, size_t v, void *src,
                 return DSTM_SUCCESS;
 
         int        region = dgraph_region_of(g, rank);
-        dstm_ptr_t dst    = make_ptr(region, off);
+        dstm_ptr_t dst    = dstm_ptr_make(region, off);
 
         return dstm_put(rank, region, time, delta, dst, src,
                         g->edge_state_size);
