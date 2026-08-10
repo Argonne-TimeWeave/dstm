@@ -64,7 +64,7 @@ EXAMPLES_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 declare -A BUILDS=(
     [dstm]="$EXAMPLES_DIR/simple_dstm/airports"
-    [ross]="$SCRIPT_DIR/airport"
+    [ross]="$EXAMPLES_DIR/ROSS/airport"
 )
 
 # Engines to run at every (P, planes) point.
