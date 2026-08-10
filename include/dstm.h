@@ -912,6 +912,17 @@ int dstm_dgraph_distance_from_topology(dstm_distance_t **ret,
                                        const size_t *local_edge_dsts,
                                        int default_delta);
 
+typedef int (*dstm_dgraph_edge_weight_fn)(
+        size_t src_vid, size_t dst_vid,
+        const void *src_vertex_state,
+        const void *dst_vertex_state,
+        const void *edge_state,
+        void *user);
+
+int dstm_dgraph_derive_distance_weighted(
+        dstm_dgraph_t *g, dstm_distance_t **ret, int default_delta,
+        dstm_dgraph_edge_weight_fn weight_fn, void *user);
+
 /* opaque type for pointers into regions */
 #define DSTM_REGIONID_INVALID -1
 #define DSTM_REGIONID_LOCAL -2

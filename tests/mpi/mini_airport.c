@@ -51,14 +51,6 @@
  * INVARIANT
  *   Total planes (on ground + pending + in flight on edges) is conserved
  *   and equals total_airports * INITIAL_PLANES.
- *
- * REQUIRES
- *   dstm_dgraph_distance_from_topology(), which derives a distance
- *   matrix from raw CSR arrays with no live session. It is needed
- *   because dstm_dgraph_create issues dstm_put calls and therefore
- *   requires an already-started session -- a matrix derived from a
- *   finished graph can never be the matrix that graph's session was
- *   started with.
  */
 
 #include <assert.h>

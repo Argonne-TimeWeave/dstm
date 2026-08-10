@@ -493,6 +493,284 @@ static void test_vertex_get_or_default(void)
         session_end(&dist, t_put + 1);
 }
 
+/*******************************************************************************
+ * Distance-matrix derivation
+ *
+ * Covers all three entry points:
+ *   dstm_dgraph_distance_from_topology   (pre-session, raw CSR, constant)
+ *   dstm_dgraph_derive_distance          (post-hoc, constant default_delta)
+ *   dstm_dgraph_derive_distance_weighted (post-hoc, per-edge weight callback)
+ *
+ * Invariants asserted throughout:
+ *   - matrix is rank x rank (size == world_size)
+ *   - diagonal is 0
+ *   - unreachable rank pairs are -1
+ *   - reachable pairs carry the MIN weight over all edges crossing that
+ *     rank boundary in either direction
+ ******************************************************************************/
+
+/* Fetch cell (i, j) from a derived distance matrix with bounds checks. */
+static int dist_at(dstm_distance_t *d, int i, int j)
+{
+        assert(d != NULL);
+        assert((size_t)dstm_distance_size(d) == (size_t)world_size);
+        return dstm_distance_get(d, i, j);
+}
+
+/* Assert the universal structural invariants: square, zero diagonal. */
+static void assert_distance_shape(dstm_distance_t *d)
+{
+        assert((size_t)dstm_distance_size(d) == (size_t)world_size);
+        for (int i = 0; i < world_size; i++)
+                assert(dist_at(d, i, i) == 0);
+}
+
+/* --- from_topology: pre-session, constant default_delta ------------------
+ *
+ * Build the SAME ring topology that build_ring() uses, but describe it
+ * with the raw local CSR arrays that distance_from_topology consumes.
+ * This runs with no live graph and no started session. Every rank's
+ * single vertex points to the next rank's base vertex, so the induced
+ * rank graph is itself a directed ring; symmetrized + min-reduced it
+ * couples each rank to its two ring neighbors at exactly default_delta,
+ * and leaves all other pairs unreachable (-1).
+ *
+ * Requires world_size >= 3 for the "far" pairs to be genuinely
+ * unreachable; for world_size < 3 every pair is a neighbor and we only
+ * check shape + reachability. */
+static void test_distance_from_topology_ring(void)
+{
+        const int    default_delta = 5;
+        const size_t per_rank      = 1; /* one vertex per rank */
+        size_t total               = per_rank * (size_t)world_size;
+
+        /* One vertex, out-degree 1, pointing at the next rank's vertex. */
+        size_t degrees[1] = { 1 };
+        size_t dsts[1]    = { (per_rank * (size_t)rank + 1) % total };
+
+        dstm_distance_t *d = NULL;
+        int rc = dstm_dgraph_distance_from_topology(&d, per_rank, degrees,
+                                                    dsts, default_delta);
+        assert(rc == DSTM_SUCCESS);
+        assert(d != NULL);
+        assert_distance_shape(d);
+
+        for (int i = 0; i < world_size; i++) {
+                for (int j = 0; j < world_size; j++) {
+                        if (i == j)
+                                continue;
+
+                        int prev = (i - 1 + world_size) % world_size;
+                        int next = (i + 1) % world_size;
+                        int adjacent = (j == prev || j == next);
+
+                        int cell = dist_at(d, i, j);
+                        if (adjacent) {
+                                assert(cell == default_delta);
+                        } else if (world_size >= 3) {
+                                /* Genuinely non-adjacent only exists
+                                 * for a ring of 3+ ranks. */
+                                assert(cell == -1);
+                        }
+                }
+        }
+
+        dstm_distance_destroy(&d);
+}
+
+/* --- from_topology: EINVAL surface ---------------------------------------
+ * NULL ret, non-positive default_delta, and NULL degrees with
+ * local_vertices > 0 must all be rejected before any collective. */
+static void test_distance_from_topology_einval(void)
+{
+        dstm_distance_t *d = NULL;
+        size_t degrees[1]  = { 0 };
+
+        assert(dstm_dgraph_distance_from_topology(NULL, 1, degrees, NULL, 5)
+               == -DSTM_EINVAL);
+        assert(dstm_dgraph_distance_from_topology(&d, 1, degrees, NULL, 0)
+               == -DSTM_EINVAL);
+        assert(dstm_dgraph_distance_from_topology(&d, 1, NULL, NULL, 5)
+               == -DSTM_EINVAL);
+        assert(d == NULL);
+}
+
+/* --- derive_distance: constant default_delta over a built ring ----------
+ *
+ * derive_distance(g, ...) with the ring graph must produce the SAME
+ * matrix as from_topology on the equivalent CSR, because a NULL-callback
+ * weighted derive is exactly the constant-default_delta case. We assert
+ * the ring coupling directly rather than comparing objects (there is no
+ * matrix-equality API), which also confirms the two entry points agree. */
+static void test_derive_distance_ring(void)
+{
+        const int    default_delta = 7;
+        const size_t per_rank      = 1;
+
+        /* derive_distance issues no puts, but build_ring/create does, so
+         * we need a live session. */
+        dstm_distance_t *sess = session_begin();
+        dstm_dgraph_t   *g    = build_ring(per_rank);
+
+        dstm_distance_t *d = NULL;
+        int rc = dstm_dgraph_derive_distance(g, &d, default_delta);
+        assert(rc == DSTM_SUCCESS);
+        assert(d != NULL);
+        assert_distance_shape(d);
+
+        for (int i = 0; i < world_size; i++) {
+                for (int j = 0; j < world_size; j++) {
+                        if (i == j)
+                                continue;
+                        int prev = (i - 1 + world_size) % world_size;
+                        int next = (i + 1) % world_size;
+                        int adjacent = (j == prev || j == next);
+                        int cell = dist_at(d, i, j);
+                        if (adjacent)
+                                assert(cell == default_delta);
+                        else if (world_size >= 3)
+                                assert(cell == -1);
+                }
+        }
+
+        dstm_distance_destroy(&d);
+        dstm_dgraph_destroy(&g);
+        session_end(&sess, 0);
+}
+
+/* --- derive_distance: EINVAL surface ------------------------------------- */
+static void test_derive_distance_einval(void)
+{
+        dstm_distance_t *sess = session_begin();
+        dstm_dgraph_t   *g    = build_ring(1);
+        dstm_distance_t *d    = NULL;
+
+        assert(dstm_dgraph_derive_distance(NULL, &d, 5) == -DSTM_EINVAL);
+        assert(dstm_dgraph_derive_distance(g, NULL, 5) == -DSTM_EINVAL);
+        assert(dstm_dgraph_derive_distance(g, &d, 0) == -DSTM_EINVAL);
+        assert(d == NULL);
+
+        dstm_dgraph_destroy(&g);
+        session_end(&sess, 0);
+}
+
+/* --- weighted callback: NULL fn reproduces the constant case ------------- */
+static void test_derive_weighted_null_matches_constant(void)
+{
+        const int default_delta = 9;
+
+        dstm_distance_t *sess = session_begin();
+        dstm_dgraph_t   *g    = build_ring(1);
+
+        dstm_distance_t *dc = NULL; /* via derive_distance   */
+        dstm_distance_t *dw = NULL; /* via weighted, fn=NULL */
+
+        int rc = dstm_dgraph_derive_distance(g, &dc, default_delta);
+        assert(rc == DSTM_SUCCESS);
+        rc = dstm_dgraph_derive_distance_weighted(g, &dw, default_delta,
+                                                  NULL, NULL);
+        assert(rc == DSTM_SUCCESS);
+
+        assert((size_t)dstm_distance_size(dc) ==
+               (size_t)dstm_distance_size(dw));
+        for (int i = 0; i < world_size; i++)
+                for (int j = 0; j < world_size; j++)
+                        assert(dist_at(dc, i, j) == dist_at(dw, i, j));
+
+        dstm_distance_destroy(&dc);
+        dstm_distance_destroy(&dw);
+        dstm_dgraph_destroy(&g);
+        session_end(&sess, 0);
+}
+
+/* Weight callback: distance = the edge's initial (seeded) int weight.
+ * Reads static edge state only -- consistent with distance_from_topology,
+ * which has no session and no dynamic state to read. */
+static int edge_weight_from_state(size_t src_vid, size_t dst_vid,
+                                  const void *src_vs, const void *dst_vs,
+                                  const void *edge_s, void *user)
+{
+        (void)src_vid; (void)dst_vid; (void)src_vs; (void)dst_vs; (void)user;
+        assert(edge_s != NULL);
+        int w = *(const int *)edge_s;
+        assert(w > 0);
+        return w;
+}
+
+/* Fixed graph, but with initial edge weights SEEDED at create time
+ * (local_edge_states), not written via edge_put. The weight callback reads
+ * this static state. All edges are intra-rank, so the induced rank matrix
+ * has no cross-rank coupling: diagonal 0, everything else -1, independent
+ * of the weights. This isolates "weights are read from static state" from
+ * "cross-rank min-reduction". */
+static void test_derive_weighted_local_only(void)
+{
+        size_t off = FIXED_PER_RANK * (size_t)rank;
+
+        size_t degrees[FIXED_PER_RANK] = { 2, 1, 0 };
+        size_t dsts[FIXED_LOCAL_EDGES] = { off + 1, off + 2, off + 2 };
+
+        /* Seed distinct positive weights, in edge-slot order. Slot order
+         * matches CSR: vertex0's edges {off+1, off+2} then vertex1's {off+2}. */
+        int edge_states[FIXED_LOCAL_EDGES] = { 3, 8, 4 };
+
+        dstm_distance_t *sess = session_begin();
+
+        dstm_dgraph_t *g = NULL;
+        int rc = dstm_dgraph_create(&g, sizeof(int), sizeof(int),
+                                    FIXED_PER_RANK, degrees, dsts,
+                                    NULL, edge_states);
+        assert(rc == DSTM_SUCCESS);
+        assert(g != NULL);
+
+        dstm_distance_t *d = NULL;
+        rc = dstm_dgraph_derive_distance_weighted(
+                g, &d, /*default_delta*/ 1, edge_weight_from_state, NULL);
+        assert(rc == DSTM_SUCCESS);
+        assert(d != NULL);
+        assert_distance_shape(d);
+
+        if (world_size >= 2) {
+                for (int i = 0; i < world_size; i++)
+                        for (int j = 0; j < world_size; j++)
+                                if (i != j)
+                                        assert(dist_at(d, i, j) == -1);
+        }
+
+        dstm_distance_destroy(&d);
+        dstm_dgraph_destroy(&g);
+        session_end(&sess, 0);   /* no puts issued beyond create's seed */
+}
+
+/* --- weighted callback: bad weight (<= 0) is rejected -------------------- */
+static int edge_weight_bad(size_t src_vid, size_t dst_vid,
+                           const void *src_vs, const void *dst_vs,
+                           const void *edge_s, void *user)
+{
+        (void)src_vid; (void)dst_vid; (void)src_vs; (void)dst_vs;
+        (void)edge_s;  (void)user;
+        return 0; /* invalid: weights must be > 0 */
+}
+
+/* Only meaningful when this rank actually has at least one edge to walk,
+ * which the ring guarantees (one out-edge per vertex). A callback that
+ * returns <= 0 must make derive_weighted fail with -DSTM_EINVAL. */
+static void test_derive_weighted_bad_weight(void)
+{
+        dstm_distance_t *sess = session_begin();
+        dstm_dgraph_t   *g    = build_ring(1);
+
+        dstm_distance_t *d = NULL;
+        int rc = dstm_dgraph_derive_distance_weighted(g, &d, 1,
+                                                      edge_weight_bad, NULL);
+        assert(rc == -DSTM_EINVAL);
+        assert(d == NULL);
+
+        dstm_dgraph_destroy(&g);
+        session_end(&sess, 0);
+}
+
+
 /* Wrap a void() test in its own dstm session so that every call to
  * dstm_dgraph_create publishes its initial state at (t=0, delta=0) on
  * a fresh timeline.  Multiple graphs in a single session collide at
@@ -550,6 +828,17 @@ int main(int argc, char *argv[])
         test_vertex_roundtrip_cross_rank();
         test_edge_roundtrip_local();
         test_vertex_get_or_default();
+
+        /* distance derivation: from_topology runs WITHOUT a session. */
+        test_distance_from_topology_ring();
+        test_distance_from_topology_einval();
+
+        /* distance derivation: post-hoc paths open their own sessions. */
+        test_derive_distance_ring();
+        test_derive_distance_einval();
+        test_derive_weighted_null_matches_constant();
+        test_derive_weighted_local_only();
+        test_derive_weighted_bad_weight();
 
         dstm_finalize();
         MPI_Finalize();

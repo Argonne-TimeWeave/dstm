@@ -1164,25 +1164,54 @@ int dstm_dgraph_neighbors_get(dstm_dgraph_t *g, size_t u,
 /* ---------------------------------------------------------------------------
  * Distance matrix derivation
  *
+ * Produces a rank x rank dstm_distance_t. Cell (i, j) is:
+ *   0                on the diagonal,
+ *   min edge weight  over every edge crossing the i<->j rank boundary in
+ *                    either direction (edges are undirected for
+ *                    synchronization: if i can write to j, j's progress
+ *                    constrains i), and
+ *   -1               when no edge connects the two ranks.
+ *
+ * "min" is the correct reduction for parallel / opposing edges: the
+ * smallest weight is the most constrained, and the most constrained edge
+ * governs how tightly the two ranks must stay synchronized.
+ *
  * Two entry points:
  *
  *   dstm_dgraph_distance_from_topology  -- operates on the raw CSR
  *      arrays, requires no graph and no live session. Use this one:
  *      dstm_dgraph_create issues dstm_put calls, so it needs a started
  *      session, which means a matrix derived from an existing graph can
- *      never be the matrix that graph's session was started with.
+ *      never be the matrix that graph's session was started with. It runs
+ *      before any state exists, so it cannot support a state-reading
+ *      weight callback: every edge weighs default_delta.
  *
- *   dstm_dgraph_derive_distance -- post-hoc convenience over an
- *      already-built graph. Useful for inspection or for a subsequent
- *      session, not for the one hosting the graph.
+ *   dstm_dgraph_derive_distance{,_weighted} -- post-hoc convenience over
+ *      an already-built graph. Useful for inspection or for a subsequent
+ *      session, not for the one hosting the graph. Because the graph is
+ *      built, per-edge weights may be computed from live vertex/edge
+ *      state via a caller-supplied callback.
  * ------------------------------------------------------------------------- */
 
-/* Shared tail: given this rank's boolean row of touched ranks, produce
+/* Sentinel stored in a per-rank weight row / gathered matrix meaning "no
+ * edge to this rank". Real weights are required to be > 0, so 0 is free. */
+#define DGRAPH_NO_EDGE_W 0
+
+/* Accumulate one edge's weight into the per-destination-rank row, keeping
+ * the minimum. `w` must be > 0. */
+static inline void row_accumulate(int *row, int dr, int w)
+{
+        int cur = row[dr];
+        if (cur == DGRAPH_NO_EDGE_W || w < cur)
+                row[dr] = w;
+}
+
+/* Shared tail: given this rank's per-destination-rank min-weight row
+ * (DGRAPH_NO_EDGE_W where this rank has no edge into that rank), produce
  * the symmetric distance matrix. Consumes nothing, frees nothing the
  * caller owns. */
 static int build_distance_from_row(const int *local_row, int world_size,
-                                   MPI_Comm comm, int default_delta,
-                                   dstm_distance_t **ret)
+                                   MPI_Comm comm, dstm_distance_t **ret)
 {
         int *full = calloc((size_t)world_size * (size_t)world_size,
                            sizeof(int));
@@ -1202,20 +1231,29 @@ static int build_distance_from_row(const int *local_row, int world_size,
                 return -DSTM_ENOMEM;
         }
 
-        /* Symmetrize (reachability is undirected for synchronization
-         * purposes: if i can write to j, j's progress constrains i) and
-         * encode: 0 on the diagonal, default_delta on reachable
-         * off-diagonal pairs, -1 for unreachable. */
+        /* Symmetrize + encode. full[i*ws + j] is rank i's min weight into
+         * rank j (DGRAPH_NO_EDGE_W if none). The undirected cell is the
+         * min over the two directions, skipping the no-edge sentinel so a
+         * missing reverse edge does not poison a real forward one. */
         for (int i = 0; i < world_size; i++) {
                 for (int j = 0; j < world_size; j++) {
                         int v;
                         if (i == j) {
                                 v = 0;
                         } else {
-                                int reachable =
-                                        full[(size_t)i * world_size + j] ||
-                                        full[(size_t)j * world_size + i];
-                                v = reachable ? default_delta : -1;
+                                int a = full[(size_t)i * world_size + j];
+                                int b = full[(size_t)j * world_size + i];
+                                int has_a = (a != DGRAPH_NO_EDGE_W);
+                                int has_b = (b != DGRAPH_NO_EDGE_W);
+
+                                if (has_a && has_b)
+                                        v = (a < b) ? a : b;
+                                else if (has_a)
+                                        v = a;
+                                else if (has_b)
+                                        v = b;
+                                else
+                                        v = -1;
                         }
                         matrix[(size_t)i * world_size + j] = v;
                 }
@@ -1273,6 +1311,9 @@ int dstm_dgraph_distance_from_topology(dstm_distance_t **ret,
         }
         offsets[world_size] = acc;
 
+        /* No live state at topology time: every edge weighs default_delta.
+         * row[] holds the constant for any rank we touch, sentinel
+         * elsewhere. */
         {
                 const size_t *cursor = local_edge_dsts;
                 for (size_t i = 0; i < local_vertices; i++) {
@@ -1287,22 +1328,61 @@ int dstm_dgraph_distance_from_topology(dstm_distance_t **ret,
                                 int dr = find_rank_in_offsets(offsets,
                                                               world_size,
                                                               cursor[k]);
-                                row[dr] = 1;
+                                row_accumulate(row, dr, default_delta);
                         }
                         cursor += deg;
                 }
         }
 
-        int rc = build_distance_from_row(row, world_size, comm, default_delta,
-                                         ret);
+        int rc = build_distance_from_row(row, world_size, comm, ret);
         free(counts);
         free(offsets);
         free(row);
         return rc;
 }
 
-int dstm_dgraph_derive_distance(dstm_dgraph_t *g, dstm_distance_t **ret,
-                                int default_delta)
+/* Fetch an edge's stored user_state into `buf` (size g->edge_state_size).
+ * Returns DSTM_SUCCESS with buf populated, or a negative error. `slot` is
+ * a global edge-slot index into self's edge slab. Reads self-owned state
+ * directly from the region's live buffer: derive_distance only walks self's
+ * own edges, so no remote get is needed. */
+static int weighted_edge_state(const dstm_dgraph_t *g, dgraph_vid_t slot,
+                               void *buf)
+{
+        if (g->edge_state_size == 0)
+                return DSTM_SUCCESS;
+        if (g->region == NULL || g->region->buffer == NULL)
+                return -DSTM_ENOTLOCAL;
+
+        const char *es = (const char *)g->region->buffer + g->edge_slot_off;
+        const char *entry = es + (size_t)slot * g->edge_slot_stride;
+
+        memcpy(buf, entry + sizeof(dgraph_vid_t), g->edge_state_size);
+        return DSTM_SUCCESS;
+}
+
+/* Fetch local vertex `local_idx`'s stored state into `buf` (size
+ * g->vertex_state_size) from self's live region buffer. */
+static int weighted_vertex_state(const dstm_dgraph_t *g, size_t local_idx,
+                                 void *buf)
+{
+        if (g->vertex_state_size == 0)
+                return DSTM_SUCCESS;
+        if (g->region == NULL || g->region->buffer == NULL)
+                return -DSTM_ENOTLOCAL;
+
+        const char *vs = (const char *)g->region->buffer + g->vertex_state_off;
+        const char *entry = vs + local_idx * g->vertex_state_size;
+
+        memcpy(buf, entry, g->vertex_state_size);
+        return DSTM_SUCCESS;
+}
+
+int dstm_dgraph_derive_distance_weighted(dstm_dgraph_t *g,
+                                         dstm_distance_t **ret,
+                                         int default_delta,
+                                         dstm_dgraph_edge_weight_fn weight_fn,
+                                         void *user)
 {
         if (g == NULL || ret == NULL || default_delta <= 0)
                 return -DSTM_EINVAL;
@@ -1316,21 +1396,109 @@ int dstm_dgraph_derive_distance(dstm_dgraph_t *g, dstm_distance_t **ret,
         if (local_row == NULL)
                 return -DSTM_ENOMEM;
 
+        /* Scratch for callback state. Only allocated when a callback is
+         * present and the corresponding slab is non-empty; NULL is a valid
+         * argument to the callback for a zero-size state. */
+        void *src_vs = NULL;
+        void *dst_vs = NULL;   /* dst vertex may be remote; see note below */
+        void *edge_s = NULL;
+        int   err    = DSTM_SUCCESS;
+
+        if (weight_fn != NULL) {
+                if (g->vertex_state_size > 0) {
+                        src_vs = malloc(g->vertex_state_size);
+                        dst_vs = malloc(g->vertex_state_size);
+                        if (src_vs == NULL || dst_vs == NULL) {
+                                err = -DSTM_ENOMEM;
+                                goto done;
+                        }
+                }
+                if (g->edge_state_size > 0) {
+                        edge_s = malloc(g->edge_state_size);
+                        if (edge_s == NULL) {
+                                err = -DSTM_ENOMEM;
+                                goto done;
+                        }
+                }
+        }
+
         const dgraph_vid_t *local_dsts = g->rank_edge_dsts[self];
         if (local_dsts != NULL) {
                 for (size_t i = 0; i < g->local_vertices; i++) {
                         dgraph_vid_t rs = g->row_ptrs[i];
                         dgraph_vid_t re = g->row_ptrs[i + 1];
+
+                        if (weight_fn != NULL) {
+                                err = weighted_vertex_state(g, i, src_vs);
+                                if (err != DSTM_SUCCESS)
+                                        goto done;
+                        }
+
                         for (dgraph_vid_t s = rs; s < re; s++) {
-                                int dr = dgraph_find_rank(
-                                        g, (size_t)local_dsts[s]);
-                                local_row[dr] = 1;
+                                size_t dst_vid = (size_t)local_dsts[s];
+                                int dr = dgraph_find_rank(g, dst_vid);
+                                int w  = default_delta;
+
+                                if (weight_fn != NULL) {
+                                        err = weighted_edge_state(g, s,
+                                                                  edge_s);
+                                        if (err != DSTM_SUCCESS)
+                                                goto done;
+
+                                        /* dst vertex state: only readable
+                                         * locally. When the destination is
+                                         * remote we pass NULL rather than a
+                                         * blocking remote get; a callback
+                                         * that needs remote dst state must
+                                         * tolerate NULL (documented). */
+                                        void *dvp = NULL;
+                                        if (g->vertex_state_size > 0 &&
+                                            dr == self) {
+                                                size_t l = dst_vid -
+                                                    g->local_vertex_offset;
+                                                err = weighted_vertex_state(
+                                                        g, l, dst_vs);
+                                                if (err != DSTM_SUCCESS)
+                                                        goto done;
+                                                dvp = dst_vs;
+                                        }
+
+                                        w = weight_fn(
+                                                (size_t)(g->local_vertex_offset
+                                                         + i),
+                                                dst_vid,
+                                                (g->vertex_state_size > 0)
+                                                        ? src_vs : NULL,
+                                                dvp,
+                                                (g->edge_state_size > 0)
+                                                        ? edge_s : NULL,
+                                                user);
+                                        if (w <= 0) {
+                                                err = -DSTM_EINVAL;
+                                                goto done;
+                                        }
+                                }
+
+                                row_accumulate(local_row, dr, w);
                         }
                 }
         }
 
-        int rc = build_distance_from_row(local_row, world_size, comm,
-                                         default_delta, ret);
+        err = build_distance_from_row(local_row, world_size, comm, ret);
+
+done:
+        free(src_vs);
+        free(dst_vs);
+        free(edge_s);
         free(local_row);
-        return rc;
+        return err;
+}
+
+int dstm_dgraph_derive_distance(dstm_dgraph_t *g, dstm_distance_t **ret,
+                                int default_delta)
+{
+        /* Constant-weight special case: NULL callback reproduces the
+         * original boolean-reachability -> default_delta / -1 matrix. */
+        return dstm_dgraph_derive_distance_weighted(g, ret, default_delta,
+                                                    NULL, NULL);
 }
