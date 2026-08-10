@@ -1,8 +1,0 @@
-
-Version activity per rank (total ranks seen: 1)
-rank  ticks   min   max     avg   r_avg   d_avg
-   0     64     0     2    1.95    0.98    0.97
-
-Global active-versions: min=0 max=2 avg=1.95  (across 64 rank-tick samples)
-
-Detailed per-(rank, t) CSV written to: stdin.versions.csv
