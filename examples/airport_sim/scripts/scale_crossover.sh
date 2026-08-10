@@ -33,7 +33,7 @@ set -u
 # ---------- Config ----------
 RANKS=(4 16 64 256)
 PLANES=(1 4 16 64 256 1024 4096 16384)
-NODES=8
+NODES=1
 TOTAL_AIRPORTS=1024
 TIMESTEPS=100
 TRIALS=3                            # measured trials (+1 discarded warm-up)
@@ -57,7 +57,7 @@ EXAMPLES_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 declare -A BUILDS=(
     [dstm]="$EXAMPLES_DIR/simple_dstm/airports"
-    [ross]="$SCRIPT_DIR/airport"
+    [ross]="$EXAMPLES_DIR/ROSS/airport"
 )
 
 # Engines to run at every (P, planes) point.
