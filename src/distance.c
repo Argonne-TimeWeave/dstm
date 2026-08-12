@@ -656,7 +656,7 @@ int dstm_distance_create_from_matrix(dstm_distance_t **ret, size_t size,
 		if (matrix[i * size + i] != 0)
 			goto err_inval;
 		for (size_t j = 0; j < size; j++) {
-			if (matrix[i * size + j] < 0)
+			if (matrix[i * size + j] < -1) //-1 represents two ranks with no edge
 				goto err_inval;
 		}
 	}

@@ -127,6 +127,15 @@ int dstm_msg_recvany(MPI_Status status, dstm_msg_t *msg);
 
 int dstm_msg_test(dstm_msg_t msg);
 
+/* Collective agreement on failure across @p comm. Given this rank's error
+ * code @p err, returns the code this rank should propagate: its own if it
+ * failed, -DSTM_FAILURE if any peer failed, 0 if all ranks are healthy.
+ *
+ * Must be called by every rank at matching points during a collective
+ * operation, so that a single rank's local failure cannot leave peers
+ * blocked forever in a later collective. */
+int dstm_msg_consensus(MPI_Comm comm, int err);
+
 json_t *dstm_msg_to_json(dstm_msg_t *msg);
 
 #define dstm_log_msg(level, label, msg)                                        \

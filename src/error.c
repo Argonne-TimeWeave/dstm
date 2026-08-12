@@ -24,6 +24,7 @@ static const char *const dstm_error_strings[] = {
         [DSTM_ENOTSUP] = "Operation not supported",
         [DSTM_EPERM] = "Insufficient permissions",
         [DSTM_ENOTFOUND] = "Value not found",
+        [DSTM_EEXIST] = "Resource already exists",
 };
 
 const char *dstm_strerror(const int err)

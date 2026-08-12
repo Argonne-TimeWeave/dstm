@@ -69,6 +69,7 @@ libdstm_la_SOURCES = \
 		    src/ops.c \
 		    src/msg.c \
 		    src/region.c \
+            src/dgraph.c \
 		    src/request.c
 
 libdstm_la_LIBADD = $(LTLIBOBJS) $(JANSSON_LIBS)
