@@ -893,14 +893,20 @@ int dstm_dgraph_derive_distance(dstm_dgraph_t *dgraph,
 
 
 /**
- * Build a DSTM distance matrix directly from local CSR topology,
- * without requiring an existing dgraph or a started session.
+ * Build a DSTM distance matrix directly from local CSR topology.
  *
- * Use this instead of dstm_dgraph_derive_distance when the matrix is
- * needed to start the very session that will host the graph:
- * dstm_dgraph_create publishes initial state via dstm_put and therefore
- * requires a live session, so a matrix derived from a finished graph
- * can never be that session's matrix.
+ * Takes the same local_vertices / local_out_degrees / local_edge_dsts
+ * arrays that will later be handed to dstm_dgraph_create, and derives
+ * the rank-level distance matrix from them without a dstm_dgraph_t.
+ *
+ * Requires only that dstm_init / dstm_init_comm has completed. The
+ * DSTM communicator is live from that point on, including between
+ * sessions, so this may be called before or after dstm_start
+ *
+ * No graph state exists at this point, so every edge crossing a rank
+ * boundary weighs @p default_delta. Use
+ * dstm_dgraph_derive_distance_weighted on a built graph when per-edge
+ * weights must come from vertex or edge state.
  *
  * Collective; all ranks must call.
  *
