@@ -1,1 +1,1 @@
-SUBDIRS = simple_dstm
+SUBDIRS = simple_dstm graph_dstm
