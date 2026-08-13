@@ -153,6 +153,9 @@ int main(int argc, char *argv[])
     airport_init(&state, rank, num_ranks, na, grid,
                  planes_per_airport, topology, gates);
 
+    MPI_Barrier(MPI_COMM_WORLD);
+    double t_start = MPI_Wtime();
+
     /* Prime sentinel state at t=0 so first GETs don't stall. */
     for (dstm_time_t t = 0; t < timesteps; t++) {
         for (int g = 0; g < num_ranks; g++) {
@@ -163,9 +166,6 @@ int main(int argc, char *argv[])
             dstm_darray_put(state.gates, idx, &empty_gate, 0, t);
         }
     }
-
-    MPI_Barrier(MPI_COMM_WORLD);
-    double t_start = MPI_Wtime();
 
     for (dstm_time_t t = 0; t < timesteps; t++) {
         airport_timestep(&state, t);
