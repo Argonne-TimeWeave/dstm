@@ -1,0 +1,69 @@
+host:         cascade10
+date:         2026-08-13T15:52:32+00:00
+job id:       991809
+alloc source: COBALT_NODEFILE  (8 nodes, using <= 8)
+nodefile:     /var/tmp/cobalt.991809
+nodes:        cascade07 cascade08 cascade09 cascade10 cascade12 cascade13 cascade14 cascade15
+launcher:     mpirun [openmpi] 
+mpi prefix:   /soft/libraries/mpi/openmpi/4.1.1
+forwarded:    LD_LIBRARY_PATH PATH
+placement:    pack   max ppn 32
+darray exe:   /home/ncassarino/dstm/examples/airport_sim/simple_dstm/airports
+dgraph exe:   /home/ncassarino/dstm/examples/airport_sim/graph_dstm/airports
+modes:        weak strong
+impls:        darray graph    variants: base
+weak ladder:  4:1:4 16:1:16 64:2:32 256:8:32
+strong ladr:  4:1:4 16:1:16 32:1:32 64:2:32 128:4:32 256:8:32
+na/rank:      64 (weak)   total: 4096 (strong)
+planes:       4    timesteps: 256    reps: 3
+timeout:      600s
+
+===== weak scaling (median of 3 reps) =====
+impl     variant     ranks   layout      na    total  elapsed(s)       ts/s   speedup      eff
+-------------------------------------------------------------------------------------------------
+darray   base            4      1x4      64      256      0.0225   11382.51     1.00x     100%
+darray   base           16     1x16      64     1024      0.0427    6000.38     0.53x      53%
+darray   base           64     2x32      64     4096      0.1613    1586.63     0.14x      14%
+darray   base          256     8x32      64    16384      0.4056     631.12     0.06x       6%
+
+graph    base            4      1x4      64      256      0.0353    7249.29     1.00x     100%
+graph    base           16     1x16      64     1024      0.0798    3206.59     0.44x      44%
+graph    base           64     2x32      64     4096      0.1744    1467.56     0.20x      20%
+graph    base          256     8x32      64    16384      0.2427    1054.99     0.15x      15%
+
+  head to head (darray / dgraph elapsed; > 1.00 means dgraph is faster)
+   ranks   layout       darray       dgraph      ratio
+       4      1x4       0.0225       0.0353      0.64x
+      16     1x16       0.0427       0.0798      0.54x
+      64     2x32       0.1613       0.1744      0.92x
+     256     8x32       0.4056       0.2427      1.67x
+
+===== strong scaling (median of 3 reps) =====
+impl     variant     ranks   layout      na    total  elapsed(s)       ts/s   speedup      eff
+-------------------------------------------------------------------------------------------------
+darray   base            4      1x4    1024     4096      0.1860    1376.52     1.00x     100%
+darray   base           16     1x16     256     4096      0.1196    2141.31     1.56x      39%
+darray   base           32     1x32     128     4096      0.1177    2174.14     1.58x      20%
+darray   base           64     2x32      64     4096      0.1630    1570.36     1.14x       7%
+darray   base          128     4x32      32     4096      0.1908    1341.60     0.97x       3%
+darray   base          256     8x32      16     4096      0.3086     829.55     0.60x       1%
+
+graph    base            4      1x4    1024     4096      4.0934      62.54     1.00x     100%
+graph    base           16     1x16     256     4096      0.3593     712.48    11.39x     285%
+graph    base           32     1x32     128     4096      0.1965    1302.65    20.83x     260%
+graph    base           64     2x32      64     4096      0.1742    1469.32    23.50x     147%
+graph    base          128     4x32      32     4096      0.1233    2075.89    33.20x     104%
+graph    base          256     8x32      16     4096      0.1006    2545.63    40.69x      64%
+
+  head to head (darray / dgraph elapsed; > 1.00 means dgraph is faster)
+   ranks   layout       darray       dgraph      ratio
+       4      1x4       0.1860       4.0934      0.05x
+      16     1x16       0.1196       0.3593      0.33x
+      32     1x32       0.1177       0.1965      0.60x
+      64     2x32       0.1630       0.1742      0.94x
+     128     4x32       0.1908       0.1233      1.55x
+     256     8x32       0.3086       0.1006      3.07x
+
+runs recorded:           60
+failed:                  0  (timeouts: 0, launcher: 0)
+conservation mismatches: 0

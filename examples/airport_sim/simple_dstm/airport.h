@@ -4,7 +4,7 @@
 #include <dstm.h>
 #include <mpi.h>
 
-#define GATE_CAPACITY 1024
+#define GATE_CAPACITY 512
 
 typedef struct {
     int         dest_global;
