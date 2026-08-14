@@ -1,12 +1,10 @@
 IT WORKS ON A FIXED 4-CONNECTED GRID
     NEED TO REPLACE city_build WITH A DIFFERENT LOADER that produces:
         row_ptr, dst, esrc, vtx_off (per-vertex adjacency sorted ascending)
-    ALSO NEEDS: reverse edges must exist -- (v,u) whenever (u,v) does
+    reverse edges must exist -- (v,u) whenever (u,v) does
 
 FUTURE OPTIMIZATION only send state information that is new to that neighbor
         (local changes + anything you learned by relay that they haven't seen)
-
-ROUTING IS NOW DIJKSTRA OVER THE REPLICA, NOT GREEDY MANHATTAN
 
 # graph_traffic — routing under diffused, delayed congestion
 
@@ -37,6 +35,7 @@ Any rank count from 1 up to the vertex count works.
 | `--seed S`          | 42      | RNG seed                             |
 | `--replica-mode M`  | stale   | `stale` \| `oracle` \| `blind`       |
 | `--verbose`         | off     | per-tick progress from rank 0        |
+| `--quiet`           | off     | DSTM log level quiet (default: debug)|
 
 Prefer `--cars 0 --rate R` for measurement. A single t=0 burst is one
 decaying shockwave; congestion information is most valuable in steady state,
@@ -78,21 +77,10 @@ allreduce, without needing `MPI_Op_create`.
 
 ## Buffer layout
 
-One buffer per directed edge per tick, sized once at startup and constant
-for the run:
-
-```
-+-----------------------------------------------+
-| chan_header                                   |  40 B
-|   magic, tick, n_state, n_cars, cap,          |
-|   state_off, cars_off, src_vertex, dst_vertex |
-+-----------------------------------------------+
-| cong_entry state[n_state]                     |  8 B each, ALWAYS |E|
-|   { float value; int32_t stamp; }             |
-+-----------------------------------------------+
-| car_rec cars[n_cars],  n_cars <= cap          |  24 B each, bounded
-+-----------------------------------------------+
-```
+`[chan_header | cong_entry state[|E|] | car_rec cars[<=cap]]`, sized once
+at startup and constant for the run. The authoritative diagram, the field
+list and the `sizeof` asserts that pin it are in `chan.h` -- read that
+rather than trusting a second copy here.
 
 `state_off` and `cars_off` are transmitted even though they are constants
 for a given build. They cost 8 bytes and convert a whole class of layout and
@@ -184,7 +172,7 @@ cached per `(destination, tick)`, which pays off heavily under the downtown
 destination bias.
 
 ```c
-cost(e) = 1 + BETA * clamp(cong_effective(e) / cap, 0, CONG_MAX)
+cost(e) = 1 + BETA * clamp(cong_effective(e) / cap, 0, ROUTE_CONG_MAX)
 ```
 
 Free-flow is 1 per hop, so path length and congestion are on the same scale
@@ -196,8 +184,9 @@ that is *worse* than routing blind.
 Confidence decays with age, toward free-flow:
 
 ```c
-w    = expf(-age / CONG_TAU);
-cost = w * value + (1 - w) * FREE_FLOW;
+w       = expf(-age / CONG_TAU);
+premium = w * value + (1 - w) * 0.0f;   /* decays to no premium */
+cost    = 1 + ROUTE_BETA * clamp(premium / cap, 0, ROUTE_CONG_MAX);
 ```
 
 An agent trusts nearby news and discounts distant news in proportion to how
@@ -226,9 +215,10 @@ N  ~=  1.2 * ne * cap        (total cars in flight)
 
 A 20x20 grid has 1520 directed edges; at `cap 3` that is 4560 crossings/tick
 of capacity, so ~5500 cars in flight — roughly `--rate 8` across 24 ranks
-once arrivals and departures balance. A 5x5 grid at the same car count is
-17x oversubscribed: every edge saturates every tick, all routing choices
-become equally bad, and all three modes collapse onto each other.
+once arrivals and departures balance. A 5x5 grid (80 directed edges, 240 
+crossings/tick at `cap 3`) at the same car count is ~11x oversubscribed: 
+every edge saturates every tick, all routing choices become equally bad, 
+and all three modes collapse onto each other.
 
 ## What to look for in the output
 
@@ -240,7 +230,9 @@ become equally bad, and all three modes collapse onto each other.
   exactly `1.00` — anything else means the allgatherv is landing wrong. In
   `stale` it should be close to the replica-staleness mean.
 - **`lost`** is cars staged on the final tick that arrive at a tick which
-  never runs. It should be small and roughly `live * blocked_fraction`.
+  never runs -- one tick's worth of successful crossings. Blocked agents
+  are not lost: they stay put and are still counted in `live`. Expect
+  roughly `live * (1 - blocked_fraction) / (DWELL_TICKS + 1)`.
   Agents are otherwise conserved: the pool slot is released the instant a
   record is staged and recreated by `inject_car` on arrival, so exactly one
   copy exists at all times.
@@ -279,12 +271,15 @@ propagating at you.
   The EWMA (`EWMA_ALPHA`), the age decay, the cost clamp and the deterministic
   tie-break jitter all damp it, but do not eliminate it. Hysteresis — only
   re-route if the alternative is better by a margin — is the next step.
-- **Partition independence is claimed but untested.** `tie_jitter` is a pure
-  hash of `(car id, tick, edge id)`, so nothing depends on the per-rank RNG
-  stream, and diffusion timing is partition-independent by construction
-  (`delta = 1` everywhere). The same `--seed` under `-n 2` and `-n 8` should
-  therefore produce identical trajectories. That is the cheapest correctness
-  test available here and it has not been run.
+- **Partition independence is a property of the model, not of a run.**
+  `tie_jitter` is a pure hash of `(car id, tick, edge id)`, so routing
+  tie-breaks never depend on the per-rank RNG stream, and diffusion timing
+  is partition-independent by construction (`delta = 1` everywhere). But
+  `spawn_cars` picks origins from the local vertex range with a per-rank
+  stream, so `-n 2` and `-n 8` at the same `--seed` generate different
+  demand and cannot produce identical trajectories. Making that comparison
+  possible needs a rank-independent spawn (draw globally, keep what you
+  own) — until then the cheap correctness test is unavailable.
 - **Undirected 4-connected grid only.** The channel scheme needs `(v,u)` to
   exist whenever `(u,v)` does. A directed graph would need explicit reverse
   channel edges.
