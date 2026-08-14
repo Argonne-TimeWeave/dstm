@@ -125,18 +125,18 @@ size_t cong_merge(struct cong_replica *R, const struct cong_entry *in)
 }
 
 float cong_effective(const struct cong_entry *e, int32_t now, float tau,
-                     float free_flow)
+                     float baseline)
 {
         float age;
         float w;
 
         if (e->stamp < 0)
-                return free_flow;               /* no information at all */
+                return baseline;               /* no information at all */
 
         age = (float)(now - e->stamp);
         if (age < 0.0f)
                 age = 0.0f;
 
         w = expf(-age / tau);
-        return w * e->value + (1.0f - w) * free_flow;
+        return w * e->value + (1.0f - w) * baseline;
 }
