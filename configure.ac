@@ -105,6 +105,8 @@ AC_CONFIG_FILES([Makefile
 		 dstm.pc
 		 examples/Makefile
 		 examples/traffic/Makefile
+         examples/traffic/arr_traffic/Makefile
+         examples/traffic/graph_traffic/Makefile
 		 examples/minimal/Makefile
          examples/minimal/ring_mini/Makefile
          examples/minimal/variable_mini/Makefile
