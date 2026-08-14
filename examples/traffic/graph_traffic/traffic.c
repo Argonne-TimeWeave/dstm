@@ -35,12 +35,18 @@
  *
  * delta is 1 on EVERY channel, including edges whose endpoints happen to
  * live on the same rank. Information and agents therefore both advance
- * exactly one hop per tick no matter how the graph is partitioned, which
- * makes results independent of rank count -- run with -n 2 and -n 8 and
- * the trajectories match.
+ * exactly one hop per tick no matter how the graph is partitioned, so
+ * diffusion timing does not depend on where the partition boundary falls.
  *
- * The merge is last-writer-wins on (value, stamp) with exactly one
- * authoritative writer per edge. Entries with equal stamps are
+ * This is NOT the same as reproducibility across rank counts: spawn_cars
+ * draws origins from the local vertex range using a per-rank RNG stream,
+ * so changing -n changes the demand itself. Only the propagation model is
+ * partition-independent, not the run.
+ *
+ * The merge is highest-stamp-wins on (value, stamp) with exactly one
+ * authoritative writer per edge. "Last" is deliberately not what decides
+ * it: arrival order carries no weight, only the stamp does.
+ * Entries with equal stamps are
  * bit-identical, so the join is commutative, associative and idempotent:
  * MPI delivery order cannot change the answer, and re-reading an
  * unchanged version is harmless.
@@ -66,8 +72,7 @@
  * never overwrite the authoritative value. The stamp rule already
  * guarantees that; the ordering makes it obvious.
  *
- * Run with:  mpirun -n P ./graph_traffic [--steps N] [--cars M]
- *                                        [--grid G] [--cap C] [--seed S]
+ * Run with:  mpirun -n P ./graph_traffic --help
  */
 
 #include <assert.h>
@@ -106,9 +111,6 @@
 
 /* Confidence half-life, in ticks, for age-weighted routing costs. */
 #define CONG_TAU 6.0f
-
-/* Cost the router assumes for an edge it has no fresh information about. */
-#define FREE_FLOW 1.0f
 
 /* Free-flow hop costs 1. BETA is the congestion premium in units of
  * hops -- BETA=1.0 means a fully-saturated edge is worth detouring one
@@ -338,25 +340,14 @@ struct sim {
 
 static struct sim S;
 
-static void spawn_cars(int n);
-
-/* Per-vertex state published every tick. Its real job is to create the
- * local region version at (t, 0) and emit heartbeats, but the queue
- * length is genuinely useful and costs nothing to carry. */
+/* Per-vertex state published every tick. Its only job today is to create
+ * the local region version at (t, 0) and emit heartbeats -- nothing reads
+ * it back. queue_len rides along so a future consumer (a neighbour-aware
+ * spawn policy, say) does not force a layout change. */
 struct vertex_state {
         int32_t queue_len;
         int32_t stamp;
 };
-
-static unsigned int xrand(unsigned int *state)
-{
-        unsigned int x = *state;
-        x ^= x << 13;
-        x ^= x >> 17;
-        x ^= x << 5;
-        *state = x ? x : 1u;
-        return *state;
-}
 
 /*******************************************************************************
  * Step 1: publish owned vertex state
@@ -403,7 +394,6 @@ static void inject_car(const struct car_rec *r, int32_t t)
                 .depart_tick = r->depart_tick,
                 .hops        = r->hops + 1,
                 .ready_tick  = t + DWELL_TICKS,
-                .blocked     = 0,
         };
         car_pool_insert(&S.pool, c);
         S.vqueue[at - S.v_lo]++;
@@ -463,6 +453,14 @@ static void recv_channels(int32_t t)
                 }
         }
 }
+
+/*******************************************************************************
+ * Step 3: route over the replica and stage crossings
+ *
+ * Backward Dijkstra on the reverse CSR gives cost-to-go to a destination
+ * from every vertex; the agent takes the first hop. Trees are cached per
+ * (destination, tick), which pays off heavily under the downtown bias.
+ ******************************************************************************/
 
 /* In-edges per vertex, as global edge ids. Replicated, built once. */
 static int build_reverse(void)
@@ -550,7 +548,7 @@ static const float *shortest_path_tree(size_t dest, int32_t t)
         return d;
 }
 
-static size_t route_pick(size_t u, size_t i_local, int32_t dest, int32_t t, int32_t car_id)
+static size_t route_pick(size_t i_local, int32_t dest, int32_t t, int32_t car_id)
 {
         const float *d = shortest_path_tree((size_t)dest, t);
         size_t best = (size_t)-1;
@@ -573,7 +571,6 @@ static size_t route_pick(size_t u, size_t i_local, int32_t dest, int32_t t, int3
                         best = ls;
                 }
         }
-        (void)u;
         return best;
 }
 
@@ -600,15 +597,13 @@ static void route_and_stage(int32_t t)
                 if (t < c->ready_tick)
                         continue;               /* still dwelling */
 
-                size_t u       = (size_t)c->at;
-                size_t i_local = u - S.v_lo;
-                size_t ls      = route_pick(u, i_local, c->dest, t, c->id);
+                size_t i_local = (size_t)c->at - S.v_lo;
+                size_t ls      = route_pick(i_local, c->dest, t, c->id);
 
                 if (ls == (size_t)-1)
                         continue;               /* isolated vertex */
 
                 if (S.stage_count[ls] >= S.L.cap) {
-                        c->blocked++;
                         S.load_block[ls] += 1.0f;
                         S.st.blocked++;
                         continue;
@@ -726,11 +721,10 @@ static void send_channels(int32_t t)
                         memcpy(chan_state(&S.L, S.sendbuf), S.rep.e,
                                S.rep.n * sizeof(struct cong_entry));
 
-                        if (n > 0) {
-                                memcpy(chan_cars(&S.L, S.sendbuf),
-                                       &S.stage[ls * S.L.cap],
-                                       (size_t)n * sizeof(struct car_rec));
-                                chan_hdr(S.sendbuf)->n_cars = n;
+                        for (uint32_t k = 0; k < n; k++) {
+                                int prc = chan_push_car(&S.L, S.sendbuf,
+                                                &S.stage[ls * S.L.cap + k]);
+                                assert(prc == 0);
                         }
 
                         /* Channel u->v is the slot (v,u), owned by the
@@ -744,6 +738,36 @@ static void send_channels(int32_t t)
                         S.st.sent_msgs++;
                         S.st.bytes_out += S.L.bytes;
                 }
+        }
+}
+
+/*******************************************************************************
+ * Spawn
+ ******************************************************************************/
+
+static void spawn_cars(int n)
+{
+        if (S.nlocal == 0)
+                return;
+
+        for (int k = 0; k < n; k++) {
+                size_t origin = S.v_lo + (size_t)(xrand(&S.rng) %
+                                                  (unsigned int)S.nlocal);
+                size_t dest   = city_pick_destination(&S.city, origin, &S.rng);
+
+                struct car c = {
+                        .id          = S.next_car_id++,
+                        .origin      = (int32_t)origin,
+                        .dest        = (int32_t)dest,
+                        .at          = (int32_t)origin,
+                        .depart_tick = (int32_t)S.t,
+                        .hops        = 0,
+                        .ready_tick  = 0,
+                };
+
+                car_pool_insert(&S.pool, c);
+                S.vqueue[origin - S.v_lo]++;
+                S.st.spawned++;
         }
 }
 
@@ -781,40 +805,6 @@ static void run_step(int32_t t)
                        t, S.pool.live, S.st.arrived, S.st.crossings,
                        S.st.blocked, S.st.merge_updates);
                 fflush(stdout);
-        }
-}
-
-/*******************************************************************************
- * Spawn
- ******************************************************************************/
-
-static void spawn_cars(int n)
-{
-        if (S.next_car_id == 0)
-            S.next_car_id = S.rank * 1000000;
-
-        if (S.nlocal == 0)
-                return;
-
-        for (int k = 0; k < n; k++) {
-                size_t origin = S.v_lo + (size_t)(xrand(&S.rng) %
-                                                  (unsigned int)S.nlocal);
-                size_t dest   = city_pick_destination(&S.city, origin, &S.rng);
-
-                struct car c = {
-                        .id          = S.next_car_id++,
-                        .origin      = (int32_t)origin,
-                        .dest        = (int32_t)dest,
-                        .at          = (int32_t)origin,
-                        .depart_tick = (int32_t)S.t,
-                        .hops        = 0,
-                        .ready_tick  = 0,
-                        .blocked     = 0,
-                };
-
-                car_pool_insert(&S.pool, c);
-                S.vqueue[origin - S.v_lo]++;
-                S.st.spawned++;
         }
 }
 
@@ -986,9 +976,7 @@ static int setup(int rows, int cols, int steps, unsigned int cap)
                        (int)(S.gslot_base * sizeof(struct cong_entry)));
         }
 
-        S.stage       = malloc(S.nedge_local * (size_t)cap *
-                               sizeof(*S.stage));
-
+        S.stage       = malloc(S.nedge_local * (size_t)cap * sizeof(*S.stage));
         S.stage_count = malloc(S.nedge_local * sizeof(*S.stage_count));
         S.load_cross  = malloc(S.nedge_local * sizeof(*S.load_cross));
         S.load_block  = malloc(S.nedge_local * sizeof(*S.load_block));
@@ -1009,6 +997,9 @@ static int setup(int rows, int cols, int steps, unsigned int cap)
         S.rng   = (unsigned int)(S.seed * 7919u + (unsigned int)S.rank * 31u
                                  + 1u);
 
+        /* Disjoint id ranges per rank so ids stay unique on the wire. */
+        S.next_car_id = S.rank * 1000000;
+
         return 0;
 }
 
@@ -1024,7 +1015,6 @@ static void teardown_local(void)
 {
         car_pool_free(&S.pool);
         cong_replica_free(&S.rep);
-        city_free(&S.city);
 
         free(S.lrow_ptr);
         free(S.ldeg);
@@ -1048,6 +1038,8 @@ static void teardown_local(void)
         free(S.sp_tick);
         free(S.h.v);
         free(S.h.k);
+
+        city_free(&S.city);
 
         if (S.dist != NULL)
                 dstm_distance_destroy(&S.dist);
@@ -1155,8 +1147,10 @@ static void collect_and_print_stats(void)
                        (double)t_trip / (double)t_arr);
 
         if (S.mode == REPLICA_BLIND)
-                printf("routing decisions=%" PRIu64 "  (congestion not "
-                       "consulted in blind mode)\n", t_look);
+                printf("routing decisions: not counted in blind mode "
+                       "(edge_cost returns 1.0 without reading the "
+                       "replica)\n");
+
         else
                 printf("routing decisions=%" PRIu64 "  mean age of consulted "
                        "entry=%.2f ticks%s\n",
@@ -1181,16 +1175,17 @@ static void collect_and_print_stats(void)
 static void usage(const char *prog)
 {
         fprintf(stderr,
-                "usage: %s [--steps N] [--cars M] [--grid G] [--cap C]\n"
-                "          [--seed S] [--replica-mode M] [--verbose]\n"
-                "          [--quiet]\n"
+                "usage: %s [--steps N] [--cars M] [--rate R] [--grid G]\n"
+                "          [--cap C] [--seed S] [--replica-mode M]\n"
+                "          [--verbose] [--quiet]\n"
                 "\n"
-                "  --steps N   simulation ticks           (default 60)\n"
+                "  --steps N   simulation ticks, t=0..N   (default 60)\n"
                 "  --cars  M   agents spawned per rank    (default 64)\n"
+                "  --rate  R   agents per rank per tick   (default 0)\n"
                 "  --grid  G   grid is G x G              (default 12)\n"
                 "  --cap   C   max cars per edge per tick (default 8)\n"
                 "  --seed  S   RNG seed                   (default 42)\n"
-                "  --rate  R   spawn rate per tick\n"
+                "  --quiet     silence DSTM logging (default level: debug)\n"
                 "  --replica-mode stale|oracle|blind      (default stale)\n"
                 "        stale   diffusion by relay (the real model)\n"
                 "        oracle  replica synced globally each tick\n"

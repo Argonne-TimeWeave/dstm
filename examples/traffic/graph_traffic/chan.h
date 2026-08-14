@@ -22,16 +22,7 @@
  * state of a dstm_dgraph, so its size is fixed for the graph's lifetime
  * and identical on every rank.
  *
- *   +------------------------------------------------------------+
- *   | struct chan_header                                         |  40 B
- *   |   tick, n_state, n_cars, cap, state_off, cars_off, ...      |
- *   +------------------------------------------------------------+
- *   | struct cong_entry state[n_state]                            |  8 B each,
- *   |   full-graph congestion replica, ALWAYS n_state == |E|      |  fixed
- *   +------------------------------------------------------------+
- *   | struct car_rec cars[n_cars],  n_cars <= cap                 | 24 B each,
- *   |   agents physically crossing this edge this tick            | bounded
- *   +------------------------------------------------------------+
+ *  `[chan_header | cong_entry state[|E|] | car_rec cars[<=cap]]`
  *
  * The offsets are carried in the header rather than recomputed by the
  * reader. They are redundant with the compile-time layout today, but
@@ -45,7 +36,7 @@
 
 #define CHAN_MAGIC 0x43484e31u          /* "CHN1" */
 
-/* Per-edge congestion, last-writer-wins by stamp.
+/* Per-edge congestion, highest-stamp-wins. Arrival order carries no weight.
  *
  * Exactly one rank -- owner(src(edge)) -- ever writes a given entry.
  * Every other rank only relays it. Two entries carrying the same stamp
@@ -57,8 +48,13 @@ struct cong_entry {
         int32_t stamp;          /* tick the OWNER wrote it, -1 == never */
 };
 
-/* Wire form of an agent in transit. Where it lands is dst_vertex; the
- * receiver does not have to infer it from the channel. */
+/* Wire form of an agent in transit.
+ *
+ * dst_vertex is redundant with chan_header.dst_vertex -- every car in a
+ * buffer lands at the buffer's own destination, because the buffer IS
+ * the edge. It is kept because inject_car reads it per-record without
+ * touching the header, and because dropping it takes car_rec to 20 B and
+ * breaks the 24 B wire assert for 4 bytes x cap per message. */
 struct car_rec {
         int32_t id;
         int32_t origin;
@@ -76,6 +72,9 @@ struct chan_header {
         uint32_t cap;
         uint32_t state_off;     /* bytes from buffer start to state[0]  */
         uint32_t cars_off;      /* bytes from buffer start to cars[0]   */
+        /* Diagnostic only: chan_validate does not check these and the
+         * receiver does not compare them against the slot it read from.
+         * They exist to make a hex dump interpretable. */
         uint32_t src_vertex;
         uint32_t dst_vertex;
         uint32_t reserved;
@@ -155,16 +154,18 @@ struct cong_replica {
 int  cong_replica_init(struct cong_replica *R, size_t n_edges);
 void cong_replica_free(struct cong_replica *R);
 
-/* Last-writer-wins join. Returns the number of entries that advanced.
- * Order-independent and idempotent; safe to apply the same buffer twice
- * or to drop a buffer entirely (that only adds staleness). */
+/* Highest-stamp-wins join (a join-semilattice: commutative, associative,
+ * idempotent). Returns the number of entries that advanced -- note the
+ * COUNT is not idempotent even though the state is, so merge_updates is
+ * a diagnostic, not an invariant. Safe to apply the same buffer twice or
+ * to drop one entirely; dropping only adds staleness. */
 size_t cong_merge(struct cong_replica *R, const struct cong_entry *incoming);
 
-/* Age-weighted cost. The router knows how old every number it reads is,
- * so decay the measured value back toward free-flow as confidence dies.
- * This is what turns "the data is delayed" from a defect into something
- * the algorithm reasons about explicitly. */
+/* Age-weighted congestion PREMIUM. The router knows how old every number
+ * it reads is, so decay the measured value toward `baseline` as
+ * confidence dies. This is what turns "the data is delayed" from a defect
+ * into something the algorithm reasons about explicitly. */
 float cong_effective(const struct cong_entry *e, int32_t now, float tau,
-                     float free_flow);
+                     float baseline);
 
 #endif /* GRAPH_TRAFFIC_CHAN_H */

@@ -14,16 +14,6 @@
 
 #include "city.h"
 
-static unsigned int xrand(unsigned int *state)
-{
-        unsigned int x = *state;
-        x ^= x << 13;
-        x ^= x >> 17;
-        x ^= x << 5;
-        *state = x ? x : 1u;
-        return *state;
-}
-
 static inline size_t vid(const struct city *c, int r, int col)
 {
         return (size_t)r * (size_t)c->cols + (size_t)col;
@@ -180,23 +170,6 @@ size_t city_edge_id(const struct city *c, size_t u, size_t v)
         return (size_t)-1;
 }
 
-int city_manhattan(const struct city *c, size_t a, size_t b)
-{
-        int dr = city_row(c, a) - city_row(c, b);
-        int dc = city_col(c, a) - city_col(c, b);
-
-        return (dr < 0 ? -dr : dr) + (dc < 0 ? -dc : dc);
-}
-
-int city_is_downtown(const struct city *c, size_t v)
-{
-        int r = city_row(c, v);
-        int k = city_col(c, v);
-
-        return r >= c->dt_r0 && r <= c->dt_r1 &&
-               k >= c->dt_c0 && k <= c->dt_c1;
-}
-
 size_t city_pick_destination(const struct city *c, size_t origin,
                              unsigned int *rng)
 {
@@ -225,7 +198,7 @@ void city_print_summary(const struct city *c)
                c->rows, c->cols, c->nv, c->ne);
         printf("Downtown box    : rows %d-%d, cols %d-%d\n",
                c->dt_r0, c->dt_r1, c->dt_c0, c->dt_c1);
-        printf("Ranks           : %d (contiguous row-major bands)\n",
+        printf("Ranks           : %d (contiguous row-major vertex ranges)\n",
                c->world_size);
         for (int r = 0; r < c->world_size; r++) {
                 size_t lo = c->vtx_off[r];

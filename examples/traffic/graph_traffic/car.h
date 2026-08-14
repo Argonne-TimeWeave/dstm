@@ -14,8 +14,10 @@
 #include <stddef.h>
 #include <stdint.h>
 
-/* Host-side agent. Superset of struct car_rec: adds the fields that are
- * implied by locality and therefore never go on the wire. */
+/* Host-side agent. Overlaps struct car_rec on id/origin/dest/
+ * depart_tick/hops but is NOT a superset: `at` and `ready_tick` are
+ * local-only and never go on the wire, and car_rec's `dst_vertex` has no
+ * counterpart here -- it becomes `at` when inject_car lands the agent. */
 struct car {
         int32_t id;             /* < 0 marks a free slot                */
         int32_t origin;
@@ -24,7 +26,6 @@ struct car {
         int32_t depart_tick;
         int32_t hops;
         int32_t ready_tick;     /* may depart when tick >= ready_tick   */
-        int32_t blocked;        /* consecutive ticks denied a crossing  */
 };
 
 struct car_pool {
