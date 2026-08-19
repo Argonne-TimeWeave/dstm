@@ -745,12 +745,14 @@ static void send_channels(int32_t t)
  * Spawn
  ******************************************************************************/
 
-static void spawn_cars(int n)
+static void spawn_cars(int n, int s)
 {
         if (S.nlocal == 0)
                 return;
 
-        for (int k = 0; k < n; k++) {
+        int per_rank_n = n / s;
+
+        for (int k = 0; k < per_rank_n; k++) {
                 size_t origin = S.v_lo + (size_t)(xrand(&S.rng) %
                                                   (unsigned int)S.nlocal);
                 size_t dest   = city_pick_destination(&S.city, origin, &S.rng);
@@ -775,10 +777,10 @@ static void spawn_cars(int n)
  * Tick
  ******************************************************************************/
 
-static void run_step(int32_t t)
+static void run_step(int32_t t, int s)
 {
         if (S.spawn_rate > 0)
-            spawn_cars(S.spawn_rate);
+            spawn_cars(S.spawn_rate, s);
         publish_vertices(t);    /* creates local version t, heartbeats  */
         recv_channels(t);       /* merge state, inject arriving agents  */
         route_and_stage(t);     /* decide, subject to per-edge cap      */
@@ -1209,6 +1211,9 @@ int main(int argc, char *argv[])
         MPI_Init(&argc, &argv);
         dstm_init(&argc, &argv);
 
+        int r;
+        MPI_Comm_rank(MPI_COMM_WORLD, &r);
+
         for (int i = 1; i < argc; i++) {
                 if (!strcmp(argv[i], "--steps") && i + 1 < argc)
                         steps = atoi(argv[++i]);
@@ -1232,8 +1237,6 @@ int main(int argc, char *argv[])
                         else if (!strcmp(m, "blind"))
                                 S.mode = REPLICA_BLIND;
                         else {
-                                int r;
-                                MPI_Comm_rank(MPI_COMM_WORLD, &r);
                                 if (r == 0)
                                         fprintf(stderr,
                                                 "unknown --replica-mode "
@@ -1249,8 +1252,6 @@ int main(int argc, char *argv[])
                 else if (!strcmp(argv[i], "--quiet"))
                         quiet = 1;
                 else if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h")) {
-                        int r;
-                        MPI_Comm_rank(MPI_COMM_WORLD, &r);
                         if (r == 0)
                                 usage(argv[0]);
                         dstm_finalize();
@@ -1263,8 +1264,6 @@ int main(int argc, char *argv[])
                 cap = 1;
 
         if (data == NULL) {
-                int r;
-                MPI_Comm_rank(MPI_COMM_WORLD, &r);
                 if (r == 0) {
                         fprintf(stderr, "error: --data DIR is required\n\n");
                         usage(argv[0]);
@@ -1281,17 +1280,26 @@ int main(int argc, char *argv[])
                 MPI_Finalize();
                 return 1;
         }
+    
+        int s; 
+        MPI_Comm_size(MPI_COMM_WORLD, &s);
 
-        spawn_cars(cars);
+        spawn_cars(cars, s);
+
+        double start = MPI_Wtime();
 
         for (S.t = 0; S.t <= S.t_end; S.t++)
-                run_step((int32_t)S.t);
+                run_step((int32_t)S.t, s);
 
         /* Last write was at t_end with delta 1. Drain one tick past it. */
         dstm_time_t last_time = S.t_end + 2;
 
         teardown_dstm();
         dstm_fini(last_time);
+    
+        double end = MPI_Wtime();
+        if (r == 0) 
+            printf("total run time: %.5f\n\n", end - start);
 
         collect_and_print_stats();
 
