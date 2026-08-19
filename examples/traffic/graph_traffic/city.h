@@ -13,37 +13,8 @@
 
 #include <stddef.h>
 
-/*
- * Replicated road-network topology.
- *
- * The city is a rows x cols 4-connected grid. It is small and generated
- * deterministically from (rows, cols), so every rank builds an identical
- * copy of the *whole* topology in host memory. That is deliberate: the
- * congestion replica is indexed by global edge id, and every rank must
- * agree on that numbering without any communication.
- *
- * Global edge id == index into the global CSR dst[] array. Out-edges of
- * vertex u occupy [row_ptr[u], row_ptr[u+1]) and are sorted by ascending
- * destination, which is exactly the ordering dstm_dgraph_create requires
- * of each rank's local slice.
- *
- * Vertices are partitioned in contiguous blocks in rank order, matching
- * dstm_dgraph_create_equal: rank r owns [vtx_off[r], vtx_off[r+1]).
- * Ids are row-major, so a rank owns a contiguous run of vertices -- a
- * horizontal band only when the run happens to align with `cols`, which
- * with the base+remainder split it usually does not. A rank owning fewer
- * than `cols` vertices borders more than just r-1 and r+1.
- *
- * Diffusion delay is measured in GRAPH hops, not rank indices: news
- * about an edge reaches a rank after hopdist(owner, here) ticks, so the
- * worst case tracks the grid diameter (rows-1 + cols-1), independent of
- * P. That delay is the whole point of the example.
- */
-
 struct city {
-        int    rows;
-        int    cols;
-        size_t nv;              /* rows * cols                          */
+        size_t nv;              /* vertex count                         */
         size_t ne;              /* directed edge count                  */
         int    world_size;
 
@@ -55,12 +26,22 @@ struct city {
         /* Block partition, identical on every rank. */
         size_t *vtx_off;        /* world_size + 1                       */
 
-        /* Central "downtown" box: destination bias lands here, so the
-         * middle of the grid congests and routing has to work around it. */
-        int dt_r0, dt_r1, dt_c0, dt_c1;
+        /* Original (sparse) POLARIS node id per dense vertex 0..nv-1.
+         * Dense ids are assigned by ascending original id, so every rank
+         * builds an identical map from the same CSV with no comms. */
+        long   *dense2orig;     /* nv                                   */
+
+        /* Destination-bias set (dense ids): the top-degree vertices.
+         * Replaces the grid's central box so congestion concentrates. */
+        size_t *downtown;       /* n_downtown                           */
+        size_t  n_downtown;
 };
 
-int  city_build(struct city *c, int rows, int cols, int world_size);
+/* Load a POLARIS-style network from <dir>/node.csv and <dir>/link.csv.
+ * Ignores every field except node ids and link endpoints; each link
+ * becomes a bidirectional edge pair. Self-loops and duplicate directed
+ * edges are dropped. Deterministic and identical on every rank. */
+int  city_load(struct city *c, const char *dir, int world_size);
 void city_free(struct city *c);
 
 static inline unsigned int xrand(unsigned int *state)
