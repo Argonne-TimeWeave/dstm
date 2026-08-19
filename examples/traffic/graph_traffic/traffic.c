@@ -828,7 +828,7 @@ static int build_local_slice(void)
         if (S.nlocal == 0) {
                 fprintf(stderr,
                         "rank %d: empty partition; use fewer ranks or a "
-                        "larger --grid\n", S.rank);
+                        "larger network\n", S.rank);
                 return -1;
         }
 
@@ -852,17 +852,18 @@ static int build_local_slice(void)
         return 0;
 }
 
-static int setup(int rows, int cols, int steps, unsigned int cap)
+static int setup(const char *dir, int steps, unsigned int cap)
 {
         int rc;
 
         MPI_Comm_rank(MPI_COMM_WORLD, &S.rank);
         MPI_Comm_size(MPI_COMM_WORLD, &S.world_size);
 
-        if (city_build(&S.city, rows, cols, S.world_size) != 0) {
+        if (city_load(&S.city, dir, S.world_size) != 0) {
                 if (S.rank == 0)
-                        fprintf(stderr, "city_build failed (grid too small "
-                                        "for %d ranks?)\n", S.world_size);
+                        fprintf(stderr, "city_load failed (missing %s/"
+                                        "{node,link}.csv, or fewer than %d "
+                                        "vertices?)\n", dir, S.world_size);
                 return -1;
         }
 
@@ -1175,14 +1176,14 @@ static void collect_and_print_stats(void)
 static void usage(const char *prog)
 {
         fprintf(stderr,
-                "usage: %s [--steps N] [--cars M] [--rate R] [--grid G]\n"
+                "usage: %s --data DIR [--steps N] [--cars M] [--rate R]\n"
                 "          [--cap C] [--seed S] [--replica-mode M]\n"
                 "          [--verbose] [--quiet]\n"
                 "\n"
+                "  --data  DIR path to a dir with node.csv and link.csv\n"
                 "  --steps N   simulation ticks, t=0..N   (default 60)\n"
                 "  --cars  M   agents spawned per rank    (default 64)\n"
                 "  --rate  R   agents per rank per tick   (default 0)\n"
-                "  --grid  G   grid is G x G              (default 12)\n"
                 "  --cap   C   max cars per edge per tick (default 8)\n"
                 "  --seed  S   RNG seed                   (default 42)\n"
                 "  --quiet     silence DSTM logging (default level: debug)\n"
@@ -1199,7 +1200,7 @@ int main(int argc, char *argv[])
 {
         int steps = 60;
         int cars  = 64;
-        int grid  = 12;
+        const char *data = NULL;
         int cap   = 8;
         int quiet = 0;
 
@@ -1213,8 +1214,8 @@ int main(int argc, char *argv[])
                         steps = atoi(argv[++i]);
                 else if (!strcmp(argv[i], "--cars") && i + 1 < argc)
                         cars = atoi(argv[++i]);
-                else if (!strcmp(argv[i], "--grid") && i + 1 < argc)
-                        grid = atoi(argv[++i]);
+                else if (!strcmp(argv[i], "--data") && i + 1 < argc)
+                        data = argv[++i];
                 else if (!strcmp(argv[i], "--cap") && i + 1 < argc)
                         cap = atoi(argv[++i]);
                 else if (!strcmp(argv[i], "--seed") && i + 1 < argc)
@@ -1261,9 +1262,21 @@ int main(int argc, char *argv[])
         if (cap < 1)
                 cap = 1;
 
+        if (data == NULL) {
+                int r;
+                MPI_Comm_rank(MPI_COMM_WORLD, &r);
+                if (r == 0) {
+                        fprintf(stderr, "error: --data DIR is required\n\n");
+                        usage(argv[0]);
+                }
+                dstm_finalize();
+                MPI_Finalize();
+                return 1;
+        }
+
         dstm_log_setlevel(quiet ? DSTM_LOG_QUIET : DSTM_LOG_DEBUG);
 
-        if (setup(grid, grid, steps, (unsigned int)cap) != 0) {
+        if (setup(data, steps, (unsigned int)cap) != 0) {
                 dstm_finalize();
                 MPI_Finalize();
                 return 1;
