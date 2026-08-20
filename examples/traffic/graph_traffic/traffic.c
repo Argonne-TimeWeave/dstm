@@ -14,8 +14,7 @@
  * Every rank holds a replica of the congestion state of the ENTIRE graph.
  * Each tick a rank refreshes the entries it owns from local measurement,
  * then ships the whole replica -- plus the agents physically crossing --
- * along every one of its outgoing edges. Neighbours merge what they
- * receive into their own replica. Information about a distant edge
+ * along every one of its outgoing edges. Information about a distant edge
  * therefore reaches a rank only after as many ticks as there are hops
  * between them, and routing decisions are made against that stale view.
  *
@@ -40,8 +39,7 @@
  *
  * This is NOT the same as reproducibility across rank counts: spawn_cars
  * draws origins from the local vertex range using a per-rank RNG stream,
- * so changing -n changes the demand itself. Only the propagation model is
- * partition-independent, not the run.
+ * so changing -n changes the demand itself.  
  *
  * The merge is highest-stamp-wins on (value, stamp) with exactly one
  * authoritative writer per edge. "Last" is deliberately not what decides
@@ -132,14 +130,6 @@
  *           best any router could do with this heuristic.
  *   BLIND   congestion ignored entirely, pure distance routing. Lower
  *           bound.
- *
- * The expected ordering on mean trip duration is
- *   BLIND >= STALE >= ORACLE
- * with BOTH inequalities strict. If STALE ~= BLIND the congestion signal
- * never reaches the routing decision (ROUTE_BETA too small, or a load
- * level where there is nothing to route around); if STALE ~= ORACLE the
- * staleness costs nothing and there is no phenomenon to study. Either
- * collapse means the configuration is wrong, not the tuning.
  ******************************************************************************/
 enum replica_mode {
         REPLICA_STALE = 0,
@@ -494,9 +484,7 @@ static float edge_cost(size_t ge, int32_t t)
 
         const struct cong_entry *e = &S.rep.e[ge];
 
-        /* Only count entries that carry real information. An unstamped
-         * entry has no age, so including it in the denominator would
-         * silently bias the mean toward zero. */
+        /* Only count entries that carry real information. */
         if (e->stamp >= 0) {
                 S.st.route_lookups++;
                 S.st.route_age_sum += (uint64_t)(t - e->stamp);
@@ -579,10 +567,7 @@ static size_t route_pick(size_t i_local, int32_t dest, int32_t t, int32_t car_id
  *
  * An agent denied a crossing because the edge is at its cap does NOT
  * vanish and does not get rerouted this tick: it stays where it is and
- * is counted as queueing load on the edge it wanted. That feedback is
- * what makes the cap a model parameter rather than just a buffer size --
- * saturated edges report higher load, which propagates outward and steers
- * later agents away. */
+ * is counted as queueing load on the edge it wanted. */
 static void route_and_stage(int32_t t)
 {
         memset(S.stage_count, 0, S.nedge_local * sizeof(*S.stage_count));
@@ -786,15 +771,6 @@ static void run_step(int32_t t, int s)
         route_and_stage(t);     /* decide, subject to per-edge cap      */
         measure_local(t);       /* stamp owned entries with tick t      */
 
-        /* Placed after measure_local, so at routing time next tick every
-         * entry carries stamp t -- age exactly 1 everywhere. Note this is
-         * age 1, not age 0: routing precedes measurement within a tick,
-         * so even a rank's own edges are one tick stale when consulted.
-         * That makes the contrast exact rather than approximate:
-         *   oracle  age == 1
-         *   stale   age == max(1, hopdist(owner -> here))
-         * i.e. the two modes differ by precisely the diffusion delay and
-         * nothing else. */
         if (S.mode == REPLICA_ORACLE)
                 replica_sync_oracle();
 
