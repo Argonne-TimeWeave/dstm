@@ -1,33 +1,33 @@
-IT WORKS ON A FIXED 4-CONNECTED GRID
-    NEED TO REPLACE city_build WITH A DIFFERENT LOADER that produces:
+LOADS A REAL ROAD NETWORK FROM POLARIS-STYLE CSVs
+    city_load reads <dir>/node.csv and <dir>/link.csv and produces:
         row_ptr, dst, esrc, vtx_off (per-vertex adjacency sorted ascending)
-    reverse edges must exist -- (v,u) whenever (u,v) does
+    every link is emitted in both directions, so the reverse edge (v,u)
+    always exists whenever (u,v) does -- the channel scheme depends on it
 
 FUTURE OPTIMIZATION only send state information that is new to that neighbor
         (local changes + anything you learned by relay that they haven't seen)
 
 # graph_traffic — routing under diffused, delayed congestion
 
-Each rank holds a congestion replica of the **entire** graph. Each tick it
-refreshes the entries it owns, then ships the whole replica — together with
-the agents physically crossing — along every outgoing edge. Neighbours merge
-what arrives. News about a distant edge therefore reaches a rank only after
-as many ticks as there are hops between them, and every routing decision is
-made against that stale view.
+Each rank holds a congestion replica of the **entire** road network, loaded
+from a POLARIS-style node/link CSV pair. Each tick it refreshes the entries
+it owns, then ships the whole replica — together with the agents physically
+crossing — along every outgoing edge. Neighbours merge what arrives. News
+about a distant edge therefore reaches a rank only after as many ticks as
+there are hops between them, and every routing decision is made against that
+stale view.
 
 ## Build and run
 
 ```sh
 ./autogen.sh && ./configure && make
 mpirun -n 24 ./examples/traffic/graph_traffic/graph_traffic \
-       --grid 20 --steps 200 --cars 0 --rate 8 --cap 3 --quiet
+       --data data/bloomington/ --steps 200 --cars 0 --rate 8 --cap 3 --quiet
 ```
-
-Any rank count from 1 up to the vertex count works.
 
 | flag                | default | meaning                              |
 |---------------------|---------|--------------------------------------|
-| `--grid G`          | 12      | G x G 4-connected grid               |
+| `--data DIR`        | -       | dir with node.csv + link.csv (required) |
 | `--steps N`         | 60      | ticks                                |
 | `--cars M`          | 64      | agents spawned per rank at t=0       |
 | `--rate R`          | 0       | agents spawned per rank *per tick*   |
@@ -40,6 +40,20 @@ Any rank count from 1 up to the vertex count works.
 Prefer `--cars 0 --rate R` for measurement. A single t=0 burst is one
 decaying shockwave; congestion information is most valuable in steady state,
 and a continuous spawn rate is the only way to reach one.
+
+### Input data
+
+`--data DIR` reads `<dir>/node.csv` (first column = node id) and
+`<dir>/link.csv` (columns 3 and 4 = the two endpoint node ids). Every link
+becomes two directed edges, a->b and b->a; lane, speed, capacity, geometry
+and name columns are ignored. Self-loops and duplicate directed edges within
+the file are dropped, and the counts are reported at startup.
+
+The vertex set is the union of every node id in `node.csv` and every endpoint
+in `link.csv`, sorted and de-duplicated, then assigned dense ids `0..nv-1` in
+ascending original-id order. That map is a pure function of the input, so
+every rank computes it identically with no communication. Any rank count from
+1 up to the vertex count works.
 
 ## Replica modes
 
@@ -69,11 +83,12 @@ fixed. The usual cause is load: the gap is zero on an empty network (nothing
 to route around) and zero at gridlock (nowhere to route to), and maximal in
 between — aim for 15–35% blocked.
 
-Oracle is cheap because vertices are block-partitioned: rank `r` owns exactly
-the contiguous global edge range `[gslot_base, gslot_base + nedge_local)`, so
-an allgatherv of owned slices reconstructs the full array. By the
-single-writer property that is provably identical to a max-by-stamp
-allreduce, without needing `MPI_Op_create`.
+Oracle is cheap because vertices are block-partitioned by dense id: rank `r`
+owns a contiguous range of vertices (base + remainder split) and hence the
+contiguous global edge range `[gslot_base, gslot_base + nedge_local)`, so an
+allgatherv of owned slices reconstructs the full array. By the single-writer
+property that is provably identical to a max-by-stamp allreduce, without
+needing `MPI_Op_create`.
 
 ## Buffer layout
 
@@ -169,7 +184,9 @@ never actually read. **Path planning is what makes remote congestion matter.**
 Each tick, per distinct destination, a backward Dijkstra over the reverse CSR
 produces cost-to-go for every vertex; the car takes the first hop. Trees are
 cached per `(destination, tick)`, which pays off heavily under the downtown
-destination bias.
+destination bias — "downtown" is the top ~5% highest-degree vertices
+(`max(1, nv/20)`), chosen deterministically from the loaded graph rather than
+a fixed geographic box.
 
 ```c
 cost(e) = 1 + BETA * clamp(cong_effective(e) / cap, 0, ROUTE_CONG_MAX)
@@ -213,18 +230,25 @@ utilisation:
 N  ~=  1.2 * ne * cap        (total cars in flight)
 ```
 
-A 20x20 grid has 1520 directed edges; at `cap 3` that is 4560 crossings/tick
-of capacity, so ~5500 cars in flight — roughly `--rate 8` across 24 ranks
-once arrivals and departures balance. A 5x5 grid (80 directed edges, 240 
-crossings/tick at `cap 3`) at the same car count is ~11x oversubscribed: 
-every edge saturates every tick, all routing choices become equally bad, 
-and all three modes collapse onto each other.
+Read `ne` (directed edge count) off the startup summary — it depends entirely
+on the loaded network. The Bloomington data, for example, is 3133 vertices and
+9048 directed edges; at `cap 3` that is 27144 crossings/tick of capacity, so
+~32000 cars in flight to sit in the target band. Under-load the network and
+there is nothing to route around; over-load it and every edge saturates every
+tick, all routing choices become equally bad, and all three modes collapse
+onto each other. Because car counts are per-rank, watch the *total* (cars or
+rate × ranks) against `ne * cap`, not the per-rank figure.
 
 ## What to look for in the output
 
 - **`replica staleness ... max`** should track the graph diameter in hops.
-  That is the propagation delay the example exists to model. Raise `--grid`
-  and it grows; the mean tracks average hop distance.
+  That is the propagation delay the example exists to model. Its magnitude is
+  set by the partition: the naive block-by-dense-id split scatters
+  topologically adjacent vertices across ranks, so max staleness reflects the
+  diameter of the *rank-adjacency* graph, which is far smaller than the road
+  network's hop diameter. It rises monotonically with rank count (more, finer
+  blocks → longer owner-to-owner chains); a locality-preserving partition
+  would push it toward the true graph diameter.
 - **`mean age of consulted entry`** is the delay actually experienced by
   routing, averaged over every edge Dijkstra relaxed. In `oracle` it must be
   exactly `1.00` — anything else means the allgatherv is landing wrong. In
@@ -244,14 +268,15 @@ and all three modes collapse onto each other.
 Per rank per tick: `local_edges * (40 + 8|E| + 24*cap)` bytes out. The `8|E|`
 term dominates and grows with the **global** graph while `local_edges` shrinks
 only as `1/P`, so total traffic grows as `O(|E|^2)`. Startup prints the exact
-figure. Concretely: a 12x12 grid is 528 directed edges, ~4.5 KiB per message —
-fine. A 64x64 grid is 16k edges, ~130 KiB per message and ~2 GiB/tick across
-the job — not fine.
+figure. Concretely: the Bloomington network is 9048 directed edges, so each
+message carries ~72 KiB of state and the whole job ships hundreds of MiB per
+tick — read the "per-tick out/rank" line the summary prints for your network
+and rank count before scaling up.
 
 DSTM also retains one region copy per version, so peak memory is roughly
-`steps * local_edges * edge_state_size`. Keep `--grid` modest or `--steps`
-short. The per-destination tree cache is a second `O(V^2)` floats — 640 KB at
-400 vertices, but it needs an LRU past ~2000.
+`steps * local_edges * edge_state_size`. Use a modest network or keep
+`--steps` short. The per-destination tree cache is a second `O(V^2)` floats —
+~39 MB at 3133 vertices (Bloomington), so it needs an LRU on larger networks.
 
 The fix, when you want it, is the delta the layout was designed for: send only
 entries whose stamp is newer than what you last sent that neighbour, as
@@ -280,6 +305,7 @@ propagating at you.
   demand and cannot produce identical trajectories. Making that comparison
   possible needs a rank-independent spawn (draw globally, keep what you
   own) — until then the cheap correctness test is unavailable.
-- **Undirected 4-connected grid only.** The channel scheme needs `(v,u)` to
-  exist whenever `(u,v)` does. A directed graph would need explicit reverse
-  channel edges.
+- **Every link is treated as bidirectional.** The channel scheme needs `(v,u)`
+  to exist whenever `(u,v)` does, so the loader emits both directions of every
+  link and ignores any one-way flags in the source data. A genuinely directed
+  network would need explicit reverse channel edges.
