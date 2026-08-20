@@ -47,12 +47,12 @@ MAX_NODES="${MAX_NODES:-8}"
 
 DATA="${DATA:-${ROOT}/data/bloomington/}"
 RANKS="${RANKS:-4 8 16 32 64 128 256}"
-MODES="${MODES:-blind stale oracle}"
+MODES="${MODES:-stale oracle}"
 
 STEPS="${STEPS:-64}"
-CARS="${CARS:-128}"
-RATE="${RATE:-8}"
-CAP="${CAP:-3}"
+CARS="${CARS:-4096}"
+RATE="${RATE:-512}"
+CAP="${CAP:-6}"
 SEED="${SEED:-42}"
 REPS="${REPS:-3}"
 TIMEOUT_S="${TIMEOUT_S:-600}"               # per-run guard; 0 disables
@@ -188,8 +188,7 @@ mkdir -p "${RAWDIR}"
 } | tee "${CONFIG}"
 echo
 
-# CSV header. wall_s = launcher wall clock; the rest are parsed from output.
-echo "ranks,nodes,ppn,mode,rep,status,wall_s,mean_dur,mean_hops,arrived,spawned,live,lost,blocked_pct,crossings,mean_age,stale_mean,stale_max,seed,steps,cars,rate,cap" > "${CSV}"
+echo "ranks,nodes,ppn,mode,rep,status,run_time,mean_dur,mean_hops,arrived,spawned,live,lost,blocked_pct,crossings,mean_age,stale_mean,stale_max,seed,steps,cars,rate,cap" > "${CSV}"
 
 # --------------------------------------------------------------------------
 # One run.
@@ -239,7 +238,8 @@ run_one() {
         fi
 
         # Parse the traffic summary block (same sed/awk style as compare.sh).
-        local dur hops arr spawn live lost blk cross age smean smax
+        local dur hops arr spawn live lost blk cross age smean smax prog_time
+        prog_time=$(sed -n 's/^total run time: \([0-9.]*\).*/\1/p'              "${log}" | tail -1)
         dur=$(  sed -n 's/.*mean duration=\([0-9.]*\).*/\1/p'                    "${log}" | tail -1)
         hops=$( sed -n 's/.*mean hops=\([0-9.]*\).*/\1/p'                        "${log}" | tail -1)
         arr=$(  sed -n 's/^spawned=[0-9]* arrived=\([0-9]*\).*/\1/p'             "${log}" | tail -1)
@@ -256,10 +256,13 @@ run_one() {
         : "${dur:=nan}" "${hops:=nan}" "${arr:=-1}" "${spawn:=-1}" "${live:=-1}"
         : "${lost:=-1}" "${blk:=nan}" "${cross:=-1}" "${age:=nan}" "${smean:=nan}" "${smax:=-1}"
 
-        echo "${np},${nodes},${ppn},${mode},${rep},${status},${wall},${dur},${hops},${arr},${spawn},${live},${lost},${blk},${cross},${age},${smean},${smax},${SEED},${STEPS},${CARS},${RATE},${CAP}" >> "${CSV}"
+        # Prefer the program's own reported time; fall back to launcher wall clock.
+        : "${prog_time:=${wall}}"
+
+        echo "${np},${nodes},${ppn},${mode},${rep},${status},${prog_time},${dur},${hops},${arr},${spawn},${live},${lost},${blk},${cross},${age},${smean},${smax},${SEED},${STEPS},${CARS},${RATE},${CAP}" >> "${CSV}"
 
         if [[ "${status}" == ok ]]; then
-                printf '%8ss  dur=%-7s hops=%-6s arr=%-7s blk=%-5s%%\n' "${wall}" "${dur}" "${hops}" "${arr}" "${blk}"
+                printf '%8ss  dur=%-7s hops=%-6s arr=%-7s blk=%-5s%%\n' "${prog_time}" "${dur}" "${hops}" "${arr}" "${blk}"
         else
                 printf '%s (%s)\n' "${status}" "$(basename "${log}")"
         fi
