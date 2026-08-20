@@ -144,17 +144,11 @@ static int city_pick_downtown(struct city *c)
         size_t n  = nv / 20;
         if (n == 0) n = (nv < 1 ? 0 : 1);
 
-        /* index array sorted by descending degree */
-        size_t *idx = malloc(nv * sizeof(*idx));
-        if (!idx && nv) return -1;
-        for (size_t i = 0; i < nv; i++) idx[i] = i;
-
         /* selection of top-n by degree via a full sort keyed on degree.
          * Small networks; a full qsort with a captured base is awkward in
          * C, so we sort (degree,id) pairs. */
         struct { size_t deg, id; } *pv =
                 malloc(nv * sizeof(*pv));
-        if (!pv && nv) { free(idx); return -1; }
         for (size_t i = 0; i < nv; i++) {
                 pv[i].deg = c->row_ptr[i + 1] - c->row_ptr[i];
                 pv[i].id  = i;
@@ -163,11 +157,9 @@ static int city_pick_downtown(struct city *c)
         qsort(pv, nv, sizeof(*pv), cmp_deg_desc);
 
         c->downtown = malloc((n ? n : 1) * sizeof(*c->downtown));
-        if (!c->downtown && n) { free(idx); free(pv); return -1; }
         for (size_t i = 0; i < n; i++) c->downtown[i] = pv[i].id;
         c->n_downtown = n;
 
-        free(idx);
         free(pv);
         return 0;
 }
