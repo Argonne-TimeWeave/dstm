@@ -28,15 +28,26 @@ static int cmp_szt(const void *a, const void *b)
         return (x > y) - (x < y);
 }
 
-/* Original id -> dense id, binary search over sorted dense2orig[]. */
-static size_t dense_of(const long *dense2orig, size_t nv, long orig)
+/* Original id -> dense id.  dense2orig is no longer sorted (dense ids are
+ * assigned by a spatial key), so we search a separate index sorted by
+ * original id.  idx[k] holds (orig, dense) pairs in ascending orig. */
+struct orig_index { long orig; size_t dense; };
+
+static int cmp_orig_index(const void *a, const void *b)
+{
+        long x = ((const struct orig_index *)a)->orig;
+        long y = ((const struct orig_index *)b)->orig;
+        return (x > y) - (x < y);
+}
+
+static size_t dense_of(const struct orig_index *idx, size_t nv, long orig)
 {
         size_t lo = 0, hi = nv;
         while (lo < hi) {
                 size_t mid = lo + (hi - lo) / 2;
-                if (dense2orig[mid] == orig)
-                        return mid;
-                if (dense2orig[mid] < orig)
+                if (idx[mid].orig == orig)
+                        return idx[mid].dense;
+                if (idx[mid].orig < orig)
                         lo = mid + 1;
                 else
                         hi = mid;
@@ -44,34 +55,48 @@ static size_t dense_of(const long *dense2orig, size_t nv, long orig)
         return (size_t)-1;
 }
 
-/* First CSV column of every non-header line -> *ids_out (realloc-grown).
+/* First three CSV columns (node id, x, y) of every non-header line.
+ * ids_out gets the id; xy_out gets 2 doubles per node (x then y).
  * Returns count or -1. */
-static long read_first_col(const char *path, long **ids_out)
+static long read_nodes_xy(const char *path, long **ids_out, double **xy_out)
 {
         FILE *f = fopen(path, "r");
         if (!f) { perror(path); return -1; }
 
         size_t cap = 1024, n = 0;
-        long  *ids = malloc(cap * sizeof(*ids));
-        if (!ids) { fclose(f); return -1; }
+        long   *ids = malloc(cap * sizeof(*ids));
+        double *xy  = malloc(cap * 2 * sizeof(*xy));
+        if (!ids || !xy) { free(ids); free(xy); fclose(f); return -1; }
 
         char line[8192];
         int  first = 1;
         while (fgets(line, sizeof(line), f)) {
                 if (first) { first = 0; continue; }
-                char *end;
-                long v = strtol(line, &end, 10);
-                if (end == line) continue;
+                long   v;
+                double x, y;
+                /* node,x,y,... */
+                if (sscanf(line, "%ld,%lf,%lf,", &v, &x, &y) != 3)
+                        continue;
                 if (n == cap) {
                         cap *= 2;
-                        long *t = realloc(ids, cap * sizeof(*ids));
-                        if (!t) { free(ids); fclose(f); return -1; }
-                        ids = t;
+                        long   *ti = realloc(ids, cap * sizeof(*ids));
+                        double *tx = realloc(xy, cap * 2 * sizeof(*xy));
+                        if (!ti || !tx) {
+                                free(ti ? ti : ids);
+                                free(tx ? tx : xy);
+                                fclose(f);
+                                return -1;
+                        }
+                        ids = ti; xy = tx;
                 }
-                ids[n++] = v;
+                ids[n] = v;
+                xy[2 * n] = x;
+                xy[2 * n + 1] = y;
+                n++;
         }
         fclose(f);
         *ids_out = ids;
+        *xy_out  = xy;
         return (long)n;
 }
 
@@ -128,6 +153,74 @@ static long read_link_pairs(const char *path, long **a_out, long **b_out)
         return (long)n;
 }
 
+/* --- Spatial ordering (recursive coordinate bisection) -------------
+ *
+ * Produces a permutation of vertex indices such that spatially-close
+ * vertices are contiguous.  The block split over vtx_off then yields
+ * spatially-compact partitions with no change to gslot_base addressing.
+ *
+ * We sort an array of point structs in place; each carries its x,y and a
+ * payload (the original id).  rcb() alternates split axis by depth and
+ * recurses until the segment maps to a single output rank's share is not
+ * needed here -- we just want a full spatial order, so we recurse down to
+ * segments of size 1. */
+struct rcb_pt {
+        double x, y;
+        long   orig;    /* original node id, carried through the sort */
+};
+
+static int cmp_rcb_x(const void *a, const void *b)
+{
+        double xa = ((const struct rcb_pt *)a)->x;
+        double xb = ((const struct rcb_pt *)b)->x;
+        if (xa < xb) return -1;
+        if (xa > xb) return 1;
+        /* stable tie-break by orig id so the order is deterministic */
+        long oa = ((const struct rcb_pt *)a)->orig;
+        long ob = ((const struct rcb_pt *)b)->orig;
+        return (oa > ob) - (oa < ob);
+}
+
+static int cmp_rcb_y(const void *a, const void *b)
+{
+        double ya = ((const struct rcb_pt *)a)->y;
+        double yb = ((const struct rcb_pt *)b)->y;
+        if (ya < yb) return -1;
+        if (ya > yb) return 1;
+        long oa = ((const struct rcb_pt *)a)->orig;
+        long ob = ((const struct rcb_pt *)b)->orig;
+        return (oa > ob) - (oa < ob);
+}
+
+/* Sort [lo,hi) by the longer extent (x or y), then recurse on halves.
+ * depth is unused for axis choice (we pick the wider spread each level),
+ * which keeps cells roughly square. */
+static void rcb(struct rcb_pt *p, size_t lo, size_t hi)
+{
+        if (hi - lo <= 1)
+                return;
+
+        double xmin = p[lo].x, xmax = p[lo].x;
+        double ymin = p[lo].y, ymax = p[lo].y;
+        for (size_t i = lo + 1; i < hi; i++) {
+                if (p[i].x < xmin) xmin = p[i].x;
+                if (p[i].x > xmax) xmax = p[i].x;
+                if (p[i].y < ymin) ymin = p[i].y;
+                if (p[i].y > ymax) ymax = p[i].y;
+        }
+
+        if ((xmax - xmin) >= (ymax - ymin))
+                qsort(p + lo, hi - lo, sizeof(*p), cmp_rcb_x);
+        else
+                qsort(p + lo, hi - lo, sizeof(*p), cmp_rcb_y);
+
+        size_t mid = lo + (hi - lo) / 2;
+        rcb(p, lo, mid);
+        rcb(p, mid, hi);
+}
+/* --- End spatial ordering ------------------------------------------ */
+
+
 struct deg_pair { size_t deg, id; };
 
 static int cmp_deg_desc(const void *a, const void *b)
@@ -174,17 +267,29 @@ int city_load(struct city *c, const char *dir, int world_size)
         snprintf(npath, sizeof(npath), "%s/node.csv", dir);
         snprintf(lpath, sizeof(lpath), "%s/link.csv", dir);
 
-        long *node_ids = NULL, *la = NULL, *lb = NULL;
-        long  n_nodes = read_first_col(npath, &node_ids);
-        long  n_links = read_link_pairs(lpath, &la, &lb);
+        long              *node_ids = NULL, *la = NULL, *lb = NULL;
+        double            *node_xy  = NULL;
+        long              *uni      = NULL;
+        struct orig_index *nidx     = NULL;
+        struct orig_index *oidx     = NULL;
+        struct rcb_pt     *pts      = NULL;
+        size_t            *eu = NULL, *ev = NULL, *seg = NULL, *cur = NULL;
+
+        long n_nodes = read_nodes_xy(npath, &node_ids, &node_xy);
+        long n_links = read_link_pairs(lpath, &la, &lb);
         if (n_nodes < 0 || n_links < 0) {
-                free(node_ids); free(la); free(lb);
+                free(node_ids); free(node_xy); free(la); free(lb);
                 return -1;
         }
 
-        /* --- Vertex set: union of node.csv and all link endpoints ----- */
+        /* --- Vertex set: union of node.csv and all link endpoints -----
+         *
+         * We first find the unique original ids (sorted), then attach a
+         * coordinate to each: from node.csv where available, otherwise a
+         * sentinel that sorts every coordinate-less vertex (link-only
+         * endpoints) together and last. */
         size_t upcap = (size_t)n_nodes + 2 * (size_t)n_links;
-        long  *uni   = malloc((upcap ? upcap : 1) * sizeof(*uni));
+        uni   = malloc((upcap ? upcap : 1) * sizeof(*uni));
         if (!uni) goto oom;
 
         size_t un = 0;
@@ -195,14 +300,75 @@ int city_load(struct city *c, const char *dir, int world_size)
         }
         qsort(uni, un, sizeof(*uni), cmp_long);
 
-        c->dense2orig = malloc((un ? un : 1) * sizeof(*c->dense2orig));
-        if (!c->dense2orig) goto oom;
         size_t nv = 0;
         for (size_t i = 0; i < un; i++)
                 if (i == 0 || uni[i] != uni[i - 1])
-                        c->dense2orig[nv++] = uni[i];
-        free(uni); uni = NULL;
+                        uni[nv++] = uni[i];   /* compact unique ids in place */
         c->nv = nv;
+
+        /* Index of node.csv coordinates by original id, for O(log n)
+         * lookup while building the spatial point array. */
+        nidx = malloc(((size_t)n_nodes ? (size_t)n_nodes : 1) * sizeof(*nidx));
+        if (!nidx) goto oom;
+        for (long i = 0; i < n_nodes; i++) {
+                nidx[i].orig  = node_ids[i];
+                nidx[i].dense = (size_t)i;   /* row into node_xy */
+        }
+        qsort(nidx, (size_t)n_nodes, sizeof(*nidx), cmp_orig_index);
+
+        /* Build the spatial point array over the unique vertices. */
+        pts = malloc((nv ? nv : 1) * sizeof(*pts));
+        if (!pts) { free(nidx); goto oom; }
+
+        /* Sentinel for coordinate-less vertices: sort them after every
+         * real point.  Using the data's own max plus a margin keeps them
+         * clustered without a magic absolute value. */
+        double xmax = 0.0, ymax = 0.0;
+        int have_any = 0;
+        for (long i = 0; i < n_nodes; i++) {
+                if (!have_any) {
+                        xmax = node_xy[2 * i];
+                        ymax = node_xy[2 * i + 1];
+                        have_any = 1;
+                } else {
+                        if (node_xy[2 * i]     > xmax) xmax = node_xy[2 * i];
+                        if (node_xy[2 * i + 1] > ymax) ymax = node_xy[2 * i + 1];
+                }
+        }
+        double sentinel_x = xmax + 1.0e9;
+        double sentinel_y = ymax + 1.0e9;
+
+        for (size_t i = 0; i < nv; i++) {
+                long orig = uni[i];
+                size_t row = dense_of(nidx, (size_t)n_nodes, orig);
+                pts[i].orig = orig;
+                if (row != (size_t)-1) {
+                        pts[i].x = node_xy[2 * row];
+                        pts[i].y = node_xy[2 * row + 1];
+                } else {
+                        pts[i].x = sentinel_x;
+                        pts[i].y = sentinel_y;
+                }
+        }
+        free(nidx); nidx = NULL;
+        free(uni); uni = NULL;
+
+        /* Recursive coordinate bisection: reorders pts so that dense id i
+         * (its position after this call) is spatially compact. */
+        rcb(pts, 0, nv);
+
+        /* Emit dense2orig in the spatial order, and build the sorted
+         * (orig -> dense) index the edge remap needs. */
+        c->dense2orig = malloc((nv ? nv : 1) * sizeof(*c->dense2orig));
+        oidx = malloc((nv ? nv : 1) * sizeof(*oidx));
+        if (!c->dense2orig || !oidx) { free(oidx); free(pts); goto oom; }
+        for (size_t i = 0; i < nv; i++) {
+                c->dense2orig[i] = pts[i].orig;
+                oidx[i].orig  = pts[i].orig;
+                oidx[i].dense = i;
+        }
+        free(pts); pts = NULL;
+        qsort(oidx, nv, sizeof(*oidx), cmp_orig_index);        
 
         if ((size_t)world_size > nv) {  /* same guard as the grid path */
                 fprintf(stderr, "world_size %d > %zu vertices\n",
@@ -212,20 +378,21 @@ int city_load(struct city *c, const char *dir, int world_size)
 
         /* --- Directed edges (dense), drop self-loops ------------------ */
         size_t ecap = 2 * (size_t)n_links, en = 0;
-        size_t *eu = malloc((ecap ? ecap : 1) * sizeof(*eu));
-        size_t *ev = malloc((ecap ? ecap : 1) * sizeof(*ev));
+        eu = malloc((ecap ? ecap : 1) * sizeof(*eu));
+        ev = malloc((ecap ? ecap : 1) * sizeof(*ev));
         if (!eu || !ev) goto oom;
 
         size_t dropped_self = 0;
         for (long i = 0; i < n_links; i++) {
-                size_t u = dense_of(c->dense2orig, nv, la[i]);
-                size_t v = dense_of(c->dense2orig, nv, lb[i]);
+                size_t u = dense_of(oidx, nv, la[i]);
+                size_t v = dense_of(oidx, nv, lb[i]);
                 if (u == (size_t)-1 || v == (size_t)-1) continue;
                 if (u == v) { dropped_self++; continue; }
                 eu[en] = u; ev[en] = v; en++;
                 eu[en] = v; ev[en] = u; en++;
         }
         free(la); free(lb); la = lb = NULL;
+        free(oidx); oidx = NULL;
 
         /* --- Counting sort into per-row segments (pre-dedup) ---------- */
         c->row_ptr = calloc(nv + 1, sizeof(*c->row_ptr));
@@ -233,8 +400,8 @@ int city_load(struct city *c, const char *dir, int world_size)
         for (size_t e = 0; e < en; e++) c->row_ptr[eu[e] + 1]++;
         for (size_t i = 0; i < nv; i++) c->row_ptr[i + 1] += c->row_ptr[i];
 
-        size_t *seg = malloc((en ? en : 1) * sizeof(*seg));  /* dst by row */
-        size_t *cur = malloc((nv ? nv : 1) * sizeof(*cur));
+        seg = malloc((en ? en : 1) * sizeof(*seg));  /* dst by row */
+        cur = malloc((nv ? nv : 1) * sizeof(*cur));
         if (!seg || !cur) goto oom;
         for (size_t i = 0; i < nv; i++) cur[i] = c->row_ptr[i];
         for (size_t e = 0; e < en; e++) seg[cur[eu[e]]++] = ev[e];
@@ -289,12 +456,14 @@ int city_load(struct city *c, const char *dir, int world_size)
                dir, c->nv, c->ne, dropped_self, dropped_dup);
 
         free(node_ids);
+        free(node_xy);
         return 0;
 
 oom:
         fprintf(stderr, "city_load: out of memory\n");
 fail:
-        free(node_ids); free(uni); free(la); free(lb);
+        free(node_ids); free(node_xy); free(uni); free(la); free(lb);
+        free(nidx); free(oidx); free(pts);
         free(eu); free(ev); free(seg); free(cur);
         city_free(c);
         return -1;
