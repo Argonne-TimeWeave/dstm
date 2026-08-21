@@ -1,8 +1,8 @@
 host:         cascade10
-date:         2026-08-19T20:13:50+00:00
-job id:       993425
+date:         2026-08-21T19:47:28+00:00
+job id:       993959
 alloc source: COBALT_NODEFILE  (8 nodes, using <= 8)
-nodefile:     /var/tmp/cobalt.993425
+nodefile:     /var/tmp/cobalt.993959
 exe:          /home/ncassarino/dstm/examples/traffic/graph_traffic/traffic
 data:         /home/ncassarino/dstm/examples/traffic/graph_traffic/data/bloomington/
 mpi prefix:   /soft/libraries/mpi/openmpi/4.1.1   forwarded: LD_LIBRARY_PATH PATH
