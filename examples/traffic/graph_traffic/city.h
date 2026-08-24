@@ -22,6 +22,7 @@ struct city {
         size_t *row_ptr;        /* nv + 1                               */
         size_t *dst;            /* ne, ascending within each row        */
         size_t *esrc;           /* ne, source vertex of each edge id    */
+        int    *ff_ticks;       /* ne, free-flow travel time in ticks   */
 
         /* Block partition, identical on every rank. */
         size_t *vtx_off;        /* world_size + 1                       */
