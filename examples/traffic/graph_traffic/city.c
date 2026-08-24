@@ -8,23 +8,41 @@
  * SPDX-License-Identifier: BSD-3-Clause
  ******************************************************************************/
 
+#include <math.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "city.h"
 
+/* One simulation tick, in seconds. free-flow travel time of an edge is
+ * ceil((length / fspd) / SECONDS_PER_TICK), clamped to >= 1. */
+#define SECONDS_PER_TICK 5.0
+
+/* Convert length[m] and free-flow speed[m/s] to integer ticks (>= 1).
+ * Missing/zero/garbage data (fspd <= 0 or length <= 0 or non-finite)
+ * degrades to 1 tick -- the pre-change behavior. */
+static int ff_ticks_of(double length_m, double fspd_ms)
+{
+        if (!(length_m > 0.0) || !(fspd_ms > 0.0))
+                return 1;
+
+        double secs = length_m / fspd_ms;
+        double t    = ceil(secs / SECONDS_PER_TICK);
+
+        if (!(t >= 1.0))        /* catches NaN and sub-1 */
+                return 1;
+        if (t > (double)INT32_MAX)
+                return INT32_MAX;
+        return (int)t;
+}
+
 /* --- comparators --------------------------------------------------- */
 
 static int cmp_long(const void *a, const void *b)
 {
         long x = *(const long *)a, y = *(const long *)b;
-        return (x > y) - (x < y);
-}
-
-static int cmp_szt(const void *a, const void *b)
-{
-        size_t x = *(const size_t *)a, y = *(const size_t *)b;
         return (x > y) - (x < y);
 }
 
@@ -100,56 +118,113 @@ static long read_nodes_xy(const char *path, long **ids_out, double **xy_out)
         return (long)n;
 }
 
-/* node_a (col 3) and node_b (col 4) of every link line into two parallel
- * arrays. Returns count or -1.
+/* node_a (col 2), node_b (col 3), length (col 4), fspd_ab (col 14) and
+ * fspd_ba (col 17) of every link line, into five parallel arrays.
+ * Returns count or -1.
  *
- * The `name` column is TEXT and unquoted in this export, but a name could
- * in principle contain a comma. We locate node_a/node_b by counting
- * commas from the LEFT is unsafe; instead we parse: link is col0 (int),
- * then skip exactly one field (name), then two ints. sscanf with
- * %*[^,] consumes the name up to the next comma -- correct as long as the
- * name is unquoted and comma-free, which holds for this dataset. If that
- * ever breaks, switch to a real quoted-CSV split. */
-static long read_link_pairs(const char *path, long **a_out, long **b_out)
+ * We now need several columns past the free-text `name` field, some of
+ * which may be empty (the schema allows NULL length / fspd). sscanf
+ * field-skipping does not compose cleanly across many optional columns,
+ * so we tokenize on commas by hand. This still assumes the `name` field
+ * is unquoted and comma-free, exactly as the previous sscanf version did;
+ * if that ever breaks, switch to a real quoted-CSV split. Empty numeric
+ * fields parse as 0.0, which ff_ticks_of() treats as "missing" -> 1 tick. */
+static long read_link_pairs(const char *path, long **a_out, long **b_out,
+                            double **len_out, double **fab_out,
+                            double **fba_out)
 {
         FILE *f = fopen(path, "r");
         if (!f) { perror(path); return -1; }
 
-        size_t cap = 1024, n = 0;
-        long  *a = malloc(cap * sizeof(*a));
-        long  *b = malloc(cap * sizeof(*b));
-        if (!a || !b) { free(a); free(b); fclose(f); return -1; }
+        size_t  cap = 1024, n = 0;
+        long   *a   = malloc(cap * sizeof(*a));
+        long   *b   = malloc(cap * sizeof(*b));
+        double *len = malloc(cap * sizeof(*len));
+        double *fab = malloc(cap * sizeof(*fab));
+        double *fba = malloc(cap * sizeof(*fba));
+        if (!a || !b || !len || !fab || !fba) {
+                free(a); free(b); free(len); free(fab); free(fba);
+                fclose(f);
+                return -1;
+        }
 
         char line[8192];
         int  first = 1;
         while (fgets(line, sizeof(line), f)) {
                 if (first) { first = 0; continue; }
-                long link, na, nb;
-                /* name present: link,name,na,nb,... */
-                if (sscanf(line, "%ld,%*[^,],%ld,%ld,", &link, &na, &nb) == 3)
-                        ;
-                /* name empty: link,,na,nb,... */
-                else if (sscanf(line, "%ld,,%ld,%ld,", &link, &na, &nb) == 3)
-                        ;
-                else
+
+                /* Split the line into up to 18 comma-delimited fields.
+                 * We only read indices 2,3,4,14,17, but must walk every
+                 * comma up to 17. A quoted geo_wkt with commas appears
+                 * only in the LAST column (index 20+), well past 17, so
+                 * it can never corrupt the fields we read. */
+                enum { WANT = 18 };
+                const char *fld[WANT];
+                size_t      fln[WANT];
+                for (int k = 0; k < WANT; k++) { fld[k] = ""; fln[k] = 0; }
+
+                const char *p    = line;
+                int         col  = 0;
+                while (col < WANT) {
+                        const char *comma = strchr(p, ',');
+                        size_t      flen  = comma ? (size_t)(comma - p)
+                                                  : strlen(p);
+                        fld[col] = p;
+                        fln[col] = flen;
+                        col++;
+                        if (!comma)
+                                break;
+                        p = comma + 1;
+                }
+
+                /* Need at least through node_a/node_b to be a real row. */
+                if (col < 4)
                         continue;
+
+                /* Local NUL-terminated copies for strtod/strtol. Fields
+                 * are short; a small stack buffer is plenty. */
+                char buf[64];
+                #define FIELD_STR(idx) \
+                        (fln[idx] < sizeof(buf) ? \
+                          (memcpy(buf, fld[idx], fln[idx]), \
+                           buf[fln[idx]] = '\0', buf) : "")
+
+                char  *end;
+                long   na = strtol(FIELD_STR(2), &end, 10);
+                if (end == buf) continue;          /* node_a not numeric */
+                long   nb = strtol(FIELD_STR(3), &end, 10);
+                if (end == buf) continue;          /* node_b not numeric */
+
+                double length  = strtod(FIELD_STR(4),  &end);
+                double fspd_ab = strtod(FIELD_STR(14), &end);
+                double fspd_ba = strtod(FIELD_STR(17), &end);
+                #undef FIELD_STR
 
                 if (n == cap) {
                         cap *= 2;
-                        long *ta = realloc(a, cap * sizeof(*a));
-                        long *tb = realloc(b, cap * sizeof(*b));
-                        if (!ta || !tb) {
-                                free(ta ? ta : a);
-                                free(tb ? tb : b);
+                        long   *ta = realloc(a,   cap * sizeof(*a));
+                        long   *tb = realloc(b,   cap * sizeof(*b));
+                        double *tl = realloc(len, cap * sizeof(*len));
+                        double *tp = realloc(fab, cap * sizeof(*fab));
+                        double *tq = realloc(fba, cap * sizeof(*fba));
+                        if (!ta || !tb || !tl || !tp || !tq) {
+                                free(ta ? ta : a);   free(tb ? tb : b);
+                                free(tl ? tl : len); free(tp ? tp : fab);
+                                free(tq ? tq : fba);
                                 fclose(f);
                                 return -1;
                         }
-                        a = ta; b = tb;
+                        a = ta; b = tb; len = tl; fab = tp; fba = tq;
                 }
-                a[n] = na; b[n] = nb; n++;
+                a[n]   = na;  b[n]   = nb;
+                len[n] = length;
+                fab[n] = fspd_ab;
+                fba[n] = fspd_ba;
+                n++;
         }
         fclose(f);
-        *a_out = a; *b_out = b;
+        *a_out   = a;   *b_out   = b;
+        *len_out = len; *fab_out = fab; *fba_out = fba;
         return (long)n;
 }
 
@@ -269,16 +344,19 @@ int city_load(struct city *c, const char *dir, int world_size)
 
         long              *node_ids = NULL, *la = NULL, *lb = NULL;
         double            *node_xy  = NULL;
+        double            *llen = NULL, *lfab = NULL, *lfba = NULL;
         long              *uni      = NULL;
         struct orig_index *nidx     = NULL;
         struct orig_index *oidx     = NULL;
         struct rcb_pt     *pts      = NULL;
         size_t            *eu = NULL, *ev = NULL, *seg = NULL, *cur = NULL;
+        int               *ew = NULL, *segw = NULL;
 
         long n_nodes = read_nodes_xy(npath, &node_ids, &node_xy);
-        long n_links = read_link_pairs(lpath, &la, &lb);
+        long n_links = read_link_pairs(lpath, &la, &lb, &llen, &lfab, &lfba);
         if (n_nodes < 0 || n_links < 0) {
-                free(node_ids); free(node_xy); free(la); free(lb);
+                free(node_ids); free(node_xy);
+                free(la); free(lb); free(llen); free(lfab); free(lfba);
                 return -1;
         }
 
@@ -380,7 +458,8 @@ int city_load(struct city *c, const char *dir, int world_size)
         size_t ecap = 2 * (size_t)n_links, en = 0;
         eu = malloc((ecap ? ecap : 1) * sizeof(*eu));
         ev = malloc((ecap ? ecap : 1) * sizeof(*ev));
-        if (!eu || !ev) goto oom;
+        ew = malloc((ecap ? ecap : 1) * sizeof(*ew));
+        if (!eu || !ev || !ew) goto oom;
 
         size_t dropped_self = 0;
         for (long i = 0; i < n_links; i++) {
@@ -388,10 +467,14 @@ int city_load(struct city *c, const char *dir, int world_size)
                 size_t v = dense_of(oidx, nv, lb[i]);
                 if (u == (size_t)-1 || v == (size_t)-1) continue;
                 if (u == v) { dropped_self++; continue; }
-                eu[en] = u; ev[en] = v; en++;
-                eu[en] = v; ev[en] = u; en++;
+                /* A->B uses fspd_ab, B->A uses fspd_ba; both share length. */
+                eu[en] = u; ev[en] = v; ew[en] = ff_ticks_of(llen[i], lfab[i]);
+                en++;
+                eu[en] = v; ev[en] = u; ew[en] = ff_ticks_of(llen[i], lfba[i]);
+                en++;
         }
         free(la); free(lb); la = lb = NULL;
+        free(llen); free(lfab); free(lfba); llen = lfab = lfba = NULL;
         free(oidx); oidx = NULL;
 
         /* --- Counting sort into per-row segments (pre-dedup) ---------- */
@@ -400,36 +483,70 @@ int city_load(struct city *c, const char *dir, int world_size)
         for (size_t e = 0; e < en; e++) c->row_ptr[eu[e] + 1]++;
         for (size_t i = 0; i < nv; i++) c->row_ptr[i + 1] += c->row_ptr[i];
 
-        seg = malloc((en ? en : 1) * sizeof(*seg));  /* dst by row */
-        cur = malloc((nv ? nv : 1) * sizeof(*cur));
-        if (!seg || !cur) goto oom;
+                seg  = malloc((en ? en : 1) * sizeof(*seg));  /* dst by row */
+        segw = malloc((en ? en : 1) * sizeof(*segw)); /* ff ticks by row */
+        cur  = malloc((nv ? nv : 1) * sizeof(*cur));
+        if (!seg || !segw || !cur) goto oom;
         for (size_t i = 0; i < nv; i++) cur[i] = c->row_ptr[i];
-        for (size_t e = 0; e < en; e++) seg[cur[eu[e]]++] = ev[e];
-        free(eu); free(ev); eu = ev = NULL;
+        /* Scatter dst and its weight together so segw stays aligned to seg
+         * before the per-row sort below re-permutes them in lockstep. */
+        for (size_t e = 0; e < en; e++) {
+                size_t pos = cur[eu[e]]++;
+                seg[pos]  = ev[e];
+                segw[pos] = ew[e];
+        }
+        free(eu); free(ev); free(ew); eu = ev = NULL; ew = NULL;
 
         /* --- Sort + dedup each row into fresh CSR --------------------- */
-        c->dst  = malloc((en ? en : 1) * sizeof(*c->dst));
-        c->esrc = malloc((en ? en : 1) * sizeof(*c->esrc));
+        c->dst      = malloc((en ? en : 1) * sizeof(*c->dst));
+        c->esrc     = malloc((en ? en : 1) * sizeof(*c->esrc));
+        c->ff_ticks = malloc((en ? en : 1) * sizeof(*c->ff_ticks));
         size_t *new_row = malloc((nv + 1) * sizeof(*new_row));
-        if (!c->dst || !c->esrc || !new_row) goto oom;
+        if (!c->dst || !c->esrc || !c->ff_ticks || !new_row) goto oom;
 
         size_t w = 0, dropped_dup = 0;
         for (size_t u = 0; u < nv; u++) {
                 size_t lo = c->row_ptr[u], hi = c->row_ptr[u + 1];
                 new_row[u] = w;
-                qsort(seg + lo, hi - lo, sizeof(*seg), cmp_szt);
+
+                /* Sort (dst, ff) pairs by dst. cmp_szt only compares the
+                 * dst key; we reorder segw by the same permutation using a
+                 * simple insertion co-sort on the row slice. Rows are tiny
+                 * (out-degrees of a road network), so insertion sort is
+                 * cheap and avoids allocating a pair array. */
+                for (size_t i = lo + 1; i < hi; i++) {
+                        size_t dv = seg[i];
+                        int    wv = segw[i];
+                        size_t j  = i;
+                        while (j > lo && seg[j - 1] > dv) {
+                                seg[j]  = seg[j - 1];
+                                segw[j] = segw[j - 1];
+                                j--;
+                        }
+                        seg[j]  = dv;
+                        segw[j] = wv;
+                }
+
                 for (size_t k = lo; k < hi; k++) {
                         if (k > lo && seg[k] == seg[k - 1]) {
+                                /* Duplicate directed edge (e.g. two links
+                                 * between the same pair). Keep the SMALLER
+                                 * free-flow time: it is the more
+                                 * constraining channel, matching the min
+                                 * reduction the distance matrix uses. */
                                 dropped_dup++;
+                                if (segw[k] < c->ff_ticks[w - 1])
+                                        c->ff_ticks[w - 1] = segw[k];
                                 continue;
                         }
-                        c->dst[w]  = seg[k];
-                        c->esrc[w] = u;
+                        c->dst[w]      = seg[k];
+                        c->esrc[w]     = u;
+                        c->ff_ticks[w] = segw[k];
                         w++;
                 }
         }
         new_row[nv] = w;
-        free(seg); free(cur); cur = NULL; seg = NULL;
+        free(seg); free(segw); free(cur); cur = NULL; seg = NULL; segw = NULL;
         free(c->row_ptr);
         c->row_ptr = new_row;   /* compacted offsets */
         c->ne = w;
@@ -462,9 +579,11 @@ int city_load(struct city *c, const char *dir, int world_size)
 oom:
         fprintf(stderr, "city_load: out of memory\n");
 fail:
-        free(node_ids); free(node_xy); free(uni); free(la); free(lb);
+        free(node_ids); free(node_xy); free(uni);
+        free(la); free(lb); free(llen); free(lfab); free(lfba);
         free(nidx); free(oidx); free(pts);
-        free(eu); free(ev); free(seg); free(cur);
+        free(eu); free(ev); free(ew);
+        free(seg); free(segw); free(cur);
         city_free(c);
         return -1;
 }
@@ -476,6 +595,7 @@ void city_free(struct city *c)
         free(c->row_ptr);
         free(c->dst);
         free(c->esrc);
+        free(c->ff_ticks);
         free(c->vtx_off);
         free(c->dense2orig);
         free(c->downtown);

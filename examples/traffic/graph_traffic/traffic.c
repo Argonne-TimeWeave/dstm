@@ -278,6 +278,7 @@ struct sim {
         size_t *lrow_ptr;       /* nlocal + 1                           */
         size_t *ldeg;           /* nlocal                               */
         size_t *ldst;           /* nedge_local                          */
+        int    *lff;            // nedge_local, free-flow ticks
         size_t  nedge_local;
         size_t  gslot_base;     /* city.row_ptr[v_lo]                   */
 
@@ -297,6 +298,7 @@ struct sim {
 
         dstm_time_t t;
         dstm_time_t t_end;
+        int         ff_max;//max free-flow ticks over ALL edges;
         unsigned int rng;
         int seed;
         int verbose;
@@ -479,8 +481,13 @@ static int build_reverse(void)
 
 static float edge_cost(size_t ge, int32_t t)
 {
+        /* Free-flow travel time (ticks) is now the base cost of the hop,
+         * so routing prefers genuinely faster edges, not just fewer hops.
+         * ff >= 1 by construction (city.c clamps it). */
+        float ff = (float)S.city.ff_ticks[ge];
+
         if (S.mode == REPLICA_BLIND)
-                return 1.0f;
+                return ff;
 
         const struct cong_entry *e = &S.rep.e[ge];
 
@@ -495,7 +502,10 @@ static float edge_cost(size_t ge, int32_t t)
         c = c / (float)S.L.cap;                  /* normalise by capacity */
         if (c > ROUTE_CONG_MAX)
                 c = ROUTE_CONG_MAX;
-        return 1.0f + ROUTE_BETA * c;
+
+        /* Congestion premium scales with free-flow time: a jam on a long
+         * edge costs more absolute time than the same jam on a short one. */
+        return ff + ROUTE_BETA * c * ff;
 }
 
 /* sp[dest] = cost-to-go from every vertex to dest, valid for sp_tick[dest]. */
@@ -692,16 +702,17 @@ static void send_channels(int32_t t)
                 size_t u = S.v_lo + i;
 
                 for (size_t ls = S.lrow_ptr[i]; ls < S.lrow_ptr[i + 1]; ls++) {
-                        size_t   v = S.ldst[ls];
-                        uint32_t n = S.stage_count[ls];
+                        size_t   v  = S.ldst[ls];
+                        uint32_t n  = S.stage_count[ls];
+                        int      ff = S.lff[ls];        /* >= 1 */
                         int      rc;
 
-                        /* chan_reset zeroes the whole buffer including the
-                         * state half we are about to overwrite. The double
-                         * write is deliberate: it guarantees no stale car
-                         * record or padding byte can survive in the tail,
-                         * and the memset is trivially vectorised. */
-                        chan_reset(&S.L, S.sendbuf, t + 1, u, v);
+                        /* Arrival tick MUST equal the put's effective time
+                         * (t + ff), or recv_channels' `h->tick != t` guard
+                         * silently drops every car on this edge. The state
+                         * half rides the same buffer, so congestion info now
+                         * also diffuses at free-flow speed (by design). */
+                        chan_reset(&S.L, S.sendbuf, t + ff, u, v);
 
                         memcpy(chan_state(&S.L, S.sendbuf), S.rep.e,
                                S.rep.n * sizeof(struct cong_entry));
@@ -713,11 +724,14 @@ static void send_channels(int32_t t)
                         }
 
                         /* Channel u->v is the slot (v,u), owned by the
-                         * RECEIVER. Cross-rank this is a remote put into
-                         * rank(v)'s version t+1; intra-rank it is a local
-                         * write to our own future version. */
+                         * RECEIVER. delta = ff satisfies delta >= distance
+                         * because the matrix stores the MIN crossing ff on
+                         * this boundary. Cross-rank: remote put into
+                         * rank(v)'s version t+ff. Intra-rank: local write to
+                         * our own future version t+ff (delta >= 1, so never
+                         * the delta==0 abort path). */
                         rc = dstm_dgraph_edge_put(S.g, v, u, S.sendbuf,
-                                                  (dstm_time_t)t, 1);
+                                                  (dstm_time_t)t, ff);
                         assert(rc == DSTM_SUCCESS);
 
                         S.st.sent_msgs++;
@@ -816,7 +830,9 @@ static int build_local_slice(void)
         S.lrow_ptr = malloc((S.nlocal + 1) * sizeof(*S.lrow_ptr));
         S.ldeg     = malloc(S.nlocal * sizeof(*S.ldeg));
         S.ldst     = malloc(S.nedge_local * sizeof(*S.ldst));
-        if (S.lrow_ptr == NULL || S.ldeg == NULL || S.ldst == NULL)
+        S.lff      = malloc(S.nedge_local * sizeof(*S.lff));
+        if (S.lrow_ptr == NULL || S.ldeg == NULL || S.ldst == NULL ||
+            S.lff == NULL)
                 return -1;
 
         for (size_t i = 0; i <= S.nlocal; i++)
@@ -826,6 +842,8 @@ static int build_local_slice(void)
 
         memcpy(S.ldst, &S.city.dst[S.gslot_base],
                S.nedge_local * sizeof(*S.ldst));
+        memcpy(S.lff, &S.city.ff_ticks[S.gslot_base],
+               S.nedge_local * sizeof(*S.lff));
 
         return 0;
 }
@@ -869,18 +887,116 @@ static int setup(const char *dir, int steps, unsigned int cap)
                 fflush(stdout);
         }
 
-        /* Distance matrix must exist BEFORE dstm_start, and the graph can
+                /* Distance matrix must exist BEFORE dstm_start, and the graph can
          * only be created AFTER it, because dstm_dgraph_create allocates
-         * from the session's local region. Hence the topology-only
-         * variant here: it needs nothing but dstm_init. Every edge weighs
-         * 1, which is exactly the lookahead our delta=1 channels rely
-         * on. */
-        rc = dstm_dgraph_distance_from_topology(&S.dist, S.nlocal, S.ldeg,
-                                                S.ldst, 1);
-        if (rc != DSTM_SUCCESS) {
-                fprintf(stderr, "rank %d: distance_from_topology failed: %d\n",
-                        S.rank, rc);
-                return -1;
+         * from the session's local region.
+         *
+         * Every channel now puts at delta = per-edge free-flow ticks, so
+         * the lookahead promised to DSTM must be the MIN free-flow time on
+         * each rank<->rank boundary (the most-constraining crossing edge).
+         * That guarantees every crossing put satisfies delta >= distance,
+         * while still letting each edge propagate at its own speed.
+         *
+         * The whole topology (S.city) is replicated and deterministic, so
+         * every rank builds a byte-identical matrix with NO communication;
+         * dstm_dgraph_distance_from_topology's Allgather is unnecessary
+         * here. Diagonal 0, unreachable pairs -1, reachable pairs = min
+         * crossing free-flow ticks. Also compute ff_max (== the largest
+         * delta any put will ever use) for the drain math in main(). */
+        {
+                int ws = S.world_size;
+                int *m = malloc((size_t)ws * (size_t)ws * sizeof(int));
+                if (m == NULL) {
+                        fprintf(stderr, "rank %d: matrix OOM\n", S.rank);
+                        return -1;
+                }
+                for (int i = 0; i < ws; i++)
+                        for (int j = 0; j < ws; j++)
+                                m[(size_t)i * ws + j] = (i == j) ? 0 : -1;
+
+                S.ff_max = 1;
+                for (size_t u = 0; u < S.city.nv; u++) {
+                        int ru = city_owner(&S.city, u);
+                        for (size_t k = S.city.row_ptr[u];
+                             k < S.city.row_ptr[u + 1]; k++) {
+                                size_t v  = S.city.dst[k];
+                                int    rv = city_owner(&S.city, v);
+                                int    w  = S.city.ff_ticks[k];
+
+                                if (w > S.ff_max)
+                                        S.ff_max = w;
+                                if (ru == rv)
+                                        continue;   /* intra-rank: no matrix */
+
+                                /* Undirected boundary: min over both cells,
+                                 * matching DSTM's symmetric reduction. */
+                                int *a = &m[(size_t)ru * ws + rv];
+                                int *b = &m[(size_t)rv * ws + ru];
+                                if (*a < 0 || w < *a) *a = w;
+                                if (*b < 0 || w < *b) *b = w;
+                        }
+                }
+
+                /* Prove the deltas are actually variable: histogram the
+                 * per-edge free-flow ticks over the WHOLE graph and dump
+                 * the min-crossing matrix DSTM will enforce. If every edge
+                 * were still delta 1, ff_max would be 1 and the histogram
+                 * would have a single non-empty bucket. */
+                if (S.rank == 0) {
+                        size_t hist[8] = {0};   /* 1,2,3,4,5,6-9,10-19,20+ */
+                        size_t ff_sum = 0, ff_cnt = 0;
+                        int    ff_min = INT32_MAX;
+
+                        for (size_t e = 0; e < S.city.ne; e++) {
+                                int w = S.city.ff_ticks[e];
+                                ff_sum += (size_t)w;
+                                ff_cnt++;
+                                if (w < ff_min) ff_min = w;
+                                if      (w <= 1)  hist[0]++;
+                                else if (w == 2)  hist[1]++;
+                                else if (w == 3)  hist[2]++;
+                                else if (w == 4)  hist[3]++;
+                                else if (w == 5)  hist[4]++;
+                                else if (w <= 9)  hist[5]++;
+                                else if (w <= 19) hist[6]++;
+                                else              hist[7]++;
+                        }
+
+                        printf("=== Free-flow delta profile (all edges) ===\n");
+                        printf("edges=%zu  min=%d  max=%d  mean=%.2f ticks\n",
+                               ff_cnt, ff_min, S.ff_max,
+                               ff_cnt ? (double)ff_sum / (double)ff_cnt : 0.0);
+                        printf("delta histogram: "
+                               "[1]=%zu [2]=%zu [3]=%zu [4]=%zu [5]=%zu "
+                               "[6-9]=%zu [10-19]=%zu [20+]=%zu\n",
+                               hist[0], hist[1], hist[2], hist[3], hist[4],
+                               hist[5], hist[6], hist[7]);
+                        if (S.ff_max == 1)
+                                printf("WARNING: all deltas are 1 -- variable "
+                                       "delta is NOT active (check length/"
+                                       "fspd parsing)\n");
+
+                        printf("=== Rank-boundary lookahead matrix "
+                               "(min crossing ff, -1 = no edge) ===\n");
+                        for (int i = 0; i < ws; i++) {
+                                printf("  r%-3d:", i);
+                                for (int j = 0; j < ws; j++)
+                                        printf(" %3d",
+                                               m[(size_t)i * ws + j]);
+                                printf("\n");
+                        }
+                        printf("============================================\n");
+                        fflush(stdout);
+                }
+
+                rc = dstm_distance_create_from_matrix(&S.dist, (size_t)ws, m);
+                free(m);
+                if (rc != DSTM_SUCCESS) {
+                        fprintf(stderr,
+                                "rank %d: distance_create_from_matrix "
+                                "failed: %d\n", S.rank, rc);
+                        return -1;
+                }
         }
 
         rc = dstm_start(S.dist);
@@ -998,6 +1114,7 @@ static void teardown_local(void)
         free(S.lrow_ptr);
         free(S.ldeg);
         free(S.ldst);
+        free(S.lff);
         free(S.stage);
         free(S.stage_count);
         free(S.load_cross);
@@ -1268,7 +1385,7 @@ int main(int argc, char *argv[])
                 run_step((int32_t)S.t, s);
 
         /* Last write was at t_end with delta 1. Drain one tick past it. */
-        dstm_time_t last_time = S.t_end + 2;
+        dstm_time_t last_time = S.t_end + S.ff_max + 1;
 
         teardown_dstm();
         dstm_fini(last_time);
