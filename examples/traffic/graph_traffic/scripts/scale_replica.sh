@@ -46,15 +46,15 @@ MAX_PPN="${MAX_PPN:-32}"                     # 32 ranks/node on this machine
 MAX_NODES="${MAX_NODES:-8}"
 
 DATA="${DATA:-${ROOT}/data/bloomington/}"
-RANKS="${RANKS:-4 8 16 32 64 128 256}"
+RANKS="${RANKS:-32 64 128 256}"
 MODES="${MODES:-stale oracle}"
 
-STEPS="${STEPS:-64}"
-CARS="${CARS:-4096}"
-RATE="${RATE:-512}"
-CAP="${CAP:-6}"
-SEED="${SEED:-42}"
-REPS="${REPS:-3}"
+STEPS="${STEPS:-256}"
+CARS="${CARS:-1024}"
+RATE="${RATE:-256}"
+CAP="${CAP:-2}"
+SEED="${SEED:-32}"
+REPS="${REPS:-2}"
 TIMEOUT_S="${TIMEOUT_S:-600}"               # per-run guard; 0 disables
 VERBOSITY="${VERBOSITY:---quiet}"
 DRY_RUN=0
