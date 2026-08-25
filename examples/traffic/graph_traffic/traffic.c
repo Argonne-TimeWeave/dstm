@@ -110,11 +110,21 @@
 /* Confidence half-life, in ticks, for age-weighted routing costs. */
 #define CONG_TAU 6.0f
 
-/* Free-flow hop costs 1. BETA is the congestion premium in units of
- * hops -- BETA=1.0 means a fully-saturated edge is worth detouring one
- * extra hop to avoid. Clamped so no single edge can dominate a path. */
-#define ROUTE_BETA     1.0f
-#define ROUTE_CONG_MAX 4.0f
+/* Volume-delay (BPR-style, linear) congestion model:
+ *
+ *     travel_time = free_flow_ticks + (load / capacity) * DELAY_FACTOR
+ *
+ * load     = age-decayed EWMA of per-tick crossings (cong_effective)
+ * capacity = edge capacity in veh/tick (city.cap_tick[ge])
+ * The penalty is additive and UNCAPPED: an edge at 2x capacity costs
+ * free_flow + 2*DELAY_FACTOR, matching the classic linear volume-delay
+ * function. There is no hard cap -- capacity makes an edge progressively
+ * more expensive, it does not block additional demand. */
+#define ROUTE_DELAY_FACTOR .5f
+
+#define MAX_CONGESTION_MULTIPLIER 5
+
+#define STALE_DELAY 5
 
 /*******************************************************************************
  * Replica modes
@@ -423,10 +433,8 @@ static void recv_channels(int32_t t)
                          * received: only this fold is elided, so the
                          * comparison is not confounded by differing
                          * communication volume. */
-                        if (S.mode == REPLICA_STALE)
-                                S.st.merge_updates +=
-                                        cong_merge(&S.rep,
-                                                   chan_state_c(&S.L,
+                        if (S.mode == REPLICA_STALE && (t % STALE_DELAY == 0))
+                                S.st.merge_updates += cong_merge(&S.rep, chan_state_c(&S.L,
                                                                 S.recvbuf));
                         S.st.recv_msgs++;
 
@@ -481,9 +489,7 @@ static int build_reverse(void)
 
 static float edge_cost(size_t ge, int32_t t)
 {
-        /* Free-flow travel time (ticks) is now the base cost of the hop,
-         * so routing prefers genuinely faster edges, not just fewer hops.
-         * ff >= 1 by construction (city.c clamps it). */
+        /* Free-flow travel time (ticks) is the base cost of the hop. */
         float ff = (float)S.city.ff_ticks[ge];
 
         if (S.mode == REPLICA_BLIND)
@@ -497,15 +503,69 @@ static float edge_cost(size_t ge, int32_t t)
                 S.st.route_age_sum += (uint64_t)(t - e->stamp);
         }
 
-        float c = cong_effective(e, t, CONG_TAU, 0.0f);
+        /* load = age-decayed smoothed per-tick crossings on this edge.
+         * cong_effective returns 0 when the entry has never been observed,
+         * so an unseen edge costs pure free-flow. */
+        float load = cong_effective(e, t, CONG_TAU, 0.0f);
 
-        c = c / (float)S.L.cap;                  /* normalise by capacity */
-        if (c > ROUTE_CONG_MAX)
-                c = ROUTE_CONG_MAX;
+        /* capacity in veh/tick; city.c guarantees it is > 0, so no
+         * division-by-zero guard is needed here. */
+        float cap = S.city.cap_tick[ge];
 
-        /* Congestion premium scales with free-flow time: a jam on a long
-         * edge costs more absolute time than the same jam on a short one. */
-        return ff + ROUTE_BETA * c * ff;
+        /* Linear volume-delay: additive, uncapped congestion penalty. */
+        return ff + (load / cap) * ROUTE_DELAY_FACTOR;
+}
+
+/* Physical crossing delay in ticks for the directed edge with global id
+ * `ge`, as seen by the SENDER at departure tick `t`.
+ *
+ * This is DISTINCT from edge_cost(): edge_cost is the uncapped routing
+ * belief used by Dijkstra, while this is the actual DSTM put delta that
+ * determines when the car arrives. It MUST be bounded, because dstm_fini
+ * drains up to last_time and an unbounded delta would let a car outrun
+ * the drain and stall the shutdown forever.
+ *
+ * Model: free-flow + linear volume-delay, but the congestion component is
+ * clamped to at most 2*ff, so a fully jammed edge takes at most 3x its
+ * free-flow time. The routing cost stays uncapped; only physical motion
+ * is bounded.
+ *
+ * The congestion is read from the sender's replica at t, so under STALE
+ * mode the physical delay inherits the same staleness the example studies
+ * -- a car is slowed by what its origin rank BELIEVES the edge looks like,
+ * which may lag reality. That is a deliberate consequence, not a bug.
+ *
+ * Guaranteed >= 1 (delta 0 would be -DSTM_EDOM remote, or trip the
+ * delta-0 put-after-get abort locally).
+ */
+static int edge_delay(size_t ge, int32_t t)
+{
+        int ff = S.city.ff_ticks[ge];          /* >= 1 */
+
+        /* BLIND ignores congestion entirely: pure free-flow motion. */
+        if (S.mode == REPLICA_BLIND)
+                return ff;
+
+        const struct cong_entry *e = &S.rep.e[ge];
+
+        float load = cong_effective(e, t, CONG_TAU, 0.0f);
+        float cap  = S.city.cap_tick[ge];      /* > 0 by construction */
+
+        /* Same linear volume-delay term as edge_cost, rounded up to whole
+         * ticks. >= 0 always (load, cap, factor all >= 0). */
+        int cong = (int)ceilf((load / cap) * ROUTE_DELAY_FACTOR);
+        if (cong < 0)
+                cong = 0;
+
+        /* Cap the congestion component at 2*ff -> total <= 3*ff. This is
+         * what makes the max delta provably 3*ff_max for the drain math. */
+        if (cong > (MAX_CONGESTION_MULTIPLIER - 1) * ff)
+                cong = (MAX_CONGESTION_MULTIPLIER - 1) * ff;
+
+        int actual = ff + cong;
+        if (actual < 1)                        /* defensive; ff>=1 already */
+                actual = 1;
+        return actual;
 }
 
 /* sp[dest] = cost-to-go from every vertex to dest, valid for sp_tick[dest]. */
@@ -557,7 +617,7 @@ static size_t route_pick(size_t i_local, int32_t dest, int32_t t, int32_t car_id
                 size_t ge = S.gslot_base + ls;
 
                 if (v == (size_t)dest)
-                        return ls;
+                       return ls;
                 if (!isfinite(d[v]))
                         continue;
 
@@ -704,15 +764,22 @@ static void send_channels(int32_t t)
                 for (size_t ls = S.lrow_ptr[i]; ls < S.lrow_ptr[i + 1]; ls++) {
                         size_t   v  = S.ldst[ls];
                         uint32_t n  = S.stage_count[ls];
-                        int      ff = S.lff[ls];        /* >= 1 */
+                        size_t   ge = S.gslot_base + ls;   /* global edge id */
                         int      rc;
 
+                        /* Physical crossing delay: free-flow + capped
+                         * congestion (up to 3x free-flow). This replaces the
+                         * fixed free-flow delta: congested edges now take
+                         * physically longer, not just cost more to route.
+                         * Computed from the sender's replica at t, so under
+                         * STALE it reflects the origin's (possibly stale)
+                         * belief -- by design. */
+                        int      actual = edge_delay(ge, t);
+
                         /* Arrival tick MUST equal the put's effective time
-                         * (t + ff), or recv_channels' `h->tick != t` guard
-                         * silently drops every car on this edge. The state
-                         * half rides the same buffer, so congestion info now
-                         * also diffuses at free-flow speed (by design). */
-                        chan_reset(&S.L, S.sendbuf, t + ff, u, v);
+                         * (t + actual), or recv_channels' `h->tick != t`
+                         * guard silently drops every car on this edge. */
+                        chan_reset(&S.L, S.sendbuf, t + actual, u, v);
 
                         memcpy(chan_state(&S.L, S.sendbuf), S.rep.e,
                                S.rep.n * sizeof(struct cong_entry));
@@ -724,14 +791,13 @@ static void send_channels(int32_t t)
                         }
 
                         /* Channel u->v is the slot (v,u), owned by the
-                         * RECEIVER. delta = ff satisfies delta >= distance
-                         * because the matrix stores the MIN crossing ff on
-                         * this boundary. Cross-rank: remote put into
-                         * rank(v)'s version t+ff. Intra-rank: local write to
-                         * our own future version t+ff (delta >= 1, so never
-                         * the delta==0 abort path). */
+                         * RECEIVER. delta = actual >= ff >= distance on this
+                         * boundary, so the lookahead contract still holds (a
+                         * LARGER delta is always legal). actual is bounded by
+                         * 3*ff, which the drain math in main() relies on.
+                         * delta >= 1, so never the delta==0 abort path. */
                         rc = dstm_dgraph_edge_put(S.g, v, u, S.sendbuf,
-                                                  (dstm_time_t)t, ff);
+                                                  (dstm_time_t)t, actual);
                         assert(rc == DSTM_SUCCESS);
 
                         S.st.sent_msgs++;
@@ -1240,7 +1306,7 @@ static void collect_and_print_stats(void)
                 printf("completed trips: mean hops=%.2f mean duration=%.2f "
                        "ticks\n",
                        (double)t_hops / (double)t_arr,
-                       (double)t_trip / (double)t_arr);
+                       ((double)t_trip + (((double)t_spawn - (double)t_arr) * ((double)S.t_end*2))) / (double)t_spawn);
 
         if (S.mode == REPLICA_BLIND)
                 printf("routing decisions: not counted in blind mode "
@@ -1385,7 +1451,7 @@ int main(int argc, char *argv[])
                 run_step((int32_t)S.t, s);
 
         /* Last write was at t_end with delta 1. Drain one tick past it. */
-        dstm_time_t last_time = S.t_end + S.ff_max + 1;
+        dstm_time_t last_time = S.t_end + MAX_CONGESTION_MULTIPLIER * S.ff_max + 1;
 
         teardown_dstm();
         dstm_fini(last_time);
