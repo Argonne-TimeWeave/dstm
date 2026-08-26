@@ -46,11 +46,11 @@ MAX_PPN="${MAX_PPN:-32}"                     # 32 ranks/node on this machine
 MAX_NODES="${MAX_NODES:-8}"
 
 DATA="${DATA:-${ROOT}/data/bloomington/}"
-RANKS="${RANKS:-32 64 128 256}"
+RANKS="${RANKS:-4 8 16 32 64 128 256}"
 MODES="${MODES:-stale oracle}"
 
 STEPS="${STEPS:-256}"
-CARS="${CARS:-1024}"
+CARS="${CARS:-256}"
 RATE="${RATE:-256}"
 CAP="${CAP:-2}"
 SEED="${SEED:-32}"
