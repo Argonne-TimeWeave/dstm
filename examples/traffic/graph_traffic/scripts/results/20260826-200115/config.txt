@@ -1,12 +1,12 @@
-host:         cascade12
-date:         2026-08-25T21:44:35+00:00
-job id:       995035
+host:         cascade10
+date:         2026-08-26T20:01:15+00:00
+job id:       995324
 alloc source: COBALT_NODEFILE  (8 nodes, using <= 8)
-nodefile:     /var/tmp/cobalt.995035
+nodefile:     /var/tmp/cobalt.995324
 exe:          /home/ncassarino/dstm/examples/traffic/graph_traffic/traffic
 data:         /home/ncassarino/dstm/examples/traffic/graph_traffic/data/bloomington/
 mpi prefix:   /soft/libraries/mpi/openmpi/4.1.1   forwarded: LD_LIBRARY_PATH PATH
-ranks:        32 64 128 256
+ranks:        4 8 16 32 64 128 256
 modes:        stale oracle
-steps:        256   cars: 1024   rate: 256   cap: 2   seed: 32
+steps:        256   cars: 256   rate: 256   cap: 2   seed: 32
 reps:         2    timeout: 600s   max ppn: 32

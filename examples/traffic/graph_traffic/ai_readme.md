@@ -1,12 +1,3 @@
-LOADS A REAL ROAD NETWORK FROM POLARIS-STYLE CSVs
-    city_load reads <dir>/node.csv and <dir>/link.csv and produces:
-        row_ptr, dst, esrc, vtx_off (per-vertex adjacency sorted ascending)
-    every link is emitted in both directions, so the reverse edge (v,u)
-    always exists whenever (u,v) does -- the channel scheme depends on it
-
-FUTURE OPTIMIZATION only send state information that is new to that neighbor
-        (local changes + anything you learned by relay that they haven't seen)
-
 # graph_traffic — routing under diffused, delayed congestion
 
 Each rank holds a congestion replica of the **entire** road network, loaded
@@ -29,11 +20,12 @@ mpirun -n 24 ./examples/traffic/graph_traffic/graph_traffic \
 |---------------------|---------|--------------------------------------|
 | `--data DIR`        | -       | dir with node.csv + link.csv (required) |
 | `--steps N`         | 60      | ticks                                |
-| `--cars M`          | 64      | agents spawned per rank at t=0       |
-| `--rate R`          | 0       | agents spawned per rank *per tick*   |
+| `--cars M`          | 64      | agents spawned total (M/ranks per rank) at t=0       |
+| `--rate R`          | 0       | agents spawned total (R/ranks per rank) *per tick*   |
 | `--cap C`           | 8       | max cars per edge per tick           |
 | `--seed S`          | 42      | RNG seed                             |
 | `--replica-mode M`  | stale   | `stale` \| `oracle` \| `blind`       |
+| `--stale-delay D`   | 5       | merge relayed state every D ticks (stale mode) |
 | `--verbose`         | off     | per-tick progress from rank 0        |
 | `--quiet`           | off     | DSTM log level quiet (default: debug)|
 
@@ -65,9 +57,9 @@ confounds the comparison.
 
 | mode     | replica contents                    | age of consulted entry |
 |----------|-------------------------------------|------------------------|
-| `stale`  | diffusion by relay — the real model | `max(1, hopdist)`      |
+| `stale`  | diffusion by relay, merged every `STALE_DELAY` ticks | `max(1, hopdist)`      |
 | `oracle` | `MPI_Allgatherv` every tick         | exactly `1.00`         |
-| `blind`  | congestion ignored, `cost == 1`     | n/a                    |
+| `blind`  | congestion ignored, `cost == ff_ticks[e]`     | n/a                    |
 
 Expected ordering on mean trip duration:
 
@@ -118,12 +110,17 @@ version, drain at delta 0 — with an edge slot standing in for an inbox cell.
 Each slot has exactly one writer and one reader, so no version can be
 clobbered by a concurrent write.
 
-`delta` is **1 on every channel**, including edges whose endpoints happen to
-share a rank. DSTM only requires this for cross-rank edges (the distance
-matrix is built from this same topology with `default_delta = 1`, so adjacent
-ranks are exactly 1 apart). Applying it uniformly is a *modelling* choice: one
-hop costs one tick everywhere, so diffusion timing does not depend on where
-the partition boundary falls.
+`delta` is **not fixed at 1**: each put uses `edge_delay(ge, t)` = the edge's
+free-flow ticks (`ff_ticks[ge]`) plus a congestion term clamped so total delay
+never exceeds `MAX_CONGESTION_MULTIPLIER` (8) × free-flow. Congested edges thus
+physically take longer to cross, and the clamp bounds the shutdown drain.
+
+This satisfies DSTM's lookahead contract — the boundary distance matrix uses
+the *minimum* crossing free-flow per rank pair, and every put's `delta >= ff >=
+distance`, so a larger delta is always legal. Under STALE, the delay is read
+from the sender's (possibly stale) replica at `t`, so a car is slowed by what
+its origin *believes* the edge looks like — the same staleness applied to
+physical motion, by design.
 
 ## The merge
 
@@ -146,8 +143,13 @@ Averaging incoming views would destroy all three properties. Don't.
 The **car** half is *not* idempotent, and that asymmetry is the one real trap
 here. A version nobody wrote this tick still contains last tick's buffer, so
 injecting agents from it would duplicate them. `chan_header.tick` carries the
-intended arrival tick and gates injection; the state merge runs
-unconditionally.
+intended arrival tick and gates injection.
+
+In `stale` mode the state merge runs only when `t % STALE_DELAY == 0`
+(default 5) — a throttle on replica freshness, and (by idempotency) another
+staleness dial. `oracle` overwrites the replica via allgatherv and `blind`
+never reads it, so both skip the fold; the message is still sent and received,
+so communication volume stays constant across modes.
 
 ## Per-tick discipline
 
@@ -158,7 +160,7 @@ recv_channels(t);      // merge state, inject arriving agents
 route_and_stage(t);    // Dijkstra over the replica, honour the cap
 measure_local(t);      // stamp owned entries with tick t
 replica_sync_oracle(); // oracle mode only
-send_channels(t);      // [header][state][cars] at (t, +1)
+send_channels(t);      // [header][state][cars] at (t, edge_delay(ge,t))
 ```
 
 `publish` is first for the same reason as in `arr_traffic`: it creates local
@@ -188,37 +190,27 @@ destination bias — "downtown" is the top ~5% highest-degree vertices
 (`max(1, nv/20)`), chosen deterministically from the loaded graph rather than
 a fixed geographic box.
 
-```c
-cost(e) = 1 + BETA * clamp(cong_effective(e) / cap, 0, ROUTE_CONG_MAX)
-```
-
-Free-flow is 1 per hop, so path length and congestion are on the same scale
-and `BETA` reads directly as "hops of detour worth avoiding a saturated
-edge". The clamp stops any single edge from dominating a path — without it,
-congestion cost runs away and cars execute a congestion-fleeing random walk
-that is *worse* than routing blind.
-
-Confidence decays with age, toward free-flow:
+The routing cost is a linear (BPR-style) volume-delay function:
 
 ```c
-w       = expf(-age / CONG_TAU);
-premium = w * value + (1 - w) * 0.0f;   /* decays to no premium */
-cost    = 1 + ROUTE_BETA * clamp(premium / cap, 0, ROUTE_CONG_MAX);
+cost(e) = ff_ticks[e] + (load / cap) * ROUTE_DELAY_FACTOR
 ```
 
-An agent trusts nearby news and discounts distant news in proportion to how
-out of date it is. This turns "the information is delayed" from a defect into
-something the algorithm reasons about explicitly, and is the natural hook for
-prediction later: an agent reaching an edge in *k* ticks on data *d* ticks old
-is extrapolating across `d + k`.
+ff_ticks[e] is the edge's per-edge free-flow travel time in ticks (derived from length/speed in the loaded network, not a uniform 1), and load is the age-decayed EWMA of per-tick crossings from cong_effective. The congestion penalty is additive and uncapped: an edge at 2× capacity costs ff + 2*ROUTE_DELAY_FACTOR. There is no hard cap on the routing belief — capacity makes an edge progressively more expensive, it does not block demand. An edge never observed has stamp < 0, so cong_effective returns 0 and the edge costs pure free-flow.
+
+Confidence decays with age via cong_effective(e, t, CONG_TAU, 0.0f): the smoothed load is weighted by expf(-age / CONG_TAU) and decays toward 0 (no premium) as the entry ages. An agent trusts nearby news and discounts distant news in proportion to how out of date it is, turning "the information is delayed" from a defect into something the algorithm reasons about explicitly.
+
+The physical crossing delay (edge_delay, the DSTM put delta) uses the same volume-delay term but rounded up to whole ticks and clamped to at most (MAX_CONGESTION_MULTIPLIER - 1) * ff of congestion — total ≤ 8× free-flow. The routing belief stays uncapped; only physical motion is bounded, so the shutdown drain terminates. A deterministic tie_jitter(car_id, t, edge_id) hash breaks ties independently of the per-rank RNG stream.
 
 ## Cap overflow is a model parameter, not a buffer limit
 
 An agent denied a crossing because the edge is at `cap` does not vanish and is
 not rerouted this tick. It stays put, and is counted as queueing load on the
 edge it wanted (`BLOCK_PENALTY` per blocked agent). Saturated edges therefore
-report higher congestion, which diffuses outward and steers later agents away.
-Changing `--cap` changes the physics, not just the message size.
+report higher congestion, which (a) diffuses outward and steers later agents
+away via routing cost, and (b) raises the edge's own `edge_delay`, so cars
+already committed to it physically take longer to cross. Changing `--cap`
+changes the physics, not just the message size.
 
 ## Sizing a run
 
@@ -230,14 +222,12 @@ utilisation:
 N  ~=  1.2 * ne * cap        (total cars in flight)
 ```
 
-Read `ne` (directed edge count) off the startup summary — it depends entirely
-on the loaded network. The Bloomington data, for example, is 3133 vertices and
-9048 directed edges; at `cap 3` that is 27144 crossings/tick of capacity, so
-~32000 cars in flight to sit in the target band. Under-load the network and
-there is nothing to route around; over-load it and every edge saturates every
-tick, all routing choices become equally bad, and all three modes collapse
-onto each other. Because car counts are per-rank, watch the *total* (cars or
-rate × ranks) against `ne * cap`, not the per-rank figure.
+Read `ne` (directed edge count) off the startup summary. Bloomington is 3133
+vertices / 9048 directed edges; at `cap 3` that is 27144 crossings/tick, so
+~32000 cars in flight sits in the target band. Under-load and there is nothing
+to route around; over-load and every edge saturates, all choices become equally
+bad, and the modes collapse together. `--cars`/`--rate` are global totals, so
+compare the total in-flight count against `ne * cap`.
 
 ## What to look for in the output
 
@@ -253,10 +243,12 @@ rate × ranks) against `ne * cap`, not the per-rank figure.
   routing, averaged over every edge Dijkstra relaxed. In `oracle` it must be
   exactly `1.00` — anything else means the allgatherv is landing wrong. In
   `stale` it should be close to the replica-staleness mean.
-- **`lost`** is cars staged on the final tick that arrive at a tick which
-  never runs -- one tick's worth of successful crossings. Blocked agents
-  are not lost: they stay put and are still counted in `live`. Expect
-  roughly `live * (1 - blocked_fraction) / (DWELL_TICKS + 1)`.
+- **`lost`** is cars still in flight when the simulation stops. Because
+  congested edges can take up to `MAX_CONGESTION_MULTIPLIER * ff_max` ticks to
+  cross, the drain runs to `t_end + MAX_CONGESTION_MULTIPLIER * ff_max + 1`,
+  but cars staged late or on slow/congested edges can still arrive past the
+  last tick that runs. Blocked agents are not lost: they stay put and are
+  still counted in `live`.
   Agents are otherwise conserved: the pool slot is released the instant a
   record is staged and recreated by `inject_car` on arrival, so exactly one
   copy exists at all times.
@@ -267,11 +259,8 @@ rate × ranks) against `ne * cap`, not the per-rank figure.
 
 Per rank per tick: `local_edges * (40 + 8|E| + 24*cap)` bytes out. The `8|E|`
 term dominates and grows with the **global** graph while `local_edges` shrinks
-only as `1/P`, so total traffic grows as `O(|E|^2)`. Startup prints the exact
-figure. Concretely: the Bloomington network is 9048 directed edges, so each
-message carries ~72 KiB of state and the whole job ships hundreds of MiB per
-tick — read the "per-tick out/rank" line the summary prints for your network
-and rank count before scaling up.
+only as `1/P`, so total traffic grows as `O(|E|^2)`. Read the "per-tick
+out/rank" line the summary prints for your network before scaling up.
 
 DSTM also retains one region copy per version, so peak memory is roughly
 `steps * local_edges * edge_state_size`. Use a modest network or keep
@@ -298,8 +287,9 @@ propagating at you.
   re-route if the alternative is better by a margin — is the next step.
 - **Partition independence is a property of the model, not of a run.**
   `tie_jitter` is a pure hash of `(car id, tick, edge id)`, so routing
-  tie-breaks never depend on the per-rank RNG stream, and diffusion timing
-  is partition-independent by construction (`delta = 1` everywhere). But
+  tie-breaks never depend on the per-rank RNG stream, and diffusion timing is
+  partition-independent by construction (intra- and cross-rank edges use the
+  same `edge_delay`). But
   `spawn_cars` picks origins from the local vertex range with a per-rank
   stream, so `-n 2` and `-n 8` at the same `--seed` generate different
   demand and cannot produce identical trajectories. Making that comparison
