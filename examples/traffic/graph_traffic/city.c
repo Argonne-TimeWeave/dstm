@@ -18,7 +18,7 @@
 
 /* One simulation tick, in seconds. free-flow travel time of an edge is
  * ceil((length / fspd) / SECONDS_PER_TICK), clamped to >= 1. */
-#define SECONDS_PER_TICK 5.0
+#define SECONDS_PER_TICK 10.0
 
 /* Convert length[m] and free-flow speed[m/s] to integer ticks (>= 1).
  * Missing/zero/garbage data (fspd <= 0 or length <= 0 or non-finite)
@@ -134,17 +134,16 @@ static long read_nodes_xy(const char *path, long **ids_out, double **xy_out)
         return (long)n;
 }
 
-/* node_a (col 2), node_b (col 3), length (col 4), fspd_ab (col 14) and
- * fspd_ba (col 17) of every link line, into five parallel arrays.
- * Returns count or -1.
+/* Parse node_a/node_b/length/fspd_ab/cap_ab/fspd_ba/cap_ba (cols
+ * 2,3,4,14,15,17,18) of every link line into parallel arrays. Returns
+ * count or -1.
  *
- * We now need several columns past the free-text `name` field, some of
- * which may be empty (the schema allows NULL length / fspd). sscanf
- * field-skipping does not compose cleanly across many optional columns,
- * so we tokenize on commas by hand. This still assumes the `name` field
- * is unquoted and comma-free, exactly as the previous sscanf version did;
- * if that ever breaks, switch to a real quoted-CSV split. Empty numeric
- * fields parse as 0.0, which ff_ticks_of() treats as "missing" -> 1 tick. */
+ * Columns past the free-text `name` may be empty (schema allows NULL
+ * length/fspd), and sscanf field-skipping does not compose across many
+ * optional columns, so we tokenize on commas by hand. Assumes `name` is
+ * unquoted and comma-free (as the old sscanf version did); switch to a
+ * real quoted-CSV split if that breaks. Empty numeric fields parse as
+ * 0.0, which ff_ticks_of() treats as "missing" -> 1 tick. */
 static long read_link_pairs(const char *path, long **a_out, long **b_out,
                             double **len_out, double **fab_out,
                             double **fba_out, double **cab_out,
@@ -341,17 +340,13 @@ static int city_pick_downtown(struct city *c)
         size_t n  = nv / 20;
         if (n == 0) n = (nv < 1 ? 0 : 1);
 
-        /* selection of top-n by degree via a full sort keyed on degree.
-         * Small networks; a full qsort with a captured base is awkward in
-         * C, so we sort (degree,id) pairs. */
-        struct { size_t deg, id; } *pv =
-                malloc(nv * sizeof(*pv));
+        /* Top-n by degree via a full qsort of (degree,id) pairs. */
+        struct deg_pair *pv = malloc(nv * sizeof(*pv));
         for (size_t i = 0; i < nv; i++) {
                 pv[i].deg = c->row_ptr[i + 1] - c->row_ptr[i];
                 pv[i].id  = i;
         }
-        /* descending degree, ascending id tie-break */
-        qsort(pv, nv, sizeof(*pv), cmp_deg_desc);
+        qsort(pv, nv, sizeof(*pv), cmp_deg_desc);  /* desc degree, asc id */
 
         c->downtown = malloc((n ? n : 1) * sizeof(*c->downtown));
         for (size_t i = 0; i < n; i++) c->downtown[i] = pv[i].id;
