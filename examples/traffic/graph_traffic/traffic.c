@@ -11,64 +11,41 @@
 /*
  * Graph traffic: routing under diffused, delayed congestion information.
  *
- * Every rank holds a replica of the congestion state of the ENTIRE graph.
- * Each tick a rank refreshes the entries it owns from local measurement,
- * then ships the whole replica -- plus the agents physically crossing --
- * along every one of its outgoing edges. Information about a distant edge
- * therefore reaches a rank only after as many ticks as there are hops
- * between them, and routing decisions are made against that stale view.
+ * Every rank replicates the ENTIRE graph's congestion state. Each tick a
+ * rank refreshes the entries it owns, then ships the whole replica -- plus
+ * crossing agents -- along every outgoing edge. A distant edge's state
+ * reaches a rank only after as many ticks as hops between them, so routing
+ * runs against that stale view.
  *
  * Mapping onto DSTM
  * =================
+ * The channel for directed edge u->v is the edge slot (v,u), owned by
+ * rank(v), the RECEIVER:
+ *   sender    dstm_dgraph_edge_put(g, v, u, buf, t, delta)  remote write
+ *   receiver  dstm_dgraph_edge_get(g, v, u, buf, t, 0)      local read
+ * One writer, one reader per slot, so no version is ever clobbered.
  *
- * The channel for directed edge u->v is the dstm_dgraph edge slot (v,u),
- * which is owned by rank(v) -- the RECEIVER. So:
+ * delta is the edge's physical crossing delay (edge_delay): free-flow
+ * ticks plus a capped congestion penalty, so a jam slows a car, not just
+ * its routing cost. Replica diffusion rides the same puts.
  *
- *   sender    dstm_dgraph_edge_put(g, v, u, buf, t, +1)   remote write
- *   receiver  dstm_dgraph_edge_get(g, v, u, buf, t,  0)   local read
- *
- * This is the arr_traffic inbox discipline (push into the receiver's
- * future version, drain at delta 0) with an edge slot standing in for an
- * inbox cell. Each slot has exactly one writer and one reader, so no
- * version can be clobbered.
- *
- * delta is 1 on EVERY channel, including edges whose endpoints happen to
- * live on the same rank. Information and agents therefore both advance
- * exactly one hop per tick no matter how the graph is partitioned, so
- * diffusion timing does not depend on where the partition boundary falls.
- *
- * This is NOT the same as reproducibility across rank counts: spawn_cars
- * draws origins from the local vertex range using a per-rank RNG stream,
- * so changing -n changes the demand itself.  
- *
- * The merge is highest-stamp-wins on (value, stamp) with exactly one
- * authoritative writer per edge. "Last" is deliberately not what decides
- * it: arrival order carries no weight, only the stamp does.
- * Entries with equal stamps are
- * bit-identical, so the join is commutative, associative and idempotent:
- * MPI delivery order cannot change the answer, and re-reading an
- * unchanged version is harmless.
+ * The merge is highest-stamp-wins with one authoritative writer per edge:
+ * commutative, associative, idempotent, so MPI delivery order cannot
+ * change the result. STALE folds neighbour state every S.stale_delay
+ * ticks; oracle overwrites the replica globally; blind never reads it.
  *
  * Per-tick discipline
  * ===================
+ *   1. publish owned vertex state at (t, 0) -- creates version t so the
+ *      self-region get at delta 0 cannot block; emits heartbeats
+ *   2. receive: read slot (v,u) at (t, 0); merge state, inject cars
+ *   3. route: each eligible car picks its next edge, staged subject to the
+ *      per-edge cap; denied cars stay put and count as load
+ *   4. measure: fold this tick's load into owned entries, stamp with t
+ *   5. send: pack [header][state][cars] per edge, put at (t, edge_delay)
  *
- *   1. publish owned vertex state at (t, 0)
- *        - creates local region version t, so the self-region edge_get
- *          at delta 0 below cannot block on a missing version
- *        - emits heartbeats so the distributed horizon advances
- *   2. receive: for every local vertex v and every neighbour u, read slot
- *      (v,u) at (t, 0); merge the state half, inject the car half
- *   3. route: every eligible local car picks its next edge from the
- *      replica and is staged into that edge's outgoing buffer, subject to
- *      the per-edge cap. Denied cars stay put and are counted as load.
- *   4. measure: fold this tick's per-edge load into the owned entries of
- *      the replica and stamp them with t
- *   5. send: pack [header][state][cars] for every outgoing edge and put
- *      it at (t, +1)
- *
- * Step 4 follows step 2 so a relayed copy of one of our own edges can
- * never overwrite the authoritative value. The stamp rule already
- * guarantees that; the ordering makes it obvious.
+ * Step 4 follows step 2 so a relayed copy of our own edge cannot overwrite
+ * the authoritative value.
  *
  * Run with:  mpirun -n P ./graph_traffic --help
  */
@@ -120,11 +97,11 @@
  * free_flow + 2*DELAY_FACTOR, matching the classic linear volume-delay
  * function. There is no hard cap -- capacity makes an edge progressively
  * more expensive, it does not block additional demand. */
-#define ROUTE_DELAY_FACTOR .5f
+#define ROUTE_DELAY_FACTOR 1.0f
 
-#define MAX_CONGESTION_MULTIPLIER 5
+#define MAX_CONGESTION_MULTIPLIER 8
 
-#define STALE_DELAY 5
+#define STALE_DELAY_DEFAULT 2
 
 /*******************************************************************************
  * Replica modes
@@ -288,7 +265,6 @@ struct sim {
         size_t *lrow_ptr;       /* nlocal + 1                           */
         size_t *ldeg;           /* nlocal                               */
         size_t *ldst;           /* nedge_local                          */
-        int    *lff;            // nedge_local, free-flow ticks
         size_t  nedge_local;
         size_t  gslot_base;     /* city.row_ptr[v_lo]                   */
 
@@ -312,6 +288,7 @@ struct sim {
         unsigned int rng;
         int seed;
         int verbose;
+        int stale_delay;
 
         enum replica_mode mode;
 
@@ -423,17 +400,14 @@ static void recv_channels(int32_t t)
 
                         const struct chan_header *h = chan_hdr_c(S.recvbuf);
 
-                        /* The state half is idempotent under merge, so
-                         * apply it unconditionally -- even a stale copy
-                         * can only be ignored, never regress us.
-                         *
-                         * Oracle overwrites the whole replica later in the
-                         * tick and blind never reads it, so both skip the
-                         * merge pass. The message was still sent and
-                         * received: only this fold is elided, so the
-                         * comparison is not confounded by differing
-                         * communication volume. */
-                        if (S.mode == REPLICA_STALE && (t % STALE_DELAY == 0))
+                        /* State half is idempotent, so a stale copy can
+                         * only be ignored, never regress us. STALE folds
+                         * it every S.stale_delay ticks; oracle overwrites
+                         * the replica later and blind never reads it, so
+                         * both skip the fold. The message is still sent and
+                         * received either way, keeping comm volume equal
+                         * across modes. */
+                        if (S.mode == REPLICA_STALE && (t % S.stale_delay == 0))
                                 S.st.merge_updates += cong_merge(&S.rep, chan_state_c(&S.L,
                                                                 S.recvbuf));
                         S.st.recv_msgs++;
@@ -516,54 +490,38 @@ static float edge_cost(size_t ge, int32_t t)
         return ff + (load / cap) * ROUTE_DELAY_FACTOR;
 }
 
-/* Physical crossing delay in ticks for the directed edge with global id
- * `ge`, as seen by the SENDER at departure tick `t`.
+/* Physical crossing delay (ticks) for edge `ge`, as seen by the SENDER at
+ * tick `t`. This is the DSTM put delta that decides when the car arrives,
+ * distinct from edge_cost()'s uncapped routing belief. It must be bounded
+ * so dstm_fini's drain to last_time cannot be outrun by a car.
  *
- * This is DISTINCT from edge_cost(): edge_cost is the uncapped routing
- * belief used by Dijkstra, while this is the actual DSTM put delta that
- * determines when the car arrives. It MUST be bounded, because dstm_fini
- * drains up to last_time and an unbounded delta would let a car outrun
- * the drain and stall the shutdown forever.
- *
- * Model: free-flow + linear volume-delay, but the congestion component is
- * clamped to at most 2*ff, so a fully jammed edge takes at most 3x its
- * free-flow time. The routing cost stays uncapped; only physical motion
- * is bounded.
- *
- * The congestion is read from the sender's replica at t, so under STALE
- * mode the physical delay inherits the same staleness the example studies
- * -- a car is slowed by what its origin rank BELIEVES the edge looks like,
- * which may lag reality. That is a deliberate consequence, not a bug.
- *
- * Guaranteed >= 1 (delta 0 would be -DSTM_EDOM remote, or trip the
- * delta-0 put-after-get abort locally).
+ * Model: free-flow + linear volume-delay, congestion capped so the total
+ * is at most MAX_CONGESTION_MULTIPLIER * ff -- the bound the drain math in
+ * main() relies on. Congestion is read from the sender's replica, so under
+ * STALE the delay inherits the same staleness the example studies.
  */
 static int edge_delay(size_t ge, int32_t t)
 {
         int ff = S.city.ff_ticks[ge];          /* >= 1 */
 
-        /* BLIND ignores congestion entirely: pure free-flow motion. */
         if (S.mode == REPLICA_BLIND)
-                return ff;
+                return ff;                      /* pure free-flow motion */
 
         const struct cong_entry *e = &S.rep.e[ge];
 
         float load = cong_effective(e, t, CONG_TAU, 0.0f);
         float cap  = S.city.cap_tick[ge];      /* > 0 by construction */
 
-        /* Same linear volume-delay term as edge_cost, rounded up to whole
-         * ticks. >= 0 always (load, cap, factor all >= 0). */
         int cong = (int)ceilf((load / cap) * ROUTE_DELAY_FACTOR);
         if (cong < 0)
                 cong = 0;
 
-        /* Cap the congestion component at 2*ff -> total <= 3*ff. This is
-         * what makes the max delta provably 3*ff_max for the drain math. */
+        /* Cap so total <= MAX_CONGESTION_MULTIPLIER * ff (drain bound). */
         if (cong > (MAX_CONGESTION_MULTIPLIER - 1) * ff)
                 cong = (MAX_CONGESTION_MULTIPLIER - 1) * ff;
 
         int actual = ff + cong;
-        if (actual < 1)                        /* defensive; ff>=1 already */
+        if (actual < 1)
                 actual = 1;
         return actual;
 }
@@ -716,23 +674,13 @@ static void measure_local(int32_t t)
 /*******************************************************************************
  * Oracle synchronisation (control mode only)
  *
- * Rebuilds the replica from every rank's owned slice. Because vertices
- * are block-partitioned, rank r owns exactly the contiguous global edge
- * range [gslot_base(r), gslot_base(r) + nedge_local(r)), and those ranges
- * tile [0, |E|) without gap or overlap -- asserted at setup. So an
- * allgatherv of owned slices IS the full replica.
- *
- * That makes this provably identical to a max-by-stamp allreduce, without
- * needing MPI_Op_create: after measure_local(t) the owner's stamp for any
- * entry is t and no other rank can hold anything newer, so "take the
- * owner's copy" and "take the max stamp" coincide by the single-writer
- * property.
- *
- * MPI_IN_PLACE means each rank contributes from S.rep.e at its own
- * displacement -- exactly the bytes measure_local just wrote.
- *
- * Collective: every rank must agree on the mode or this deadlocks. All
- * ranks parse the same argv, so that holds.
+ * Vertices are block-partitioned, so rank r owns the contiguous edge range
+ * [gslot_base, gslot_base + nedge_local); those ranges tile [0, |E|)
+ * (asserted at setup), so an allgatherv of owned slices IS the full
+ * replica. Since only the owner writes an entry and its stamp is t after
+ * measure_local, "take the owner's copy" equals a max-by-stamp allreduce.
+ * MPI_IN_PLACE contributes each rank's own bytes at its own displacement.
+ * Collective: all ranks parse the same argv, so the mode always agrees.
  ******************************************************************************/
 static void replica_sync_oracle(void)
 {
@@ -744,18 +692,15 @@ static void replica_sync_oracle(void)
 /*******************************************************************************
  * Step 5: send on every outgoing channel
  *
- * Every edge is written every tick, even when no agent crosses it and
- * nothing local changed. The buffer is the vehicle for the whole replica,
- * so skipping a quiet edge would stall diffusion through it.
+ * Every edge is written every tick, even when nothing crosses it: the
+ * buffer carries the whole replica, so skipping a quiet edge would stall
+ * diffusion through it.
  *
- * delta is 1 unconditionally. For a cross-rank edge that satisfies DSTM's
- * conservative rule because the distance matrix was built from this same
- * topology with default_delta 1, so adjacent ranks are exactly 1 apart.
- * For an intra-rank edge it is not required by DSTM at all -- it is
- * required by the MODEL, so that one hop always costs one tick regardless
- * of where the partition boundary happens to fall.
+ * delta is edge_delay(ge, t) -- free-flow plus capped congestion. For a
+ * cross-rank edge this is >= the distance the matrix enforces (a larger
+ * delta is always legal); for an intra-rank edge it is what the model
+ * needs so a hop's cost is independent of the partition boundary.
  ******************************************************************************/
-
 static void send_channels(int32_t t)
 {
         for (size_t i = 0; i < S.nlocal; i++) {
@@ -767,13 +712,9 @@ static void send_channels(int32_t t)
                         size_t   ge = S.gslot_base + ls;   /* global edge id */
                         int      rc;
 
-                        /* Physical crossing delay: free-flow + capped
-                         * congestion (up to 3x free-flow). This replaces the
-                         * fixed free-flow delta: congested edges now take
-                         * physically longer, not just cost more to route.
-                         * Computed from the sender's replica at t, so under
-                         * STALE it reflects the origin's (possibly stale)
-                         * belief -- by design. */
+                        /* Physical crossing delay (see edge_delay): under
+                         * STALE this reflects the origin's possibly stale
+                         * belief, by design. */
                         int      actual = edge_delay(ge, t);
 
                         /* Arrival tick MUST equal the put's effective time
@@ -790,12 +731,9 @@ static void send_channels(int32_t t)
                                 assert(prc == 0);
                         }
 
-                        /* Channel u->v is the slot (v,u), owned by the
-                         * RECEIVER. delta = actual >= ff >= distance on this
-                         * boundary, so the lookahead contract still holds (a
-                         * LARGER delta is always legal). actual is bounded by
-                         * 3*ff, which the drain math in main() relies on.
-                         * delta >= 1, so never the delta==0 abort path. */
+                        /* Slot (v,u) is owned by the receiver. actual >= ff
+                         * >= boundary distance, so the lookahead contract
+                         * holds; actual >= 1, so never the delta==0 abort. */
                         rc = dstm_dgraph_edge_put(S.g, v, u, S.sendbuf,
                                                   (dstm_time_t)t, actual);
                         assert(rc == DSTM_SUCCESS);
@@ -896,9 +834,7 @@ static int build_local_slice(void)
         S.lrow_ptr = malloc((S.nlocal + 1) * sizeof(*S.lrow_ptr));
         S.ldeg     = malloc(S.nlocal * sizeof(*S.ldeg));
         S.ldst     = malloc(S.nedge_local * sizeof(*S.ldst));
-        S.lff      = malloc(S.nedge_local * sizeof(*S.lff));
-        if (S.lrow_ptr == NULL || S.ldeg == NULL || S.ldst == NULL ||
-            S.lff == NULL)
+        if (S.lrow_ptr == NULL || S.ldeg == NULL || S.ldst == NULL) 
                 return -1;
 
         for (size_t i = 0; i <= S.nlocal; i++)
@@ -908,8 +844,6 @@ static int build_local_slice(void)
 
         memcpy(S.ldst, &S.city.dst[S.gslot_base],
                S.nedge_local * sizeof(*S.ldst));
-        memcpy(S.lff, &S.city.ff_ticks[S.gslot_base],
-               S.nedge_local * sizeof(*S.lff));
 
         return 0;
 }
@@ -953,22 +887,16 @@ static int setup(const char *dir, int steps, unsigned int cap)
                 fflush(stdout);
         }
 
-                /* Distance matrix must exist BEFORE dstm_start, and the graph can
-         * only be created AFTER it, because dstm_dgraph_create allocates
-         * from the session's local region.
+        /* Distance matrix must exist before dstm_start; the graph is created
+         * after, since dstm_dgraph_create allocates from the local region.
          *
-         * Every channel now puts at delta = per-edge free-flow ticks, so
-         * the lookahead promised to DSTM must be the MIN free-flow time on
-         * each rank<->rank boundary (the most-constraining crossing edge).
-         * That guarantees every crossing put satisfies delta >= distance,
-         * while still letting each edge propagate at its own speed.
-         *
-         * The whole topology (S.city) is replicated and deterministic, so
-         * every rank builds a byte-identical matrix with NO communication;
-         * dstm_dgraph_distance_from_topology's Allgather is unnecessary
-         * here. Diagonal 0, unreachable pairs -1, reachable pairs = min
-         * crossing free-flow ticks. Also compute ff_max (== the largest
-         * delta any put will ever use) for the drain math in main(). */
+         * Lookahead per rank<->rank boundary is the MIN free-flow time of
+         * any crossing edge, so every crossing put satisfies delta >=
+         * distance. The topology is replicated and deterministic, so each
+         * rank builds a byte-identical matrix with no communication:
+         * diagonal 0, unreachable -1, reachable = min crossing ff. ff_max
+         * (the largest put delta component) is computed here for the drain
+         * math in main(). */
         {
                 int ws = S.world_size;
                 int *m = malloc((size_t)ws * (size_t)ws * sizeof(int));
@@ -1003,11 +931,9 @@ static int setup(const char *dir, int steps, unsigned int cap)
                         }
                 }
 
-                /* Prove the deltas are actually variable: histogram the
-                 * per-edge free-flow ticks over the WHOLE graph and dump
-                 * the min-crossing matrix DSTM will enforce. If every edge
-                 * were still delta 1, ff_max would be 1 and the histogram
-                 * would have a single non-empty bucket. */
+                /* Diagnostic: histogram of per-edge free-flow ticks plus
+                 * the min-crossing matrix DSTM enforces. If deltas were
+                 * uniform, ff_max would be 1 and only one bucket non-empty. */
                 if (S.rank == 0) {
                         size_t hist[8] = {0};   /* 1,2,3,4,5,6-9,10-19,20+ */
                         size_t ff_sum = 0, ff_cnt = 0;
@@ -1180,7 +1106,6 @@ static void teardown_local(void)
         free(S.lrow_ptr);
         free(S.ldeg);
         free(S.ldst);
-        free(S.lff);
         free(S.stage);
         free(S.stage_count);
         free(S.load_cross);
@@ -1218,10 +1143,8 @@ static void collect_and_print_stats(void)
 
         mine.live = (uint64_t)S.pool.live;
 
-        /* Final staleness of the replica: how out of date is each rank's
-         * view of the graph once the dust settles? This is the number the
-         * whole design exists to produce, so it gets reduced separately
-         * rather than squeezed into the per-rank table. */
+        /* Final replica staleness -- the number this design exists to
+         * produce -- reduced separately from the per-rank table. */
         double age_sum = 0.0;
         double age_cnt = 0.0;
         double age_max = 0.0;
@@ -1310,7 +1233,7 @@ static void collect_and_print_stats(void)
 
         if (S.mode == REPLICA_BLIND)
                 printf("routing decisions: not counted in blind mode "
-                       "(edge_cost returns 1.0 without reading the "
+                       "(edge_cost returns free_flow ticks without reading the "
                        "replica)\n");
 
         else
@@ -1347,6 +1270,7 @@ static void usage(const char *prog)
                 "  --rate  R   agents per rank per tick   (default 0)\n"
                 "  --cap   C   max cars per edge per tick (default 8)\n"
                 "  --seed  S   RNG seed                   (default 42)\n"
+                "  --stale-delay D merge replica every D ticks (default 1)\n"
                 "  --quiet     silence DSTM logging (default level: debug)\n"
                 "  --replica-mode stale|oracle|blind      (default stale)\n"
                 "        stale   diffusion by relay (the real model)\n"
@@ -1363,7 +1287,8 @@ int main(int argc, char *argv[])
         int cars  = 64;
         const char *data = NULL;
         int cap   = 8;
-        int quiet = 0;
+        int quiet = 1;
+        S.stale_delay = STALE_DELAY_DEFAULT;
 
         S.seed = 42;
 
@@ -1384,6 +1309,8 @@ int main(int argc, char *argv[])
                         cap = atoi(argv[++i]);
                 else if (!strcmp(argv[i], "--seed") && i + 1 < argc)
                         S.seed = atoi(argv[++i]);
+                else if (!strcmp(argv[i], "--stale-delay") && i + 1 < argc)
+                        S.stale_delay = atoi(argv[++i]);
                 else if (!strcmp(argv[i], "--rate") && i + 1 < argc)
                         S.spawn_rate = atoi(argv[++i]);
                 else if (!strcmp(argv[i], "--replica-mode") && i + 1 < argc) {
@@ -1421,6 +1348,8 @@ int main(int argc, char *argv[])
 
         if (cap < 1)
                 cap = 1;
+        if (S.stale_delay < 1)
+                S.stale_delay = 1;
 
         if (data == NULL) {
                 if (r == 0) {
@@ -1450,7 +1379,8 @@ int main(int argc, char *argv[])
         for (S.t = 0; S.t <= S.t_end; S.t++)
                 run_step((int32_t)S.t, s);
 
-        /* Last write was at t_end with delta 1. Drain one tick past it. */
+        /* Last write is at t_end with delta up to the edge_delay bound
+         * MAX_CONGESTION_MULTIPLIER * ff_max. Drain one tick past that. */
         dstm_time_t last_time = S.t_end + MAX_CONGESTION_MULTIPLIER * S.ff_max + 1;
 
         teardown_dstm();

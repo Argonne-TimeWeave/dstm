@@ -33,9 +33,8 @@ void car_pool_free(struct car_pool *p)
 
 size_t car_pool_insert(struct car_pool *p, struct car c)
 {
-        /* Reuse a freed slot if one is available. The scan is O(n) but
-         * the pool is small and this keeps the array dense enough that
-         * the per-tick walk stays cheap. */
+        /* Reuse a freed slot if any. O(n) scan, but the pool is small and
+         * this keeps the array dense so the per-tick walk stays cheap. */
         for (size_t i = 0; i < p->size; i++) {
                 if (p->v[i].id < 0) {
                         p->v[i] = c;
