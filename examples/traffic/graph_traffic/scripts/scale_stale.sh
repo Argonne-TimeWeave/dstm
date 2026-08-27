@@ -54,11 +54,13 @@ MODE="${MODE:-stale}"                        # only stale reads --stale-delay
 STALE_DELAYS="${STALE_DELAYS:-1 2 4 8 16 32}"
 ORACLE_BASELINE="${ORACLE_BASELINE:-1}"      # also run oracle REPS times as an
                                              # always-fresh upper-bound baseline
+BLIND_BASELINE="${BLIND_BASELINE:-1}"        # also run blind REPS times as a
+                                             # never-merge lower-bound baseline
 
 STEPS="${STEPS:-1024}"
 CARS="${CARS:-256}"
 RATE="${RATE:-256}"
-CAP="${CAP:-2}"
+CAP="${CAP:-32}"
 SEED="${SEED:-32}"
 REPS="${REPS:-1}"
 TIMEOUT_S="${TIMEOUT_S:-600}"               # per-run guard; 0 disables
@@ -76,6 +78,8 @@ scale_stale.sh -- fix ranks, sweep --stale-delay for graph_traffic (stale mode)
   --stale-delays "1 2 4" stale-delay ladder               (default "${STALE_DELAYS}")
   --oracle-baseline 0|1  also run oracle REPS times       (default ${ORACLE_BASELINE})
   --no-oracle           shorthand for --oracle-baseline 0
+  --blind-baseline 0|1   also run blind REPS times        (default ${BLIND_BASELINE})
+  --no-blind            shorthand for --blind-baseline 0
   --steps N              ticks                            (default ${STEPS})
   --cars N              burst spawn count                (default ${CARS})
   --rate N              continuous spawn rate            (default ${RATE})
@@ -100,6 +104,8 @@ while [[ $# -gt 0 ]]; do
         --stale-delays) STALE_DELAYS="$2"; shift 2 ;;
         --oracle-baseline) ORACLE_BASELINE="$2"; shift 2 ;;
         --no-oracle)    ORACLE_BASELINE=0; shift ;;
+        --blind-baseline) BLIND_BASELINE="$2"; shift 2 ;;
+        --no-blind)     BLIND_BASELINE=0; shift ;;
         --steps)        STEPS="$2"; shift 2 ;;
         --cars)         CARS="$2"; shift 2 ;;
         --rate)         RATE="$2"; shift 2 ;;
@@ -204,6 +210,7 @@ fi
         echo "ranks:        ${RANKS}  (${NODES}x${PPN})   mode: ${MODE}"
         echo "stale delays: ${STALE_DELAYS}"
         echo "oracle base:  $([[ ${ORACLE_BASELINE} -eq 1 ]] && echo "yes (REPS=${REPS})" || echo "no")"
+        echo "blind base:   $([[ ${BLIND_BASELINE} -eq 1 ]] && echo "yes (REPS=${REPS})" || echo "no")"
         echo "steps:        ${STEPS}   cars: ${CARS}   rate: ${RATE}   cap: ${CAP}   seed: ${SEED}"
         echo "reps:         ${REPS}    timeout: ${TIMEOUT_S}s   max ppn: ${MAX_PPN}"
 } | tee "${CONFIG}"
@@ -221,10 +228,10 @@ run_one() {
         local tag log launch=() cmd=() rc status
         local sd_csv sd_arg
 
-        # Oracle ignores --stale-delay: record "na" in the CSV column, but
-        # still pass a valid integer (1) to the binary so run_one stays
-        # uniform. Stale/blind use the real sweep value for both.
-        if [[ "${mode}" == "oracle" ]]; then
+        # Oracle and blind ignore --stale-delay: record "na" in the CSV
+        # column, but still pass a valid integer (1) to the binary so
+        # run_one stays uniform. Stale uses the real sweep value for both.
+        if [[ "${mode}" == "oracle" || "${mode}" == "blind" ]]; then
                 sd_csv="na"; sd_arg="1"
         else
                 sd_csv="${sd}"; sd_arg="${sd}"
@@ -307,6 +314,16 @@ if [[ "${ORACLE_BASELINE}" -eq 1 && "${MODE}" != "oracle" ]]; then
         echo
 fi
 
+# Never-merge lower bound: blind never reads --stale-delay, so like oracle
+# it does not depend on stale_delay. Run it REPS times once.
+if [[ "${BLIND_BASELINE}" -eq 1 && "${MODE}" != "blind" ]]; then
+        echo "===== blind baseline (ranks=${RANKS}, REPS=${REPS}) ====="
+        for (( rep = 1; rep <= REPS; rep++ )); do
+                run_one "${RANKS}" "${NODES}" "${PPN}" "blind" "na" "${rep}"
+        done
+        echo
+fi
+
 [[ ${DRY_RUN} -eq 1 ]] && { echo "dry run complete"; exit 0; }
 
 echo "csv:  ${CSV}"
@@ -314,9 +331,11 @@ echo "logs: ${RAWDIR}"
 echo
 echo "quick median-of-reps view (by stale_delay; oracle baseline last):"
 awk -F, 'NR>1 && $5=="ok" {
-        key=$3;
+        # For stale rows key on stale_delay; for the na-keyed baselines
+        # (oracle/blind) key on the mode so they do not collide.
+        key = ($3 == "na") ? $2 : $3;
         dur[key]=dur[key]" "$6; arr[key]=arr[key]" "$7; age[key]=age[key]" "$8; sm[key]=sm[key]" "$9;
-        if (key == "na") has_oracle=1; else seen[key]=1;   # keep na out of numeric sort
+        if ($3 == "na") { base[$2]=1 } else { seen[key]=1 }   # keep na out of numeric sort
 }
 function med(s,   a,n,i,j,t) { n=split(s,a," "); if(!n) return "nan";
         for(i=1;i<=n;i++) for(j=i+1;j<=n;j++) if(a[j]<a[i]){t=a[i];a[i]=a[j];a[j]=t};
@@ -326,7 +345,10 @@ END {
         n=asorti(seen,sk,"@val_num_asc");
         for(i=1;i<=n;i++){ k=sk[i];
                 printf "%-12s %10s %10s %8s %9s\n", k, med(dur[k]), med(arr[k]), med(age[k]), med(sm[k]) }
-        if (has_oracle)
+        if ("oracle" in base)
                 printf "%-12s %10s %10s %8s %9s   <- always-fresh upper bound\n", \
-                       "oracle", med(dur["na"]), med(arr["na"]), med(age["na"]), med(sm["na"]);
+                       "oracle", med(dur["oracle"]), med(arr["oracle"]), med(age["oracle"]), med(sm["oracle"]);
+        if ("blind" in base)
+                printf "%-12s %10s %10s %8s %9s   <- never-merge lower bound\n", \
+                       "blind", med(dur["blind"]), med(arr["blind"]), med(age["blind"]), med(sm["blind"]);
 }' "${CSV}" 2>/dev/null || echo "  (install gawk for the summary view; raw CSV is complete)"
