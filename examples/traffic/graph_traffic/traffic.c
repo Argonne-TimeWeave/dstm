@@ -504,9 +504,6 @@ static int edge_delay(size_t ge, int32_t t)
 {
         int ff = S.city.ff_ticks[ge];          /* >= 1 */
 
-        if (S.mode == REPLICA_BLIND)
-                return ff;                      /* pure free-flow motion */
-
         const struct cong_entry *e = &S.rep.e[ge];
 
         float load = cong_effective(e, t, CONG_TAU, 0.0f);
