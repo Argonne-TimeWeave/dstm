@@ -2,12 +2,15 @@
 """
 plot_scale.py -- plot run time vs. rank count for graph_traffic.
 
-Reads a runs.csv produced by the scaling sweep and draws two lines:
-  * stale  -- run_time vs. ranks
-  * oracle -- run_time vs. ranks
+Reads a runs.csv produced by the scaling sweep and draws one line per
+replica configuration:
+  * stale d=<delay>  -- one line per --stale-delay value, in shades of blue
+  * oracle           -- run_time vs. ranks (green)
+  * blind            -- run_time vs. ranks (gray)
 
-If a mode has multiple reps at a given rank count, the median run_time is
-plotted. The x-axis is ranks (log2), the y-axis is run time.
+If a configuration has multiple reps at a given rank count, the median
+run_time is plotted. The x-axis is ranks (log2 by default), the y-axis is
+run time.
 
 USAGE
     python plot_scale.py runs.csv
@@ -37,14 +40,19 @@ def load_rows(path):
     return rows
 
 
-def median_by_ranks(rows, mode):
+def median_by_ranks(rows, mode, delay=None):
     """
-    For the given mode, return (xs, ys) sorted by ranks, where ys are the
-    median run_time across reps at each rank count.
+    For the given mode (and optionally a specific stale_delay), return
+    (xs, ys) sorted by ranks, where ys are the median run_time across reps
+    at each rank count.
+
+    delay=None means "don't filter on delay" (used for blind/oracle).
     """
     buckets = defaultdict(list)
     for r in rows:
         if r["mode"] != mode:
+            continue
+        if delay is not None and r.get("stale_delay") != delay:
             continue
         try:
             ranks = int(r["ranks"])
@@ -55,6 +63,34 @@ def median_by_ranks(rows, mode):
     xs = sorted(buckets)
     ys = [median(buckets[x]) for x in xs]
     return xs, ys
+
+
+def stale_delays(rows):
+    """Return the sorted numeric list of distinct stale_delay values."""
+    vals = set()
+    for r in rows:
+        if r["mode"] != "stale":
+            continue
+        d = r.get("stale_delay")
+        try:
+            vals.add(int(d))
+        except (TypeError, ValueError):
+            continue
+    return sorted(vals)
+
+
+def blue_shades(plt, n):
+    """
+    Return n distinct shades of blue, light -> dark, avoiding the very
+    lightest end of the colormap so all lines stay visible.
+    """
+    if n <= 0:
+        return []
+    cmap = plt.cm.Blues
+    if n == 1:
+        return [cmap(0.75)]
+    lo, hi = 0.45, 0.95
+    return [cmap(lo + (hi - lo) * i / (n - 1)) for i in range(n)]
 
 
 def main():
@@ -77,23 +113,43 @@ def main():
 
     rows = load_rows(args.csv)
 
-    stale_x, stale_y = median_by_ranks(rows, "stale")
-    oracle_x, oracle_y = median_by_ranks(rows, "oracle")
-
-    if not stale_x and not oracle_x:
-        sys.exit("error: no `stale` or `oracle` rows to plot")
+    delays = stale_delays(rows)
+    shades = blue_shades(plt, len(delays))
 
     fig, ax = plt.subplots(figsize=(8, 5))
 
-    if stale_x:
-        ax.plot(stale_x, stale_y, marker="o", linewidth=2, color="tab:blue",
-                label="stale")
+    all_ranks = set()
+    plotted_any = False
+
+    # One blue line per stale delay (light = small delay, dark = large delay).
+    for delay, color in zip(delays, shades):
+        xs, ys = median_by_ranks(rows, "stale", delay=str(delay))
+        if not xs:
+            continue
+        ax.plot(xs, ys, marker="o", linewidth=2, color=color,
+                label=f"stale d={delay}")
+        all_ranks.update(xs)
+        plotted_any = True
+
+    # Oracle (green) and blind (gray) -- delay is "na", so don't filter on it.
+    oracle_x, oracle_y = median_by_ranks(rows, "oracle")
     if oracle_x:
         ax.plot(oracle_x, oracle_y, marker="s", linewidth=2, color="tab:green",
                 label="oracle")
+        all_ranks.update(oracle_x)
+        plotted_any = True
 
-    # All rank counts present, for consistent ticks.
-    all_ranks = sorted(set(stale_x) | set(oracle_x))
+    blind_x, blind_y = median_by_ranks(rows, "blind")
+    if blind_x:
+        ax.plot(blind_x, blind_y, marker="^", linewidth=2, color="tab:gray",
+                label="blind")
+        all_ranks.update(blind_x)
+        plotted_any = True
+
+    if not plotted_any:
+        sys.exit("error: no stale/oracle/blind rows to plot")
+
+    all_ranks = sorted(all_ranks)
 
     if not args.linear_x:
         ax.set_xscale("log", base=2)

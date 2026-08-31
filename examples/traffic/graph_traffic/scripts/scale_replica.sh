@@ -3,7 +3,11 @@
 #
 #   For each rank count in the ladder and each replica mode (blind stale
 #   oracle), run ./traffic --data DIR and record runtime + trip stats to a
-#   CSV. One row per (ranks, mode, rep).
+#   CSV. One row per (ranks, mode, stale_delay, rep).
+#
+#   For mode=stale the run is repeated once per value in STALE_DELAYS
+#   (default "2 8 32"); blind and oracle ignore --stale-delay and run once
+#   (stale_delay logged as "na").
 #
 # LAUNCH RECIPE (matches run_scaling.sh / ROSS weak_scale.sh)
 #   Under a batch allocation we launch with:
@@ -12,10 +16,11 @@
 #   Interactively (no allocation) we fall back to: mpirun -n P ./traffic ...
 #
 # USAGE
-#   ./scale_replica.sh                         # default ladder, both @ bloomington
+#   ./scale_replica.sh                         # default ladder, all modes @ bloomington
 #   RANKS="1 2 4 8" ./scale_replica.sh
 #   ./scale_replica.sh --data data/bloomington/ --steps 200 --rate 1 --cap 16
 #   ./scale_replica.sh --cars 2048 --rate 1 --reps 3
+#   ./scale_replica.sh --stale-delays "1 4 16"
 #   ./scale_replica.sh --dry-run
 #
 # OUTPUT
@@ -47,12 +52,13 @@ MAX_NODES="${MAX_NODES:-8}"
 
 DATA="${DATA:-${ROOT}/data/bloomington/}"
 RANKS="${RANKS:-4 8 16 32 64 128 256}"
-MODES="${MODES:-stale oracle}"
+MODES="${MODES:-blind stale oracle}"
+STALE_DELAYS="${STALE_DELAYS:-2 8 32}"       # only swept when mode=stale
 
 STEPS="${STEPS:-256}"
 CARS="${CARS:-256}"
 RATE="${RATE:-256}"
-CAP="${CAP:-2}"
+CAP="${CAP:-32}"
 SEED="${SEED:-32}"
 REPS="${REPS:-2}"
 TIMEOUT_S="${TIMEOUT_S:-600}"               # per-run guard; 0 disables
@@ -67,6 +73,7 @@ scale_replica.sh -- scale ranks x {blind,stale,oracle} for graph_traffic
   --data DIR        network dir (node.csv/link.csv)  (default ${DATA})
   --ranks "1 2 4"   rank ladder                      (default "${RANKS}")
   --modes "a b c"   replica modes                    (default "${MODES}")
+  --stale-delays "2 8 32"  stale-delay sweep (stale mode only)  (default "${STALE_DELAYS}")
   --steps N         ticks                            (default ${STEPS})
   --cars N          burst spawn count                (default ${CARS})
   --rate N          continuous spawn rate            (default ${RATE})
@@ -85,27 +92,28 @@ EOF
 
 while [[ $# -gt 0 ]]; do
         case "$1" in
-        --data)       DATA="$2"; shift 2 ;;
-        --ranks)      RANKS="$2"; shift 2 ;;
-        --modes)      MODES="$2"; shift 2 ;;
-        --steps)      STEPS="$2"; shift 2 ;;
-        --cars)       CARS="$2"; shift 2 ;;
-        --rate)       RATE="$2"; shift 2 ;;
-        --cap)        CAP="$2"; shift 2 ;;
-        --seed)       SEED="$2"; shift 2 ;;
-        --reps)       REPS="$2"; shift 2 ;;
-        --timeout)    TIMEOUT_S="$2"; shift 2 ;;
-        --max-ppn)    MAX_PPN="$2"; shift 2 ;;
-        --max-nodes)  MAX_NODES="$2"; shift 2 ;;
-        --exe)        EXE="$2"; shift 2 ;;
-        --mpirun)     MPIRUN="$2"; shift 2 ;;
-        --mpi-prefix) MPI_PREFIX="$2"; shift 2 ;;
-        --mpi-env)    MPI_ENV_VARS="$2"; shift 2 ;;
-        --mpi-extra)  MPI_EXTRA="$2"; shift 2 ;;
-        --loud)       VERBOSITY=""; shift ;;
-        --out)        OUTROOT="$2"; shift 2 ;;
-        --dry-run)    DRY_RUN=1; shift ;;
-        -h|--help)    usage; exit 0 ;;
+        --data)         DATA="$2"; shift 2 ;;
+        --ranks)        RANKS="$2"; shift 2 ;;
+        --modes)        MODES="$2"; shift 2 ;;
+        --stale-delays) STALE_DELAYS="$2"; shift 2 ;;
+        --steps)        STEPS="$2"; shift 2 ;;
+        --cars)         CARS="$2"; shift 2 ;;
+        --rate)         RATE="$2"; shift 2 ;;
+        --cap)          CAP="$2"; shift 2 ;;
+        --seed)         SEED="$2"; shift 2 ;;
+        --reps)         REPS="$2"; shift 2 ;;
+        --timeout)      TIMEOUT_S="$2"; shift 2 ;;
+        --max-ppn)      MAX_PPN="$2"; shift 2 ;;
+        --max-nodes)    MAX_NODES="$2"; shift 2 ;;
+        --exe)          EXE="$2"; shift 2 ;;
+        --mpirun)       MPIRUN="$2"; shift 2 ;;
+        --mpi-prefix)   MPI_PREFIX="$2"; shift 2 ;;
+        --mpi-env)      MPI_ENV_VARS="$2"; shift 2 ;;
+        --mpi-extra)    MPI_EXTRA="$2"; shift 2 ;;
+        --loud)         VERBOSITY=""; shift ;;
+        --out)          OUTROOT="$2"; shift 2 ;;
+        --dry-run)      DRY_RUN=1; shift ;;
+        -h|--help)      usage; exit 0 ;;
         *) echo "unknown option: $1" >&2; usage; exit 2 ;;
         esac
 done
@@ -183,21 +191,30 @@ mkdir -p "${RAWDIR}"
         echo "mpi prefix:   ${MPI_PREFIX:-<unset>}   forwarded: ${MPI_ENV_VARS}"
         echo "ranks:        ${RANKS}"
         echo "modes:        ${MODES}"
+        echo "stale delays: ${STALE_DELAYS}  (stale mode only)"
         echo "steps:        ${STEPS}   cars: ${CARS}   rate: ${RATE}   cap: ${CAP}   seed: ${SEED}"
         echo "reps:         ${REPS}    timeout: ${TIMEOUT_S}s   max ppn: ${MAX_PPN}"
 } | tee "${CONFIG}"
 echo
 
-echo "ranks,nodes,ppn,mode,rep,status,run_time,mean_dur,mean_hops,arrived,spawned,live,lost,blocked_pct,crossings,mean_age,stale_mean,stale_max,seed,steps,cars,rate,cap" > "${CSV}"
+echo "ranks,nodes,ppn,mode,stale_delay,rep,status,run_time,mean_dur,mean_hops,arrived,spawned,live,lost,blocked_pct,crossings,mean_age,stale_mean,stale_max,mib_tick_total,mib_tick_per_rank,seed,steps,cars,rate,cap" > "${CSV}"
 
 # --------------------------------------------------------------------------
 # One run.
 # --------------------------------------------------------------------------
 run_one() {
-        local np="$1" nodes="$2" ppn="$3" mode="$4" rep="$5"
-        local tag log launch=() cmd=() rc t0 t1 wall status
+        local np="$1" nodes="$2" ppn="$3" mode="$4" delay="$5" rep="$6"
+        local tag log launch=() cmd=() rc t0 t1 wall status delay_flag=() delay_lbl
 
-        tag="np${np}-n${nodes}x${ppn}-${mode}-r${rep}"
+        # Only stale mode consumes --stale-delay; others log "na".
+        if [[ "${mode}" == "stale" ]]; then
+                delay_flag=(--stale-delay "${delay}")
+                delay_lbl="${delay}"
+                tag="np${np}-n${nodes}x${ppn}-${mode}-d${delay}-r${rep}"
+        else
+                delay_lbl="na"
+                tag="np${np}-n${nodes}x${ppn}-${mode}-r${rep}"
+        fi
         log="${RAWDIR}/${tag}.log"
 
         # Batch allocation -> full recipe; interactive single node -> plain -n.
@@ -214,9 +231,9 @@ run_one() {
         cmd=("${launch[@]}" ${MPI_EXTRA} "${EXE}"
              --data "${DATA}" --steps "${STEPS}" --cars "${CARS}"
              --rate "${RATE}" --cap "${CAP}" --seed "${SEED}"
-             --replica-mode "${mode}" ${VERBOSITY})
+             --replica-mode "${mode}" "${delay_flag[@]}" ${VERBOSITY})
 
-        printf '  np=%-4s %sx%-3s %-7s rep=%s ... ' "${np}" "${nodes}" "${ppn}" "${mode}" "${rep}"
+        printf '  np=%-4s %sx%-3s %-7s d=%-3s rep=%s ... ' "${np}" "${nodes}" "${ppn}" "${mode}" "${delay_lbl}" "${rep}"
 
         if [[ ${DRY_RUN} -eq 1 ]]; then
                 printf '\n      %s\n' "${cmd[*]}"
@@ -238,7 +255,7 @@ run_one() {
         fi
 
         # Parse the traffic summary block (same sed/awk style as compare.sh).
-        local dur hops arr spawn live lost blk cross age smean smax prog_time
+        local dur hops arr spawn live lost blk cross age smean smax prog_time mibt mibt_pr
         prog_time=$(sed -n 's/^total run time: \([0-9.]*\).*/\1/p'              "${log}" | tail -1)
         dur=$(  sed -n 's/.*mean duration=\([0-9.]*\).*/\1/p'                    "${log}" | tail -1)
         hops=$( sed -n 's/.*mean hops=\([0-9.]*\).*/\1/p'                        "${log}" | tail -1)
@@ -251,25 +268,36 @@ run_one() {
         age=$(  sed -n 's/.*consulted entry=\([0-9.]*\).*/\1/p'                  "${log}" | tail -1)
         smean=$(sed -n 's/.*staleness at t=[0-9]*: mean=\([0-9.]*\).*/\1/p'      "${log}" | tail -1)
         smax=$( sed -n 's/.*staleness.*max=\([0-9]*\).*/\1/p'                    "${log}" | tail -1)
+        mibt=$( sed -n 's/.*(\([0-9.]*\) MiB\/tick across all ranks).*/\1/p'     "${log}" | tail -1)
 
         [[ -z "${dur}" && "${status}" == ok ]] && status="parse_fail"
         : "${dur:=nan}" "${hops:=nan}" "${arr:=-1}" "${spawn:=-1}" "${live:=-1}"
         : "${lost:=-1}" "${blk:=nan}" "${cross:=-1}" "${age:=nan}" "${smean:=nan}" "${smax:=-1}"
+        : "${mibt:=nan}"
+
+        # Aggregate MiB/tick -> per-rank.
+        if [[ "${mibt}" != "nan" ]]; then
+                mibt_pr=$(awk -v t="${mibt}" -v n="${np}" 'BEGIN { if (n>0) printf "%.6f", t/n; else print "nan" }')
+        else
+                mibt_pr="nan"
+        fi
 
         # Prefer the program's own reported time; fall back to launcher wall clock.
         : "${prog_time:=${wall}}"
 
-        echo "${np},${nodes},${ppn},${mode},${rep},${status},${prog_time},${dur},${hops},${arr},${spawn},${live},${lost},${blk},${cross},${age},${smean},${smax},${SEED},${STEPS},${CARS},${RATE},${CAP}" >> "${CSV}"
+        echo "${np},${nodes},${ppn},${mode},${delay_lbl},${rep},${status},${prog_time},${dur},${hops},${arr},${spawn},${live},${lost},${blk},${cross},${age},${smean},${smax},${mibt},${mibt_pr},${SEED},${STEPS},${CARS},${RATE},${CAP}" >> "${CSV}"
 
         if [[ "${status}" == ok ]]; then
-                printf '%8ss  dur=%-7s hops=%-6s arr=%-7s blk=%-5s%%\n' "${prog_time}" "${dur}" "${hops}" "${arr}" "${blk}"
+                printf '%8ss  dur=%-7s hops=%-6s arr=%-7s blk=%-5s%% mib/t=%-7s\n' "${prog_time}" "${dur}" "${hops}" "${arr}" "${blk}" "${mibt}"
         else
                 printf '%s (%s)\n' "${status}" "$(basename "${log}")"
         fi
 }
 
 # --------------------------------------------------------------------------
-# Sweep: ranks (outer) x modes x reps.
+# Sweep: ranks (outer) x modes x stale_delays x reps.
+#   stale mode -> one pass per value in STALE_DELAYS
+#   other modes -> single pass (delay ignored)
 # --------------------------------------------------------------------------
 for np in ${RANKS}; do
         read -r nodes ppn < <(place_for "${np}")
@@ -279,8 +307,15 @@ for np in ${RANKS}; do
         fi
         echo "===== ranks=${np}  (${nodes}x${ppn}) ====="
         for mode in ${MODES}; do
-                for (( rep = 1; rep <= REPS; rep++ )); do
-                        run_one "${np}" "${nodes}" "${ppn}" "${mode}" "${rep}"
+                if [[ "${mode}" == "stale" ]]; then
+                        delays="${STALE_DELAYS}"
+                else
+                        delays="na"        # sentinel: one pass, delay unused
+                fi
+                for delay in ${delays}; do
+                        for (( rep = 1; rep <= REPS; rep++ )); do
+                                run_one "${np}" "${nodes}" "${ppn}" "${mode}" "${delay}" "${rep}"
+                        done
                 done
         done
         echo
@@ -291,20 +326,21 @@ done
 echo "csv:  ${CSV}"
 echo "logs: ${RAWDIR}"
 echo
-echo "quick median-of-reps view (arrived / mean_dur by ranks x mode):"
-awk -F, 'NR>1 && $6=="ok" {
-        key=$1"|"$4;
-        dur[key]=dur[key]" "$8; arr[key]=arr[key]" "$10; age[key]=age[key]" "$16; sm[key]=sm[key]" "$18;
-        seen[$1]=1; modes[$4]=1;
+echo "quick median-of-reps view (arrived / mean_dur by ranks x mode x delay):"
+awk -F, 'NR>1 && $7=="ok" {
+        key=$1"|"$4"|"$5;
+        dur[key]=dur[key]" "$9; arr[key]=arr[key]" "$11; age[key]=age[key]" "$17;
+        sm[key]=sm[key]" "$19; mib[key]=mib[key]" "$20;
+        seen[$1]=1; combo[$4"|"$5]=1;
 }
-function med(s,   a,n,i) { n=split(s,a," "); if(!n) return "nan";
+function med(s,   a,n,i,j,t) { n=split(s,a," "); if(!n) return "nan";
         for(i=1;i<=n;i++) for(j=i+1;j<=n;j++) if(a[j]<a[i]){t=a[i];a[i]=a[j];a[j]=t};
         return (n%2)? a[(n+1)/2] : (a[n/2]+a[n/2+1])/2 }
 END {
-        printf "%-6s %-7s %10s %10s %8s %8s\n","ranks","mode","mean_dur","arrived","age","stale_mx";
+        printf "%-6s %-7s %-6s %10s %10s %8s %8s %10s\n","ranks","mode","delay","mean_dur","arrived","age","stale_mx","mib/tick";
         n=asorti(seen,rk,"@val_num_asc");
         for(i=1;i<=n;i++){ r=rk[i];
-                for(m in modes){ k=r"|"m;
-                        if(k in dur) printf "%-6s %-7s %10s %10s %8s %8s\n", r,m,med(dur[k]),med(arr[k]),med(age[k]),med(sm[k]) }
+                for(c in combo){ split(c,cc,"|"); k=r"|"c;
+                        if(k in dur) printf "%-6s %-7s %-6s %10s %10s %8s %8s %10s\n", r,cc[1],cc[2],med(dur[k]),med(arr[k]),med(age[k]),med(sm[k]),med(mib[k]) }
         }
 }' "${CSV}" 2>/dev/null || echo "  (install gawk for the summary view; raw CSV is complete)"

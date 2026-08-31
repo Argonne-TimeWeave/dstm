@@ -247,11 +247,13 @@ struct sim {
         int world_size;
 
         struct city         city;
-        struct chan_layout  L;
+        struct car_layout    Lcar;
+        struct state_layout  Lstate;
         struct cong_replica rep;
 
         dstm_distance_t *dist;
-        dstm_dgraph_t   *g;
+        dstm_dgraph_t   *g_cars;
+        dstm_dgraph_t   *g_state;
 
         /* Local vertex ownership. */
         size_t v_lo;            /* first owned vertex, global id        */
@@ -274,10 +276,10 @@ struct sim {
         float          *load_cross;     /* nedge_local, this tick       */
         float          *load_block;     /* nedge_local, this tick       */
 
-        /* One reusable send buffer and one receive buffer. Both are
-         * exactly edge_state_size, allocated once, never resized. */
-        void *sendbuf;
-        void *recvbuf;
+        void *car_sendbuf;
+        void *car_recvbuf;
+        void *state_sendbuf;
+        void *state_recvbuf;
 
         struct car_pool pool;
         int32_t        *vqueue;         /* nlocal, cars dwelling        */
@@ -334,14 +336,22 @@ struct vertex_state {
 
 static void publish_vertices(int32_t t)
 {
+        /* g_state only needs a local delta-0 version on the ticks STALE
+         * will read it. BLIND and ORACLE never read g_state. */
+        int state_pub = (S.mode == REPLICA_STALE) &&
+                        (t % S.stale_delay == 0);
+
         for (size_t i = 0; i < S.nlocal; i++) {
-                struct vertex_state vs = {
-                        .queue_len = S.vqueue[i],
-                        .stamp     = t,
-                };
-                int rc = dstm_dgraph_vertex_put(S.g, S.v_lo + i, &vs,
+                struct vertex_state vs = { .queue_len = S.vqueue[i], .stamp = t };
+                int rc = dstm_dgraph_vertex_put(S.g_cars, S.v_lo + i, &vs,
                                                 (dstm_time_t)t, 0);
                 assert(rc == DSTM_SUCCESS);
+
+                if (state_pub) {
+                        rc = dstm_dgraph_vertex_put(S.g_state, S.v_lo + i, &vs,
+                                                    (dstm_time_t)t, 0);
+                        assert(rc == DSTM_SUCCESS);
+                }
         }
 }
 
@@ -378,7 +388,7 @@ static void inject_car(const struct car_rec *r, int32_t t)
         S.vqueue[at - S.v_lo]++;
 }
 
-static void recv_channels(int32_t t)
+static void recv_cars(int32_t t)
 {
         for (size_t i = 0; i < S.nlocal; i++) {
                 size_t v = S.v_lo + i;
@@ -387,43 +397,58 @@ static void recv_channels(int32_t t)
                         size_t u = S.ldst[ls];
                         int    rc;
 
-                        /* Slot (v,u) lives in our own region: rank(v)
-                         * == self. delta 0 is safe because version t was
-                         * created by publish_vertices above. */
-                        rc = dstm_dgraph_edge_get(S.g, v, u, S.recvbuf,
+                        rc = dstm_dgraph_edge_get(S.g_cars, v, u,
+                                                  S.car_recvbuf,
                                                   (dstm_time_t)t, 0);
                         if (rc != DSTM_SUCCESS)
                                 continue;
-
-                        if (chan_validate(&S.L, S.recvbuf) != 0)
+                        if (car_validate(&S.Lcar, S.car_recvbuf) != 0)
                                 continue;       /* never written yet */
 
-                        const struct chan_header *h = chan_hdr_c(S.recvbuf);
+                        const struct car_header *h = car_hdr_c(S.car_recvbuf);
 
-                        /* State half is idempotent, so a stale copy can
-                         * only be ignored, never regress us. STALE folds
-                         * it every S.stale_delay ticks; oracle overwrites
-                         * the replica later and blind never reads it, so
-                         * both skip the fold. The message is still sent and
-                         * received either way, keeping comm volume equal
-                         * across modes. */
-                        if (S.mode == REPLICA_STALE && (t % S.stale_delay == 0))
-                                S.st.merge_updates += cong_merge(&S.rep, chan_state_c(&S.L,
-                                                                S.recvbuf));
                         S.st.recv_msgs++;
 
-                        /* The car half is NOT idempotent. DSTM versions
-                         * copy forward, so a version nobody wrote this
-                         * tick still holds last tick's buffer; injecting
-                         * from it would duplicate agents. The arrival
-                         * tick in the header is the guard. */
+                        /* Car half is NOT idempotent; the arrival tick in
+                         * the header guards against a stale version. */
                         if (h->tick != t)
                                 continue;
 
-                        const struct car_rec *cars = chan_cars_c(&S.L,
-                                                                 S.recvbuf);
+                        const struct car_rec *cars =
+                                car_cars_c(&S.Lcar, S.car_recvbuf);
                         for (uint32_t k = 0; k < h->n_cars; k++)
                                 inject_car(&cars[k], t);
+                }
+        }
+}
+
+/* Called only when (t % stale_delay == 0). The state buffer was put at
+ * tick (t - stale_delay) with delta = stale_delay, so it lands at
+ * effective time t and is read here at (t, 0). On non-state ticks the
+ * version would be zero and state_validate would reject it, so we simply
+ * do not read on those ticks. */
+static void recv_state(int32_t t)
+{
+        for (size_t i = 0; i < S.nlocal; i++) {
+                size_t v = S.v_lo + i;
+
+                for (size_t ls = S.lrow_ptr[i]; ls < S.lrow_ptr[i + 1]; ls++) {
+                        size_t u = S.ldst[ls];
+                        int    rc;
+
+                        rc = dstm_dgraph_edge_get(S.g_state, v, u,
+                                                  S.state_recvbuf,
+                                                  (dstm_time_t)t, 0);
+                        if (rc != DSTM_SUCCESS)
+                                continue;
+                        if (state_validate(&S.Lstate, S.state_recvbuf) != 0)
+                                continue;       /* never written yet */
+
+                        if (S.mode == REPLICA_STALE)
+                                S.st.merge_updates += cong_merge(&S.rep,
+                                        state_entries_c(&S.Lstate,
+                                                        S.state_recvbuf));
+                        S.st.recv_msgs++;
                 }
         }
 }
@@ -613,7 +638,7 @@ static void route_and_stage(int32_t t)
                 if (ls == (size_t)-1)
                         continue;               /* isolated vertex */
 
-                if (S.stage_count[ls] >= S.L.cap) {
+                if (S.stage_count[ls] >= S.Lcar.cap) {
                         S.load_block[ls] += 1.0f;
                         S.st.blocked++;
                         continue;
@@ -628,7 +653,7 @@ static void route_and_stage(int32_t t)
                         .hops        = c->hops,
                 };
 
-                S.stage[ls * S.L.cap + S.stage_count[ls]] = r;
+                S.stage[ls * S.Lcar.cap + S.stage_count[ls]] = r;
                 S.stage_count[ls]++;
                 S.load_cross[ls] += 1.0f;
 
@@ -684,6 +709,13 @@ static void replica_sync_oracle(void)
         MPI_Allgatherv(MPI_IN_PLACE, 0, MPI_BYTE,
                        S.rep.e, S.ag_counts, S.ag_displs, MPI_BYTE,
                        MPI_COMM_WORLD);
+
+        /* This rank contributed its own slice (ag_counts[rank] bytes) to
+         * the collective. Count it so MiB/tick reflects oracle's actual
+         * state movement, comparable to the per-edge diffusion bytes the
+         * other modes report. */
+        S.st.bytes_out += (uint64_t)S.ag_counts[S.rank];
+        S.st.sent_msgs++;
 }
 
 /*******************************************************************************
@@ -698,45 +730,65 @@ static void replica_sync_oracle(void)
  * delta is always legal); for an intra-rank edge it is what the model
  * needs so a hop's cost is independent of the partition boundary.
  ******************************************************************************/
-static void send_channels(int32_t t)
+static void send_cars(int32_t t)
 {
         for (size_t i = 0; i < S.nlocal; i++) {
                 size_t u = S.v_lo + i;
 
                 for (size_t ls = S.lrow_ptr[i]; ls < S.lrow_ptr[i + 1]; ls++) {
-                        size_t   v  = S.ldst[ls];
-                        uint32_t n  = S.stage_count[ls];
-                        size_t   ge = S.gslot_base + ls;   /* global edge id */
+                        size_t   v      = S.ldst[ls];
+                        uint32_t n      = S.stage_count[ls];
+                        size_t   ge     = S.gslot_base + ls;
+                        int      actual = edge_delay(ge, t);
                         int      rc;
 
-                        /* Physical crossing delay (see edge_delay): under
-                         * STALE this reflects the origin's possibly stale
-                         * belief, by design. */
-                        int      actual = edge_delay(ge, t);
-
-                        /* Arrival tick MUST equal the put's effective time
-                         * (t + actual), or recv_channels' `h->tick != t`
-                         * guard silently drops every car on this edge. */
-                        chan_reset(&S.L, S.sendbuf, t + actual, u, v);
-
-                        memcpy(chan_state(&S.L, S.sendbuf), S.rep.e,
-                               S.rep.n * sizeof(struct cong_entry));
+                        car_reset(&S.Lcar, S.car_sendbuf, t + actual, u, v);
 
                         for (uint32_t k = 0; k < n; k++) {
-                                int prc = chan_push_car(&S.L, S.sendbuf,
-                                                &S.stage[ls * S.L.cap + k]);
+                                int prc = car_push(&S.Lcar, S.car_sendbuf,
+                                        &S.stage[ls * S.Lcar.cap + k]);
                                 assert(prc == 0);
                         }
 
-                        /* Slot (v,u) is owned by the receiver. actual >= ff
-                         * >= boundary distance, so the lookahead contract
-                         * holds; actual >= 1, so never the delta==0 abort. */
-                        rc = dstm_dgraph_edge_put(S.g, v, u, S.sendbuf,
+                        rc = dstm_dgraph_edge_put(S.g_cars, v, u,
+                                                  S.car_sendbuf,
                                                   (dstm_time_t)t, actual);
                         assert(rc == DSTM_SUCCESS);
 
                         S.st.sent_msgs++;
-                        S.st.bytes_out += S.L.bytes;
+                        S.st.bytes_out += S.Lcar.bytes;
+                }
+        }
+}
+
+/* Called only when (t % stale_delay == 0). Uses a fixed delta of
+ * stale_delay so it lands exactly on the next state tick. This delta
+ * must be >= the boundary distance, which the matrix floor guarantees
+ * (see setup()). */
+static void send_state(int32_t t)
+{
+        int delta = S.stale_delay;
+
+        for (size_t i = 0; i < S.nlocal; i++) {
+                size_t u = S.v_lo + i;
+
+                for (size_t ls = S.lrow_ptr[i]; ls < S.lrow_ptr[i + 1]; ls++) {
+                        size_t v = S.ldst[ls];
+                        int    rc;
+
+                        state_reset(&S.Lstate, S.state_sendbuf,
+                                    t + delta, u, v);
+
+                        memcpy(state_entries(&S.Lstate, S.state_sendbuf),
+                               S.rep.e, S.rep.n * sizeof(struct cong_entry));
+
+                        rc = dstm_dgraph_edge_put(S.g_state, v, u,
+                                                  S.state_sendbuf,
+                                                  (dstm_time_t)t, delta);
+                        assert(rc == DSTM_SUCCESS);
+
+                        S.st.sent_msgs++;
+                        S.st.bytes_out += S.Lstate.bytes;
                 }
         }
 }
@@ -779,17 +831,29 @@ static void spawn_cars(int n, int s)
 
 static void run_step(int32_t t, int s)
 {
+        /* Only STALE diffuses congestion edge-by-edge, and only on its
+         * cadence. BLIND never touches the replica. ORACLE replaces
+         * diffusion with a collective, so it ships no per-edge state. */
+        int diffuse_state = (S.mode == REPLICA_STALE) &&
+                            (t % S.stale_delay == 0);
+
         if (S.spawn_rate > 0)
             spawn_cars(S.spawn_rate, s);
-        publish_vertices(t);    /* creates local version t, heartbeats  */
-        recv_channels(t);       /* merge state, inject arriving agents  */
-        route_and_stage(t);     /* decide, subject to per-edge cap      */
-        measure_local(t);       /* stamp owned entries with tick t      */
+        publish_vertices(t);    /* creates local version t (both graphs) */
+
+        recv_cars(t);           /* every tick, every mode */
+        if (diffuse_state)
+                recv_state(t);
+
+        route_and_stage(t);
+        measure_local(t);
 
         if (S.mode == REPLICA_ORACLE)
-                replica_sync_oracle();
+                replica_sync_oracle();  /* every tick: always-fresh */
 
-        send_channels(t);       /* [header][state][cars] at (t, +1)     */
+        send_cars(t);           /* every tick, every mode */
+        if (diffuse_state)
+                send_state(t);
 
         if (S.verbose && S.rank == 0) {
                 printf("[t=%4d] live=%-6zu arrived=%-6" PRIu64
@@ -863,23 +927,26 @@ static int setup(const char *dir, int steps, unsigned int cap)
         if (build_local_slice() != 0)
                 return -1;
 
-        chan_layout_init(&S.L, S.city.ne, cap);
+        car_layout_init(&S.Lcar, cap);
+        state_layout_init(&S.Lstate, S.city.ne);
 
         if (S.rank == 0) {
                 city_print_summary(&S.city);
                 printf("=== Channel layout ===\n");
-                printf("congestion entries : %u  (%zu B)\n",
-                       S.L.n_state,
-                       (size_t)S.L.n_state * sizeof(struct cong_entry));
-                printf("car cap per edge   : %u  (%zu B)\n",
-                       S.L.cap, (size_t)S.L.cap * sizeof(struct car_rec));
-                printf("state_off/cars_off : %u / %u\n",
-                       S.L.state_off, S.L.cars_off);
-                printf("edge_state_size    : %zu B\n", S.L.bytes);
+                printf("congestion entries : %u  (%zu B state buf)\n",
+                       S.Lstate.n_state, S.Lstate.bytes);
+                printf("car cap per edge   : %u  (%zu B car buf)\n",
+                       S.Lcar.cap, S.Lcar.bytes);
+                printf("state cadence      : every %d ticks (delta %d)\n",
+                       S.stale_delay, S.stale_delay);
+                printf("car edge_state_size   : %zu B\n", S.Lcar.bytes);
+                printf("state edge_state_size : %zu B\n", S.Lstate.bytes);
                 printf("replica mode       : %s\n", replica_mode_name(S.mode));
-                printf("per-tick out/rank  : %.2f MiB (%zu edges)\n",
-                       (double)(S.nedge_local * S.L.bytes) / (1024.0 * 1024.0),
-                       S.nedge_local);
+                printf("per-tick out/rank  : cars %.2f MiB + state %.2f MiB "
+                       "every %d ticks (%zu edges)\n",
+                       (double)(S.nedge_local * S.Lcar.bytes)/(1024.0*1024.0),
+                       (double)(S.nedge_local * S.Lstate.bytes)/(1024.0*1024.0),
+                       S.stale_delay, S.nedge_local);
                 printf("======================\n");
                 fflush(stdout);
         }
@@ -919,12 +986,17 @@ static int setup(const char *dir, int steps, unsigned int cap)
                                 if (ru == rv)
                                         continue;   /* intra-rank: no matrix */
 
-                                /* Undirected boundary: min over both cells,
-                                 * matching DSTM's symmetric reduction. */
+                                /* Floor the boundary distance at
+                                 * min(min_crossing_ff, stale_delay): the
+                                 * state stream uses delta = stale_delay,
+                                 * so the matrix must not exceed it. Cars
+                                 * still use delta = edge_delay >= this. */
+                                int wf = (w < S.stale_delay) ? w
+                                                             : S.stale_delay;
                                 int *a = &m[(size_t)ru * ws + rv];
                                 int *b = &m[(size_t)rv * ws + ru];
-                                if (*a < 0 || w < *a) *a = w;
-                                if (*b < 0 || w < *b) *b = w;
+                                if (*a < 0 || wf < *a) *a = wf;
+                                if (*b < 0 || wf < *b) *b = wf;
                         }
                 }
 
@@ -995,14 +1067,20 @@ static int setup(const char *dir, int steps, unsigned int cap)
                 return -1;
         }
 
-        /* NULL initial states: every edge slot is seeded to zero, so its
-         * header magic is 0 and chan_validate rejects it until someone
-         * actually writes. That is the "no message yet" case, handled
-         * without a separate valid flag. */
-        rc = dstm_dgraph_create(&S.g, sizeof(struct vertex_state), S.L.bytes,
-                                S.nlocal, S.ldeg, S.ldst, NULL, NULL);
+        rc = dstm_dgraph_create(&S.g_cars, sizeof(struct vertex_state),
+                                S.Lcar.bytes, S.nlocal, S.ldeg, S.ldst,
+                                NULL, NULL);
         if (rc != DSTM_SUCCESS) {
-                fprintf(stderr, "rank %d: dstm_dgraph_create failed: %d\n",
+                fprintf(stderr, "rank %d: dgraph_create(cars) failed: %d\n",
+                        S.rank, rc);
+                return -1;
+        }
+
+        rc = dstm_dgraph_create(&S.g_state, sizeof(struct vertex_state),
+                                S.Lstate.bytes, S.nlocal, S.ldeg, S.ldst,
+                                NULL, NULL);
+        if (rc != DSTM_SUCCESS) {
+                fprintf(stderr, "rank %d: dgraph_create(state) failed: %d\n",
                         S.rank, rc);
                 return -1;
         }
@@ -1065,11 +1143,14 @@ static int setup(const char *dir, int steps, unsigned int cap)
         S.load_cross  = malloc(S.nedge_local * sizeof(*S.load_cross));
         S.load_block  = malloc(S.nedge_local * sizeof(*S.load_block));
         S.vqueue      = calloc(S.nlocal, sizeof(*S.vqueue));
-        S.sendbuf     = malloc(S.L.bytes);
-        S.recvbuf     = malloc(S.L.bytes);
+        S.car_sendbuf   = malloc(S.Lcar.bytes);
+        S.car_recvbuf   = malloc(S.Lcar.bytes);
+        S.state_sendbuf = malloc(S.Lstate.bytes);
+        S.state_recvbuf = malloc(S.Lstate.bytes);
 
         if (!S.stage || !S.stage_count || !S.load_cross || !S.load_block ||
-            !S.vqueue || !S.sendbuf || !S.recvbuf) {
+            !S.vqueue || !S.car_sendbuf || !S.car_recvbuf ||
+            !S.state_sendbuf || !S.state_recvbuf) {
                 fprintf(stderr, "rank %d: out of memory in setup\n", S.rank);
                 return -1;
         }
@@ -1091,8 +1172,10 @@ static int setup(const char *dir, int steps, unsigned int cap)
  * their allocations live in. */
 static void teardown_dstm(void)
 {
-        if (S.g != NULL)
-                dstm_dgraph_destroy(&S.g);
+        if (S.g_cars != NULL)
+                dstm_dgraph_destroy(&S.g_cars);
+        if (S.g_state != NULL)
+                dstm_dgraph_destroy(&S.g_state);
 }
 
 static void teardown_local(void)
@@ -1108,8 +1191,10 @@ static void teardown_local(void)
         free(S.load_cross);
         free(S.load_block);
         free(S.vqueue);
-        free(S.sendbuf);
-        free(S.recvbuf);
+        free(S.car_sendbuf);
+        free(S.car_recvbuf);
+        free(S.state_sendbuf);
+        free(S.state_recvbuf);
         free(S.ag_counts);
         free(S.ag_displs);
         free(S.rrow);
@@ -1376,9 +1461,13 @@ int main(int argc, char *argv[])
         for (S.t = 0; S.t <= S.t_end; S.t++)
                 run_step((int32_t)S.t, s);
 
-        /* Last write is at t_end with delta up to the edge_delay bound
-         * MAX_CONGESTION_MULTIPLIER * ff_max. Drain one tick past that. */
-        dstm_time_t last_time = S.t_end + MAX_CONGESTION_MULTIPLIER * S.ff_max + 1;
+        /* Cars: last put at t_end with delta up to MAX*ff_max. State: last
+         * put at the final state tick with delta stale_delay. Drain past
+         * whichever reaches further. */
+        dstm_time_t last_cars  = S.t_end + MAX_CONGESTION_MULTIPLIER * S.ff_max;
+        dstm_time_t last_state = S.t_end + S.stale_delay;
+        dstm_time_t last_time  =
+                (last_cars > last_state ? last_cars : last_state) + 1;
 
         teardown_dstm();
         dstm_fini(last_time);
