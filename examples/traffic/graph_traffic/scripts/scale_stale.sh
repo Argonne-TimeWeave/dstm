@@ -218,7 +218,7 @@ echo
 
 # Requested columns: mean_dur, mode, rank(s), stale_mx, age (+ arrived).
 # Plus the swept variable stale_delay and rep so rows are identifiable.
-echo "ranks,mode,stale_delay,rep,status,mean_dur,arrived,mean_age,stale_max" > "${CSV}"
+echo "ranks,mode,stale_delay,rep,status,mean_dur,arrived,mean_age,stale_max,run_time,mib_tick_total,mib_tick_per_rank" > "${CSV}"
 
 # --------------------------------------------------------------------------
 # One run.
@@ -274,20 +274,30 @@ run_one() {
                 status="launch_err"
         fi
 
-        # Parse only the fields we keep: mean_dur, arrived, mean_age, stale_max.
-        local dur arr age smax
+        # Parse only the fields we keep: mean_dur, arrived, mean_age, stale_max,
+        # run_time, and the aggregate MiB/tick (per-rank is derived below).
+        local dur arr age smax rt mibt mibt_pr
         dur=$(  sed -n 's/.*mean duration=\([0-9.]*\).*/\1/p'              "${log}" | tail -1)
         arr=$(  sed -n 's/^spawned=[0-9]* arrived=\([0-9]*\).*/\1/p'       "${log}" | tail -1)
         age=$(  sed -n 's/.*consulted entry=\([0-9.]*\).*/\1/p'            "${log}" | tail -1)
         smax=$( sed -n 's/.*staleness.*max=\([0-9]*\).*/\1/p'              "${log}" | tail -1)
+        rt=$(   sed -n 's/^total run time:[[:space:]]*\([0-9.]*\).*/\1/p'  "${log}" | tail -1)
+        mibt=$( sed -n 's/.*(\([0-9.]*\) MiB\/tick across all ranks).*/\1/p' "${log}" | tail -1)
+
+        # Derive per-rank MiB/tick = aggregate / rank count (np).
+        if [[ -n "${mibt}" ]]; then
+                mibt_pr=$(awk -v t="${mibt}" -v n="${np}" 'BEGIN{ printf "%.4f", (n>0)? t/n : 0 }')
+        fi
 
         [[ -z "${dur}" && "${status}" == ok ]] && status="parse_fail"
         : "${dur:=nan}" "${arr:=-1}" "${age:=nan}" "${smax:=-1}"
+        : "${rt:=nan}" "${mibt:=nan}" "${mibt_pr:=nan}"
 
-        echo "${np},${mode},${sd_csv},${rep},${status},${dur},${arr},${age},${smax}" >> "${CSV}"
+        echo "${np},${mode},${sd_csv},${rep},${status},${dur},${arr},${age},${smax},${rt},${mibt},${mibt_pr}" >> "${CSV}"
 
         if [[ "${status}" == ok ]]; then
-                printf 'dur=%-8s arr=%-7s age=%-6s stale_mx=%s\n' "${dur}" "${arr}" "${age}" "${smax}"
+                printf 'dur=%-8s arr=%-7s age=%-6s stale_mx=%-3s rt=%-8s MiB/tick=%-8s per_rank=%s\n' \
+                       "${dur}" "${arr}" "${age}" "${smax}" "${rt}" "${mibt}" "${mibt_pr}"
         else
                 printf '%s (%s)\n' "${status}" "$(basename "${log}")"
         fi
@@ -335,20 +345,21 @@ awk -F, 'NR>1 && $5=="ok" {
         # (oracle/blind) key on the mode so they do not collide.
         key = ($3 == "na") ? $2 : $3;
         dur[key]=dur[key]" "$6; arr[key]=arr[key]" "$7; age[key]=age[key]" "$8; sm[key]=sm[key]" "$9;
+        rt[key]=rt[key]" "$10; mibt[key]=mibt[key]" "$11; mibp[key]=mibp[key]" "$12;
         if ($3 == "na") { base[$2]=1 } else { seen[key]=1 }   # keep na out of numeric sort
 }
 function med(s,   a,n,i,j,t) { n=split(s,a," "); if(!n) return "nan";
         for(i=1;i<=n;i++) for(j=i+1;j<=n;j++) if(a[j]<a[i]){t=a[i];a[i]=a[j];a[j]=t};
         return (n%2)? a[(n+1)/2] : (a[n/2]+a[n/2+1])/2 }
 END {
-        printf "%-12s %10s %10s %8s %9s\n","stale_delay","mean_dur","arrived","age","stale_mx";
+        printf "%-12s %10s %10s %8s %9s %10s %12s %12s\n","stale_delay","mean_dur","arrived","age","stale_mx","run_time","MiB/tick","per_rank";
         n=asorti(seen,sk,"@val_num_asc");
         for(i=1;i<=n;i++){ k=sk[i];
-                printf "%-12s %10s %10s %8s %9s\n", k, med(dur[k]), med(arr[k]), med(age[k]), med(sm[k]) }
+                printf "%-12s %10s %10s %8s %9s %10s %12s %12s\n", k, med(dur[k]), med(arr[k]), med(age[k]), med(sm[k]), med(rt[k]), med(mibt[k]), med(mibp[k]) }
         if ("oracle" in base)
-                printf "%-12s %10s %10s %8s %9s   <- always-fresh upper bound\n", \
-                       "oracle", med(dur["oracle"]), med(arr["oracle"]), med(age["oracle"]), med(sm["oracle"]);
+                printf "%-12s %10s %10s %8s %9s %10s %12s %12s   <- always-fresh upper bound\n", \
+                       "oracle", med(dur["oracle"]), med(arr["oracle"]), med(age["oracle"]), med(sm["oracle"]), med(rt["oracle"]), med(mibt["oracle"]), med(mibp["oracle"]);
         if ("blind" in base)
-                printf "%-12s %10s %10s %8s %9s   <- never-merge lower bound\n", \
-                       "blind", med(dur["blind"]), med(arr["blind"]), med(age["blind"]), med(sm["blind"]);
+                printf "%-12s %10s %10s %8s %9s %10s %12s %12s   <- never-merge lower bound\n", \
+                       "blind", med(dur["blind"]), med(arr["blind"]), med(age["blind"]), med(sm["blind"]), med(rt["blind"]), med(mibt["blind"]), med(mibp["blind"]);
 }' "${CSV}" 2>/dev/null || echo "  (install gawk for the summary view; raw CSV is complete)"

@@ -34,7 +34,8 @@
  * transmitted (the region slot has to be a fixed size) but zeroed.
  ******************************************************************************/
 
-#define CHAN_MAGIC 0x43484e31u          /* "CHN1" */
+#define CHAN_MAGIC_CAR   0x43415231u    /* "CAR1" */
+#define CHAN_MAGIC_STATE 0x53544131u    /* "STA1" */
 
 /* Per-edge congestion, highest-stamp-wins. Arrival order carries no weight.
  *
@@ -64,83 +65,96 @@ struct car_rec {
         int32_t hops;
 };
 
-struct chan_header {
-        uint32_t magic;
+/* ---- Car channel (shipped EVERY tick, delta = edge_delay) ---- */
+struct car_header {
+        uint32_t magic;         /* CHAN_MAGIC_CAR */
         int32_t  tick;          /* ARRIVAL tick of this buffer          */
-        uint32_t n_state;
         uint32_t n_cars;
         uint32_t cap;
-        uint32_t state_off;     /* bytes from buffer start to state[0]  */
         uint32_t cars_off;      /* bytes from buffer start to cars[0]   */
-        /* Diagnostic only: chan_validate does not check these and the
-         * receiver does not compare them against the slot it read from.
-         * They exist to make a hex dump interpretable. */
-        uint32_t src_vertex;
-        uint32_t dst_vertex;
-        uint32_t reserved;
+        uint32_t src_vertex;    /* diagnostic only                      */
+        uint32_t dst_vertex;    /* diagnostic only                      */
+        uint32_t reserved;      /* keeps sizeof a multiple of 8         */
 };
 
-/* Compile-time guards: the wire layout must not drift. */
-typedef char chan_assert_hdr[(sizeof(struct chan_header) == 40) ? 1 : -1];
+/* ---- State channel (shipped every STALE_DELAY ticks, delta = SD) ---- */
+struct state_header {
+        uint32_t magic;         /* CHAN_MAGIC_STATE */
+        int32_t  tick;          /* ARRIVAL tick of this buffer          */
+        uint32_t n_state;
+        uint32_t state_off;     /* bytes from buffer start to state[0]  */
+        uint32_t src_vertex;    /* diagnostic only                      */
+        uint32_t dst_vertex;    /* diagnostic only                      */
+        uint32_t reserved0;
+        uint32_t reserved1;     /* pad to 32 B (multiple of 8)          */
+};
+
+typedef char chan_assert_carhdr[(sizeof(struct car_header)   == 32) ? 1 : -1];
+typedef char chan_assert_sthdr [(sizeof(struct state_header) == 32) ? 1 : -1];
 typedef char chan_assert_ent[(sizeof(struct cong_entry) == 8) ? 1 : -1];
 typedef char chan_assert_car[(sizeof(struct car_rec) == 24) ? 1 : -1];
 
-struct chan_layout {
-        uint32_t n_state;
+struct car_layout {
         uint32_t cap;
-        uint32_t state_off;
         uint32_t cars_off;
-        size_t   bytes;         /* == dgraph edge_state_size            */
+        size_t   bytes;         /* == g_cars edge_state_size            */
 };
 
-void chan_layout_init(struct chan_layout *L, size_t n_edges, unsigned int cap);
+struct state_layout {
+        uint32_t n_state;
+        uint32_t state_off;
+        size_t   bytes;         /* == g_state edge_state_size           */
+};
 
-static inline struct chan_header *chan_hdr(void *buf)
+void car_layout_init(struct car_layout *L, unsigned int cap);
+void state_layout_init(struct state_layout *L, size_t n_edges);
+
+static inline struct car_header *car_hdr(void *buf)
 {
-        return (struct chan_header *)buf;
+        return (struct car_header *)buf;
 }
-
-static inline const struct chan_header *chan_hdr_c(const void *buf)
+static inline const struct car_header *car_hdr_c(const void *buf)
 {
-        return (const struct chan_header *)buf;
+        return (const struct car_header *)buf;
 }
-
-static inline struct cong_entry *chan_state(const struct chan_layout *L,
-                                            void *buf)
-{
-        return (struct cong_entry *)((char *)buf + L->state_off);
-}
-
-static inline const struct cong_entry *chan_state_c(const struct chan_layout *L,
-                                                    const void *buf)
-{
-        return (const struct cong_entry *)((const char *)buf + L->state_off);
-}
-
-static inline struct car_rec *chan_cars(const struct chan_layout *L, void *buf)
+static inline struct car_rec *car_cars(const struct car_layout *L, void *buf)
 {
         return (struct car_rec *)((char *)buf + L->cars_off);
 }
-
-static inline const struct car_rec *chan_cars_c(const struct chan_layout *L,
-                                                const void *buf)
+static inline const struct car_rec *car_cars_c(const struct car_layout *L,
+                                               const void *buf)
 {
         return (const struct car_rec *)((const char *)buf + L->cars_off);
 }
 
-/* Zero the whole buffer and stamp a valid header. arrive_tick is when
- * the receiver is expected to consume it, i.e. send_tick + delta. */
-void chan_reset(const struct chan_layout *L, void *buf, int32_t arrive_tick,
-                size_t src_vertex, size_t dst_vertex);
+static inline struct state_header *state_hdr(void *buf)
+{
+        return (struct state_header *)buf;
+}
+static inline const struct state_header *state_hdr_c(const void *buf)
+{
+        return (const struct state_header *)buf;
+}
+static inline struct cong_entry *state_entries(const struct state_layout *L,
+                                               void *buf)
+{
+        return (struct cong_entry *)((char *)buf + L->state_off);
+}
+static inline const struct cong_entry *state_entries_c(
+        const struct state_layout *L, const void *buf)
+{
+        return (const struct cong_entry *)((const char *)buf + L->state_off);
+}
 
-/* Append a car. Returns 0 on success, -1 if the per-edge cap is full. */
-int chan_push_car(const struct chan_layout *L, void *buf,
-                  const struct car_rec *car);
+void car_reset(const struct car_layout *L, void *buf, int32_t arrive_tick,
+               size_t src_vertex, size_t dst_vertex);
+int  car_push(const struct car_layout *L, void *buf,
+              const struct car_rec *car);
+int  car_validate(const struct car_layout *L, const void *buf);
 
-/* Structural validation of a received buffer. Returns 0 if it is a
- * well-formed channel buffer for this layout, -1 otherwise (including
- * the never-written case, where the seeded slot is all zeroes). */
-int chan_validate(const struct chan_layout *L, const void *buf);
+void state_reset(const struct state_layout *L, void *buf, int32_t arrive_tick,
+                 size_t src_vertex, size_t dst_vertex);
+int  state_validate(const struct state_layout *L, const void *buf);
 
 /*******************************************************************************
  * Congestion replica
