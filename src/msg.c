@@ -34,15 +34,16 @@ int dstm_msg_init(void)
 {
 	/* dstm_msg_hdr_t: type(int), dst_rank(int), src_rank(int),
 	 * time(int64_t), delta(int64_t) */
-	MPI_Datatype dstm_msg_hdr_sig[5] = {MPI_INT, MPI_INT, MPI_INT,
-	                                    MPI_INT64_T, MPI_INT64_T};
-	int dstm_msg_hdr_bl[5] = {1, 1, 1, 1, 1};
-	MPI_Aint dstm_msg_hdr_disp[5] = {offsetof(dstm_msg_hdr_t, type),
+	MPI_Datatype dstm_msg_hdr_sig[6] = {MPI_INT, MPI_INT, MPI_INT,
+	                                    MPI_INT64_T, MPI_INT64_T, MPI_INT};
+	int dstm_msg_hdr_bl[6] = {1, 1, 1, 1, 1, 1};
+	MPI_Aint dstm_msg_hdr_disp[6] = {offsetof(dstm_msg_hdr_t, type),
 	                                 offsetof(dstm_msg_hdr_t, dst_rank),
 	                                 offsetof(dstm_msg_hdr_t, src_rank),
 	                                 offsetof(dstm_msg_hdr_t, time),
-	                                 offsetof(dstm_msg_hdr_t, delta)};
-	MPI_Type_create_struct(5, dstm_msg_hdr_bl, dstm_msg_hdr_disp,
+	                                 offsetof(dstm_msg_hdr_t, delta),
+                                     offsetof(dstm_msg_hdr_t, region_id)};
+	MPI_Type_create_struct(6, dstm_msg_hdr_bl, dstm_msg_hdr_disp,
 	                       dstm_msg_hdr_sig, &dstm_msg_hdr_dt);
 	MPI_Type_commit(&dstm_msg_hdr_dt);
 
@@ -96,7 +97,8 @@ int dstm_msg_fill_hdr(dstm_msg_t *m,
                       dstm_time_t time,
                       dstm_time_t delta,
                       int dst_rank,
-                      int src_rank)
+                      int src_rank,
+                      int region_id)
 {
 	if (type < 0 || type >= DSTM_MSG_TYPE_MAX) {
 		dstm_errno = DSTM_EINVAL;
@@ -107,6 +109,7 @@ int dstm_msg_fill_hdr(dstm_msg_t *m,
 	m->header.src_rank = src_rank;
 	m->header.time = time;
 	m->header.delta = delta;
+    m->header.region_id = region_id;
 	return 0;
 }
 

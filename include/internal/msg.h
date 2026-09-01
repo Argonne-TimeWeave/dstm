@@ -49,6 +49,7 @@ struct dstm_msg_hdr_s {
 	int src_rank;
 	dstm_time_t time;
 	dstm_time_t delta;
+    int region_id;
 };
 typedef struct dstm_msg_hdr_s dstm_msg_hdr_t;
 
@@ -96,7 +97,8 @@ int dstm_msg_fill_hdr(dstm_msg_t *msg,
                       dstm_time_t time,
                       dstm_time_t delta,
                       int dst_rank,
-                      int src_rank);
+                      int src_rank,
+                      int region_id);
 
 int dstm_msg_fill_barrier(dstm_msg_t *msg, dstm_time_t last_time);
 

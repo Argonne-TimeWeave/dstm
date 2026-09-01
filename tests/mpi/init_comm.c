@@ -67,7 +67,9 @@ int main(int argc, char *argv[])
         /***************************************************************
          * Check 1: rank and world_size match the sub-communicator
          ***************************************************************/
-        assert(dstm_get_local_region_id() == sub_rank);
+
+        /* Default region id is 0 regardless of rank/sub-rank. */
+        assert(dstm_get_local_region_id() == 0);
 
         if (world_rank == 0)
                 printf("PASS: rank/size match sub-communicator\n");

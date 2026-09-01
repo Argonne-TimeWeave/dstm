@@ -19,10 +19,13 @@
 #include <stdio.h>
 
 #include "dstm.h"
+#include "internal/region.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+#define DSTM_MAX_REGIONS 64
 
 struct dstm_context_s {
 	/* Active communicator used by all session-level traffic
@@ -39,8 +42,38 @@ struct dstm_context_s {
 	MPI_Comm user_comm;
 	int world_size;
 	int rank;
-	dstm_region_t *region;
+
+    /* Local region table, indexed by local region id. Slot 0 is default */
+	dstm_region_t *regions[DSTM_MAX_REGIONS];
+    int region_count;
+
 	dstm_distance_t *distances;
+
+    /* ---- rank-level versioning/clock state (was per-region) ----
+     * Shared across ALL of this rank's regions so that versioning is
+     * effectively rank-level, not region-level. */
+    dstm_region_ninfo_t *ninfos;    /* neighbor last-known times */
+
+    /* Number of barrier tokens received but not yet consumed by the
+    * barrier DFA.  The BARRIER message handler increments this on
+    * every token arrival; the barrier DFA decrements it when it
+    * consumes a token to advance to the next state. */
+    int barrier_token_count;
+
+    /* Set to 1 after the first barrier round completes (all ranks
+    * have drained their outgoing requests).  When set, the version
+    * transition checks (WRITABLE->READABLE, READABLE->DISCARDABLE)
+    * skip ALL neighbor distance checks, since no rank can issue new
+    * PUT/GET messages.  Reset to 0 when the barrier exits. */
+    int barrier_all_drained;
+
+    /* Highest logical timestamp for which we have already broadcast a
+    * HEARTBEAT to all neighbors.  Used to suppress redundant
+    * heartbeats: dstm_put/dstm_get only emit a heartbeat when the
+    * caller's `time` strictly exceeds this watermark.  Per-region
+    * (and therefore per-session) so it resets to 0 with each fresh
+    * dstm_start. */
+    int local_heartbeat_time;
 };
 typedef struct dstm_context_s dstm_context_t;
 

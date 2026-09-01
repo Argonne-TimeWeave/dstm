@@ -385,9 +385,26 @@ typedef struct dstm_darray_s dstm_darray_t;
 int dstm_darray_create(dstm_darray_t **ret,
                        size_t element_size,
                        size_t local_elements);
+
+/* Like dstm_darray_create, but back this rank's partition on local region
+ * @p region_id (as returned by dstm_region_register) instead of the default
+ * region 0.  Collective over dstm_global_context.comm.  Each rank may pass a
+ * different region_id; the mapping is Allgathered internally so remote
+ * accesses address the correct region on each owner. */
+int dstm_darray_create_on_region(dstm_darray_t **ret,
+                                 size_t element_size,
+                                 size_t local_elements,
+                                 int region_id);
+
 int dstm_darray_create_equal(dstm_darray_t **ret,
                              size_t element_size,
                              size_t total_elements);
+
+int dstm_darray_create_equal_on_region(dstm_darray_t **ret,
+                                       size_t element_size,
+                                       size_t total_elements,
+                                       int region_id);
+
 void dstm_darray_destroy(dstm_darray_t **darray);
 
 void *dstm_darray_get_local_ptr(dstm_darray_t *darray);
@@ -943,7 +960,16 @@ void *dstm_region_ptr_tovoid(dstm_region_t *r, dstm_ptr_t ptr);
 int dstm_ptr_isnull(dstm_ptr_t ptr);
 
 int dstm_get_local_region_id(void);
-dstm_region_t *dstm_get_local_region(void);
+
+/* Look up a local region by its id (0 == default). NULL if none. */
+dstm_region_t *dstm_get_local_region(int region_id);
+
+/* Register an additional local backing store; returns its region id
+ * (>= 0) via *region_id, or an error. Collective is NOT required. */
+int dstm_region_register(size_t size, int *region_id);
+
+/* Unregister/destroy a local region previously registered. */
+int dstm_region_unregister(int region_id);
 
 /* Construct a dstm_ptr_t referring to byte @p offset within region
  * @p region (which may be a rank id, DSTM_REGIONID_LOCAL, or

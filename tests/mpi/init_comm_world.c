@@ -30,7 +30,9 @@ int main(int argc, char *argv[])
 
         int rc = dstm_init_comm(&argc, &argv, MPI_COMM_WORLD);
         assert(rc == DSTM_SUCCESS);
-        assert(dstm_get_local_region_id() == world_rank);
+        /* Region id is now an intra-rank concept: the default region is
+         * always id 0, independent of rank. */
+        assert(dstm_get_local_region_id() == 0);
 
         /* Run a trivial session. */
         dstm_distance_t *dist = NULL;

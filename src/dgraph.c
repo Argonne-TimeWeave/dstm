@@ -432,7 +432,7 @@ int dstm_dgraph_create(dstm_dgraph_t **ret,
                 return -DSTM_ENOMEM;
 
         g->region_id         = dstm_get_local_region_id();
-        g->region            = dstm_get_local_region();
+        g->region            = dstm_get_local_region(g->region_id);
         g->world_size        = world_size;
         g->local_rank        = self;
         g->vertex_state_size = vertex_state_size;

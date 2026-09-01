@@ -78,7 +78,7 @@ static void dstm_barrier_send_token(dstm_time_t last_time)
 	dstm_msg_t m;
 	memset(&m, 0, sizeof(m));
 	dstm_msg_fill_hdr(&m, DSTM_MSG_TYPE_BARRIER, last_time, 0, next,
-	                  dstm_global_context.rank);
+	                  dstm_global_context.rank, 0); /* region_id unused */
 	dstm_msg_fill_barrier(&m, last_time);
 	int tag = dstm_request_new_tag();
 	dstm_msg_send(&m, tag);
@@ -115,7 +115,6 @@ int dstm_request_progress_barrier(dstm_request_t *req)
 	int rank = dstm_global_context.rank;
 	int world_size = dstm_global_context.world_size;
 	dstm_time_t last_time = req->time; /* last_time stored in req->time */
-	dstm_region_t *region = dstm_global_context.region;
 
 	switch (req->status) {
 
@@ -141,10 +140,10 @@ int dstm_request_progress_barrier(dstm_request_t *req)
 
 	case DSTM_REQUEST_STATUS_BARRIER_R1_WAIT:
 		/* Non-zero ranks: wait for the R1 token from predecessor. */
-		if (region->barrier_token_count == 0)
+		if (dstm_global_context.barrier_token_count == 0)
 			break;
 
-		region->barrier_token_count--;
+		dstm_global_context.barrier_token_count--;
 		dstm_log_info("barrier: rank %d received R1 token\n", rank);
 
 		/* Forward R1 token to successor. */
@@ -156,10 +155,10 @@ int dstm_request_progress_barrier(dstm_request_t *req)
 	case DSTM_REQUEST_STATUS_BARRIER_R1_FORWARDED:
 		/* Wait for the R1 ring to close (rank 0) or for the R2
 		 * token (non-zero ranks). */
-		if (region->barrier_token_count == 0)
+		if (dstm_global_context.barrier_token_count == 0)
 			break;
 
-		region->barrier_token_count--;
+		dstm_global_context.barrier_token_count--;
 		dstm_log_info("barrier: rank %d R1 complete\n", rank);
 
 		/* Rank 0: inject R2 token. */
@@ -170,7 +169,7 @@ int dstm_request_progress_barrier(dstm_request_t *req)
 
 		/* All ranks: enable barrier optimization so version
 		 * transitions bypass neighbor distance checks. */
-		region->barrier_all_drained = 1;
+		dstm_global_context.barrier_all_drained = 1;
 		req->status = DSTM_REQUEST_STATUS_BARRIER_R2_DRAINING;
 		break;
 
@@ -192,10 +191,10 @@ int dstm_request_progress_barrier(dstm_request_t *req)
 	case DSTM_REQUEST_STATUS_BARRIER_R2_FORWARDED:
 		/* Wait for the R2 ring to close (rank 0) or for the exit
 		 * token (non-zero ranks). */
-		if (region->barrier_token_count == 0)
+		if (dstm_global_context.barrier_token_count == 0)
 			break;
 
-		region->barrier_token_count--;
+		dstm_global_context.barrier_token_count--;
 
 		if (rank == 0) {
 			/* R2 ring complete.  Inject exit token so all other
@@ -213,7 +212,7 @@ int dstm_request_progress_barrier(dstm_request_t *req)
 		}
 
 		/* Clean up barrier state. */
-		region->barrier_all_drained = 0;
+		dstm_global_context.barrier_all_drained = 0;
 		req->status = DSTM_REQUEST_STATUS_DONE;
 		break;
 
@@ -242,7 +241,7 @@ int dstm_barrier(dstm_time_t last_time)
 	dstm_request_t *req;
 	dstm_ptr_t null_ptr = {DSTM_REGIONID_INVALID, 0};
 	dstm_request_create(&req, DSTM_REQUEST_TYPE_BARRIER, 0, last_time, 0,
-	                    0, null_ptr, null_ptr, 0);
+	                    0, 0, null_ptr, null_ptr, 0);
 	assert(req != NULL);
 	req->status = DSTM_REQUEST_STATUS_BARRIER_DRAIN_OUT;
 	req->caller_owned = 1;

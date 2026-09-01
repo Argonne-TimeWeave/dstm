@@ -68,6 +68,7 @@ int dstm_request_create(dstm_request_t **r,
                         dstm_time_t time,
                         dstm_time_t delta,
                         int rank,
+                        int region_id,
                         dstm_ptr_t dst,
                         dstm_ptr_t src,
                         size_t size)
@@ -85,6 +86,7 @@ int dstm_request_create(dstm_request_t **r,
 	req->time = time;
 	req->delta = delta;
 	req->rank = rank;
+    req->region_id = region_id;
 	req->dst = dst;
 	req->src = src;
 	req->size = size;

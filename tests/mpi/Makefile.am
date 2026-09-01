@@ -28,6 +28,7 @@ COMPILED_TESTS = \
 		local_delta \
 		msg \
 		multi_session \
+        multi_region \
         dgraph \
         mini_airport \
 		put_after_get
