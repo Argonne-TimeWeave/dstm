@@ -29,6 +29,7 @@ COMPILED_TESTS = \
 		msg \
 		multi_session \
         multi_region \
+        multi_dgraph \
         dgraph \
         mini_airport \
 		put_after_get

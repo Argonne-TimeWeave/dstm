@@ -649,9 +649,8 @@ json_t *dstm_region_ninfo_to_json(dstm_region_ninfo_t *ni)
 {
 	if (ni == NULL)
 		return json_null();
-	//return json_pack("{s:I, s:i}", "time", (json_int_t)ni->time, "rank",
-	 //                ni->rank);
-    return json_null(); //TODO
+    return json_pack("{s:I, s:i, s:i}", "time", (json_int_t)ni->time,
+	                 "rank", ni->key.rank, "region_id", ni->key.region_id);
 }
 
 json_t *dstm_region_version_to_json(dstm_region_version_t *v)

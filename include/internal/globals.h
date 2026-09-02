@@ -19,13 +19,18 @@
 #include <stdio.h>
 
 #include "dstm.h"
-#include "internal/region.h"
+
+#define DSTM_MAX_REGIONS 64
+
+struct dstm_region_s;
+typedef struct dstm_region_s dstm_region_t;
+
+struct dstm_region_ninfo_s;
+typedef struct dstm_region_ninfo_s dstm_region_ninfo_t;
 
 #ifdef __cplusplus
 extern "C" {
 #endif
-
-#define DSTM_MAX_REGIONS 64
 
 struct dstm_context_s {
 	/* Active communicator used by all session-level traffic
@@ -49,10 +54,13 @@ struct dstm_context_s {
 
 	dstm_distance_t *distances;
 
-    /* ---- rank-level versioning/clock state (was per-region) ----
-     * Shared across ALL of this rank's regions so that versioning is
-     * effectively rank-level, not region-level. */
-    dstm_region_ninfo_t *ninfos;    /* neighbor last-known times */
+    /* ---- rank-level versioning / clock state ----
+     * These were previously per-region.  They are now shared across ALL
+     * of this rank's regions: neighbor clocks are keyed by (rank,
+     * region_id) inside `ninfos`, while the barrier and heartbeat
+     * watermark are genuinely rank-wide.  All reset per session. */
+    dstm_region_ninfo_t *ninfos;    /* neighbor last-known times 
+                                        by (rank, region_id) */
 
     /* Number of barrier tokens received but not yet consumed by the
     * barrier DFA.  The BARRIER message handler increments this on
@@ -70,10 +78,9 @@ struct dstm_context_s {
     /* Highest logical timestamp for which we have already broadcast a
     * HEARTBEAT to all neighbors.  Used to suppress redundant
     * heartbeats: dstm_put/dstm_get only emit a heartbeat when the
-    * caller's `time` strictly exceeds this watermark.  Per-region
-    * (and therefore per-session) so it resets to 0 with each fresh
+    * caller's `time` strictly exceeds this watermark. Rank-wide; reset to 0 on each
     * dstm_start. */
-    int local_heartbeat_time;
+    dstm_time_t local_heartbeat_time;
 };
 typedef struct dstm_context_s dstm_context_t;
 

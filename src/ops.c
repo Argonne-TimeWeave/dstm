@@ -175,7 +175,7 @@ static int dstm_version_can_become_discardable(dstm_region_t *region, int region
 
 static int dstm_region_status_update(dstm_time_t time)
 {
-    for (int rid = 0; rid < DSTM_MAX_REGIONS; rid++) {
+    for (int rid = 0; rid < dstm_global_context.region_count; rid++) {
         dstm_region_t *region = dstm_global_context.regions[rid];
         if (region == NULL)
             continue; 
@@ -301,7 +301,12 @@ static int dstm_request_progress_in_put(dstm_request_t *req)
 	 * this rank's region for that time.  Abort loudly.
 	 */
 	dstm_region_t *rg = dstm_get_local_region(req->region_id);
-    assert(rg != NULL);
+    if (rg == NULL) {
+		dstm_log_error("incoming request for unknown local region %d "
+		               "on rank %d\n",
+		               req->region_id, dstm_global_context.rank);
+		abort();
+	}
 	assert(req->status == DSTM_REQUEST_STATUS_INIT);
 	dstm_time_t target = req->time + req->delta;
 	dstm_region_version_t *v =
@@ -335,24 +340,33 @@ static int dstm_request_progress_in_get(dstm_request_t *req)
     assert(rg != NULL);
     if (req->status == DSTM_REQUEST_STATUS_INIT) {
         dstm_time_t target = req->time + req->delta;
-        /* If the target version has already been evicted (target is
-         * older than the oldest live version), the responder can
-         * never satisfy this incoming GET and the requester would
-         * hang forever.  This indicates a premature-eviction bug in
-         * the version distance checks; fail loudly rather than
-         * deadlock. */
-        if (target < rg->time && dstm_region_version_find(rg, target)
-                                         == NULL) {
+        dstm_region_version_t *v = dstm_region_version_find(rg, target);
+
+        /* Distinguish "not created yet" from "already evicted".
+         *
+         * A GET for `target` can only ever be satisfied if the version
+         * for `target` still exists or has yet to be created.  If it is
+         * missing AND a strictly-newer version is already live, then the
+         * target slot was passed over and reclaimed: no future PUT can
+         * recreate an older version (puts only move the clock forward),
+         * so this GET can never complete.  That is the genuine
+         * premature-eviction bug; fail loudly rather than deadlock.
+         *
+         * Merely having target < rg->time is NOT sufficient: an empty
+         * version list advances rg->time to the caller's clock, which
+         * would false-positive on legitimate early/out-of-order GETs. */
+        if (v == NULL && rg->versions != NULL &&
+            rg->versions->time > target) {
                 dstm_log_error(
                         "incoming GET for region %d target time %"
                         PRId64 " on rank %d: version already evicted "
-                        "(region->time=%" PRId64 ").  Premature "
+                        "(oldest live version=%" PRId64 ").  Premature "
                         "eviction / distance-check bug.\n",
                         req->region_id, target,
-                        dstm_global_context.rank, rg->time);
+                        dstm_global_context.rank, rg->versions->time);
                 abort();
         }
-        dstm_region_version_t *v = dstm_region_version_find(rg, target);
+
         if (v != NULL && v->status == DSTM_REGION_STATUS_READABLE) {
 			void *sptr = (char *)v->buffer + req->src.offset;
 
@@ -473,7 +487,7 @@ static void dstm_handle_incoming_msg(MPI_Status status)
                            m.header.time);
             break;
     case DSTM_MSG_TYPE_HEARTBEAT:
-            for (int rid = 0; rid < DSTM_MAX_REGIONS; rid++) {
+            for (int rid = 0; rid < dstm_global_context.region_count; rid++) {
                     if (dstm_global_context.regions[rid] != NULL)
                             dstm_ninfo_set(m.header.src_rank, rid,
                                            m.header.time);
@@ -632,12 +646,14 @@ int dstm_put(int rank,
 	              rank, region_id, time, delta, dst.region, dst.offset, src,
 	              size);
 
-    if (region_id < 0)
+    if (region_id < 0 || region_id >= DSTM_MAX_REGIONS)
         return -DSTM_EINVAL;
 
 	if (src == NULL)
 		return -DSTM_EINVAL;
-    assert(region_id == dst.region);
+
+    if (region_id != dst.region)
+        return -DSTM_EINVAL;
 
 	/* no idea what the semantic of a put in the past would be for now */
 	if (delta < 0)
@@ -702,12 +718,14 @@ int dstm_get(int rank,
 	              size);
 	dstm_ptr_t dptr;
 
-    if (region_id < 0)
+    if (region_id < 0 || region_id >= DSTM_MAX_REGIONS)
         return -DSTM_EINVAL;
 
 	if (dst == NULL)
 		return -DSTM_EINVAL;
-    assert(region_id == src.region);
+
+    if (region_id != src.region)
+        return -DSTM_EINVAL;
 
 	/* no idea what the semantic of a get in the future would be for now */
 	if (delta > 0)

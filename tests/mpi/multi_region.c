@@ -280,13 +280,8 @@ static void phase3_allgatherv(int rank, int ws)
         int *dst1 = malloc(total * sizeof(int));
         assert(src0 && src1 && dst0 && dst1);
 
-        /* deltas: local put delta > 0, remote get delta < 0 (complete
-         * topology => distance 1 to every other rank). */
-        dstm_time_t *deltas = malloc(total /*overkill*/ * sizeof(dstm_time_t));
-        assert(deltas != NULL);
         /* deltas is indexed by RANK for allgatherv; size ws is enough. */
-        free(deltas);
-        deltas = malloc((size_t)ws * sizeof(dstm_time_t));
+        dstm_time_t *deltas = malloc((size_t)ws * sizeof(dstm_time_t));
         assert(deltas != NULL);
         for (int r = 0; r < ws; r++)
                 deltas[r] = (r == rank) ? 1 : -1;
@@ -372,6 +367,42 @@ static void phase3_allgatherv(int rank, int ws)
                                 "---\n");
 }
 
+/* ---------------------------------------------------------------------
+ * Phase 4: create_equal_on_region must actually honor region_id.
+ * Guards against the wrapper silently landing on region 0.
+ * ------------------------------------------------------------------- */
+static void phase4_create_equal(int rank, int ws)
+{
+        dstm_darray_t *a1 = NULL;
+        CHECK_EQ(dstm_darray_create_equal_on_region(&a1, sizeof(int),
+                                                    (size_t)ws, 1),
+                 DSTM_SUCCESS, "phase4.create_equal_r1");
+        assert(a1 != NULL);
+
+        /* The local partition must live in region 1, not region 0. */
+        void *lp1 = dstm_darray_get_local_ptr(a1);
+        void *r0base = (void *)dstm_get_local_region(0);
+        void *r1base = (void *)dstm_get_local_region(1);
+        CHECK_TRUE(r0base != r1base, "phase4.regions_distinct");
+        CHECK_TRUE(lp1 != NULL, "phase4.local_ptr_nonnull");
+
+        /* Round-trip a value through our own slot on region 1. */
+        int v = TAG(REG1_MARK, rank, 7, 1);
+        CHECK_EQ(dstm_darray_put(a1, (size_t)rank, &v, 0, 1),
+                 DSTM_SUCCESS, "phase4.put");
+        int g = 0;
+        CHECK_EQ(dstm_darray_get(a1, (size_t)rank, &g, 2, -1),
+                 DSTM_SUCCESS, "phase4.get_rc");
+        CHECK_EQ(g, v, "phase4.get_val");
+        CHECK_REGION(g, REG1_MARK, "phase4.iso");
+
+        dstm_barrier((dstm_time_t)4);
+        dstm_darray_destroy(&a1);
+        MPI_Barrier(MPI_COMM_WORLD);
+        if (rank == 0)
+                fprintf(stderr, "--- phase4 (create_equal_on_region) done ---\n");
+}
+
 typedef void (*phase_fn)(int rank, int ws);
 
 static void run_phase(dstm_distance_t *dist, int ws, int rank, phase_fn fn)
@@ -415,6 +446,7 @@ int main(int argc, char *argv[])
         run_phase(dist, ws, rank, phase1_local);
         run_phase(dist, ws, rank, phase2_remote);
         run_phase(dist, ws, rank, phase3_allgatherv);
+        run_phase(dist, ws, rank, phase4_create_equal); 
 
         dstm_distance_destroy(&dist);
         dstm_finalize();

@@ -690,6 +690,7 @@ typedef struct dstm_dgraph_s dstm_dgraph_t;
  *         or duplicate neighbors, dst outside [0, total_vertices)),
  *         -DSTM_ENOMEM, or -DSTM_FAILURE on MPI errors.
  */
+
 int dstm_dgraph_create(dstm_dgraph_t **ret,
                        size_t vertex_state_size,
                        size_t edge_state_size,
@@ -698,6 +699,22 @@ int dstm_dgraph_create(dstm_dgraph_t **ret,
                        const size_t *local_edge_dsts,
                        const void *local_vertex_states,
                        const void *local_edge_states);
+
+/* Like dstm_dgraph_create, but back this rank's slabs on local region
+ * @p region_id (as returned by dstm_region_register) instead of the
+ * default region 0.  Collective over dstm_global_context.comm.  Each rank
+ * may pass a different region_id; the mapping is Allgathered internally so
+ * remote vertex/edge state accesses address the correct region on each
+ * owner. */
+int dstm_dgraph_create_on_region(dstm_dgraph_t **ret,
+                                 size_t vertex_state_size,
+                                 size_t edge_state_size,
+                                 size_t local_vertices,
+                                 const size_t *local_out_degrees,
+                                 const size_t *local_edge_dsts,
+                                 const void *local_vertex_states,
+                                 const void *local_edge_states,
+                                 int region_id);
 
 // matching dstm_darray_create_equal
 int dstm_dgraph_create_equal(dstm_dgraph_t **ret,
@@ -708,6 +725,16 @@ int dstm_dgraph_create_equal(dstm_dgraph_t **ret,
                              const size_t *local_edge_dsts,
                              const void *local_vertex_states,
                              const void *local_edge_states);
+
+int dstm_dgraph_create_equal_on_region(dstm_dgraph_t **ret,
+                                       size_t vertex_state_size,
+                                       size_t edge_state_size,
+                                       size_t total_vertices,
+                                       const size_t *local_out_degrees,
+                                       const size_t *local_edge_dsts,
+                                       const void *local_vertex_states,
+                                       const void *local_edge_states,
+                                       int region_id);
 
 /**
  * Destroy a dgraph and free all resources. Safe on NULL pointer or a

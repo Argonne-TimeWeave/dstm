@@ -211,7 +211,7 @@ int dstm_darray_create_equal_on_region(dstm_darray_t **ret,
 	if (rank < (int)remainder)
 		local_elements++;
 
-	return dstm_darray_create(ret, element_size, local_elements);
+	return dstm_darray_create_on_region(ret, element_size, local_elements, region_id);
 }
 
 int dstm_darray_create_equal(dstm_darray_t **ret,

@@ -399,19 +399,22 @@ static int validate_neighbors(const size_t *dsts, size_t deg,
         return 0;
 }
 
-int dstm_dgraph_create(dstm_dgraph_t **ret,
-                       size_t vertex_state_size,
-                       size_t edge_state_size,
-                       size_t local_vertices,
-                       const size_t *local_out_degrees,
-                       const size_t *local_edge_dsts,
-                       const void *local_vertex_states,
-                       const void *local_edge_states)
+int dstm_dgraph_create_on_region(dstm_dgraph_t **ret,
+                                 size_t vertex_state_size,
+                                 size_t edge_state_size,
+                                 size_t local_vertices,
+                                 const size_t *local_out_degrees,
+                                 const size_t *local_edge_dsts,
+                                 const void *local_vertex_states,
+                                 const void *local_edge_states,
+                                 int region_id)
 {
         if (ret == NULL)
                 return -DSTM_EINVAL;
         *ret = NULL;
         if (local_vertices == 0 || local_out_degrees == NULL)
+                return -DSTM_EINVAL;
+        if (region_id < 0 || region_id >= DSTM_MAX_REGIONS)
                 return -DSTM_EINVAL;
 
         int err        = 0;
@@ -420,8 +423,7 @@ int dstm_dgraph_create(dstm_dgraph_t **ret,
         MPI_Comm comm  = dstm_global_context.comm;
 
         /* Tracks whether the backing region has been successfully
-         * allocated. Every other resource is either NULL (never
-         * allocated) or a heap pointer safe to free unconditionally. */
+         * allocated. ... */
         bool region_allocated = false;
 
         dgraph_rank_info_t  self_info;
@@ -431,9 +433,14 @@ int dstm_dgraph_create(dstm_dgraph_t **ret,
         if (g == NULL)
                 return -DSTM_ENOMEM;
 
-        g->region_id         = dstm_get_local_region_id();
-        g->region            = dstm_get_local_region(g->region_id);
+        /* Back the graph on the caller-chosen local region rather than the
+         * default.  region_id is a per-rank (intra-rank) namespace; the
+         * owning region for remote accesses is resolved via the
+         * Allgathered rank_region_id table below. */
+        g->region_id         = region_id;
+        g->region            = dstm_get_local_region(region_id);
         g->world_size        = world_size;
+
         g->local_rank        = self;
         g->vertex_state_size = vertex_state_size;
         g->edge_state_size   = edge_state_size;
@@ -849,14 +856,32 @@ err_cleanup:
         return err;
 }
 
-int dstm_dgraph_create_equal(dstm_dgraph_t **ret,
-                             size_t vertex_state_size,
-                             size_t edge_state_size,
-                             size_t total_vertices,
-                             const size_t *local_out_degrees,
-                             const size_t *local_edge_dsts,
-                             const void *local_vertex_states,
-                             const void *local_edge_states)
+int dstm_dgraph_create(dstm_dgraph_t **ret,
+                       size_t vertex_state_size,
+                       size_t edge_state_size,
+                       size_t local_vertices,
+                       const size_t *local_out_degrees,
+                       const size_t *local_edge_dsts,
+                       const void *local_vertex_states,
+                       const void *local_edge_states)
+{
+    return dstm_dgraph_create_on_region(ret, vertex_state_size,
+                                        edge_state_size, local_vertices,
+                                        local_out_degrees, local_edge_dsts,
+                                        local_vertex_states,
+                                        local_edge_states,
+                                        dstm_get_local_region_id());
+}
+
+int dstm_dgraph_create_equal_on_region(dstm_dgraph_t **ret,
+                                       size_t vertex_state_size,
+                                       size_t edge_state_size,
+                                       size_t total_vertices,
+                                       const size_t *local_out_degrees,
+                                       const size_t *local_edge_dsts,
+                                       const void *local_vertex_states,
+                                       const void *local_edge_states,
+                                       int region_id)
 {
         int world_size = dstm_global_context.world_size;
         int self       = dstm_global_context.rank;
@@ -867,10 +892,30 @@ int dstm_dgraph_create_equal(dstm_dgraph_t **ret,
         if (self < (int)remainder)
                 local_vertices++;
 
-        return dstm_dgraph_create(ret, vertex_state_size, edge_state_size,
-                                  local_vertices, local_out_degrees,
-                                  local_edge_dsts, local_vertex_states,
-                                  local_edge_states);
+        return dstm_dgraph_create_on_region(ret, vertex_state_size,
+                                            edge_state_size, local_vertices,
+                                            local_out_degrees, local_edge_dsts,
+                                            local_vertex_states,
+                                            local_edge_states, region_id);
+}
+
+int dstm_dgraph_create_equal(dstm_dgraph_t **ret,
+                             size_t vertex_state_size,
+                             size_t edge_state_size,
+                             size_t total_vertices,
+                             const size_t *local_out_degrees,
+                             const size_t *local_edge_dsts,
+                             const void *local_vertex_states,
+                             const void *local_edge_states)
+{
+        return dstm_dgraph_create_equal_on_region(ret, vertex_state_size,
+                                                  edge_state_size,
+                                                  total_vertices,
+                                                  local_out_degrees,
+                                                  local_edge_dsts,
+                                                  local_vertex_states,
+                                                  local_edge_states,
+                                                  dstm_get_local_region_id());
 }
 
 void dstm_dgraph_destroy(dstm_dgraph_t **dgraph)
