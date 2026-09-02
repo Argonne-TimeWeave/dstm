@@ -708,6 +708,75 @@ int dstm_distance_create_copy(dstm_distance_t **dst, dstm_distance_t *src)
 	return DSTM_SUCCESS;
 }
 
+int dstm_distance_combine(dstm_distance_t **ret,
+                          const dstm_distance_t *const *mats,
+                          size_t n)
+{
+	if (ret == NULL || mats == NULL || n == 0)
+		goto err_inval;
+
+	*ret = NULL;
+
+	/* All inputs must be non-NULL and share a common size. */
+	const dstm_distance_t *first = mats[0];
+	if (first == NULL || first->distances == NULL || first->size == 0)
+		goto err_inval;
+
+	size_t size = first->size;
+	for (size_t k = 1; k < n; k++) {
+		if (mats[k] == NULL || mats[k]->distances == NULL ||
+		    mats[k]->size != size)
+			goto err_inval;
+	}
+
+	int *matrix = malloc(size * size * sizeof(int));
+	if (matrix == NULL)
+		goto err_nomem;
+
+	/* Per-cell union reduction.  This mirrors the min/sentinel logic in
+	 * build_distance_from_row (src/dgraph.c): skip the no-edge sentinel
+	 * so a missing edge in one structure does not poison a real edge in
+	 * another, and take the minimum over the real (> 0) values so the
+	 * result reflects the most-constrained (tightest) synchronization
+	 * any structure requires.  Both -1 (unreachable) and 0 (no
+	 * constraint) act as the no-edge sentinel here. */
+	for (size_t i = 0; i < size; i++) {
+		for (size_t j = 0; j < size; j++) {
+			int v;
+
+			if (i == j) {
+				v = 0;
+			} else {
+				int best = 0; /* 0 == no real edge seen yet */
+
+				for (size_t k = 0; k < n; k++) {
+					int cur = mats[k]->distances[i * size
+					                             + j];
+					if (cur <= 0)
+						continue; /* -1 / 0 sentinel */
+					if (best == 0 || cur < best)
+						best = cur;
+				}
+
+				v = (best == 0) ? -1 : best;
+			}
+
+			matrix[i * size + j] = v;
+		}
+	}
+
+	int rc = dstm_distance_create_from_matrix(ret, size, matrix);
+	free(matrix);
+	return rc;
+
+err_nomem:
+	dstm_errno = DSTM_ENOMEM;
+	return -DSTM_ENOMEM;
+err_inval:
+	dstm_errno = DSTM_EINVAL;
+	return -DSTM_EINVAL;
+}
+
 int dstm_distance_get(dstm_distance_t *dst, int i, int j)
 {
 	return dst->distances[dst->size * i + j];

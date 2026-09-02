@@ -267,6 +267,43 @@ int dstm_distance_create_from_matrix(dstm_distance_t **ret, size_t size,
                                      const int *matrix);
 
 /**
+ * Combine multiple rank-indexed distance matrices into a single
+ * "most-constrained union" matrix.
+ *
+ * DSTM installs exactly one session-global distance matrix
+ * (see dstm_start).  The region version state machine consults it to
+ * decide when no more PUTs/GETs can arrive for a given timestep and a
+ * version may be evicted.  When several data structures live in the
+ * same session (each possibly on its own region, each with its own
+ * derived matrix), that single matrix MUST cover the union of all
+ * their traffic: if any structure communicates across a rank pair, the
+ * session matrix must reflect that pair as reachable, using the
+ * tightest (smallest positive) delta any structure requires.
+ *
+ * The reduction is performed per cell (i, j) over the @p n inputs:
+ *   - diagonal (i == j) is always 0;
+ *   - if any input has a real edge (value > 0), the result is the
+ *     minimum positive value across the inputs (smallest = most
+ *     constrained = tightest synchronization);
+ *   - the result is -1 (unreachable) only when every input is -1 for
+ *     that cell.
+ *
+ * All inputs must share the same size (== world_size).  The inputs are
+ * only read; the caller retains ownership of @p mats and each matrix.
+ *
+ * @param[out] ret   distance matrix handle to populate (must be non-NULL)
+ * @param[in]  mats  array of @p n input matrix pointers (non-NULL, each
+ *                   entry non-NULL)
+ * @param[in]  n     number of input matrices (must be >= 1)
+ * @return DSTM_SUCCESS on success, -DSTM_EINVAL for NULL pointers,
+ *         n == 0, or size mismatch between inputs, -DSTM_ENOMEM for
+ *         allocation failures
+ */
+int dstm_distance_combine(dstm_distance_t **ret,
+                          const dstm_distance_t *const *mats,
+                          size_t n);
+
+/**
  * Destroy a distance matrix and free all associated resources.
  *
  * This function safely deallocates a distance matrix created by any of
@@ -320,6 +357,25 @@ int dstm_start_custom(dstm_distance_t *dist, dstm_opts_t opts);
  *
  * @param dist         Distance matrix defining the network topology.
  *                     Must have size equal to world_size.
+ *
+ *                     The matrix is session-global and singleton: it is
+ *                     the ONLY matrix consulted by the region version
+ *                     state machine for every region/data structure in
+ *                     the session.  It MUST therefore cover the union of
+ *                     all traffic of every data structure alive during
+ *                     the session.  If any structure communicates across
+ *                     a rank pair that the matrix marks unreachable (-1)
+ *                     — or uses a smaller delta than the matrix records —
+ *                     the version machine can conclude "no more PUTs/GETs
+ *                     can arrive" and prematurely evict a still-needed
+ *                     version.
+ *
+ *                     Recommended workflow when multiple structures
+ *                     coexist: derive each structure's matrix (e.g.
+ *                     dstm_dgraph_derive_distance /
+ *                     dstm_dgraph_distance_from_topology) and merge them
+ *                     with dstm_distance_combine() before passing the
+ *                     result here.
  *
  * @return 0 if successful; an error code otherwise.
  */

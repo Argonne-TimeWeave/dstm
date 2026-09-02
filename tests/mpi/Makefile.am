@@ -20,6 +20,7 @@ AM_COLOR_TESTS = yes
 
 COMPILED_TESTS = \
 		allgatherv \
+        combine_distances \
 		darray \
 		distances \
 		get_or_default \
