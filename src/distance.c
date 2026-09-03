@@ -733,13 +733,14 @@ int dstm_distance_combine(dstm_distance_t **ret,
 	if (matrix == NULL)
 		goto err_nomem;
 
-	/* Per-cell union reduction.  This mirrors the min/sentinel logic in
-	 * build_distance_from_row (src/dgraph.c): skip the no-edge sentinel
-	 * so a missing edge in one structure does not poison a real edge in
-	 * another, and take the minimum over the real (> 0) values so the
-	 * result reflects the most-constrained (tightest) synchronization
-	 * any structure requires.  Both -1 (unreachable) and 0 (no
-	 * constraint) act as the no-edge sentinel here. */
+    /* Per-cell union reduction.  Only -1 is the "no edge / unreachable"
+	 * sentinel: a distance of 0 is a LEGITIMATE edge (all-to-all sync at
+	 * every timestep) and must survive the union, otherwise a structure
+	 * that uses distance 0 across a pair would see that pair marked
+	 * unreachable in the session matrix and have its versions evicted
+	 * prematurely.  We take the minimum over all real (>= 0) values so the
+	 * result reflects the most-constrained (tightest) synchronization any
+	 * structure requires.  The result is -1 only when EVERY input is -1. */
 	for (size_t i = 0; i < size; i++) {
 		for (size_t j = 0; j < size; j++) {
 			int v;
@@ -747,18 +748,18 @@ int dstm_distance_combine(dstm_distance_t **ret,
 			if (i == j) {
 				v = 0;
 			} else {
-				int best = 0; /* 0 == no real edge seen yet */
+				int best = -1; /* -1 == no real edge seen yet */
 
 				for (size_t k = 0; k < n; k++) {
 					int cur = mats[k]->distances[i * size
 					                             + j];
-					if (cur <= 0)
-						continue; /* -1 / 0 sentinel */
-					if (best == 0 || cur < best)
+					if (cur < 0)
+						continue; /* -1 = unreachable */
+					if (best < 0 || cur < best)
 						best = cur;
 				}
 
-				v = (best == 0) ? -1 : best;
+				v = best; /* -1 if no input had a real edge */
 			}
 
 			matrix[i * size + j] = v;

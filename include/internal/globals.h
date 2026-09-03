@@ -50,6 +50,12 @@ struct dstm_context_s {
 
     /* Local region table, indexed by local region id. Slot 0 is default */
 	dstm_region_t *regions[DSTM_MAX_REGIONS];
+
+    /* High-water mark: one past the highest region id ever registered
+     * this session, used as an iteration bound over `regions`.  This is
+     * NOT the number of live regions -- unregister leaves holes (NULL
+     * slots) and never lowers this bound.  Iterators MUST skip NULL
+     * slots.  Reset to 0 in dstm_fini. */
     int region_count;
 
 	dstm_distance_t *distances;

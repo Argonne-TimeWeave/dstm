@@ -416,14 +416,13 @@ static int dstm_request_progress_out_get(dstm_request_t *req)
 	 * - irecv: GET_REQ sent, reply received and buffered in req->buf.
 	 * - done: payload copied to caller's destination.
 	 */
-	dstm_region_t *rg = dstm_get_local_region(req->region_id);
-    assert(rg != NULL);
 	if (req->status == DSTM_REQUEST_STATUS_IRECV) {
-		void *dptr = dstm_region_ptr_tovoid(rg, req->dst);
-		dstm_log_debug("applying: %p %zu\n", dptr, req->size);
-		memcpy(dptr, req->buf, req->size);
-		req->status = DSTM_REQUEST_STATUS_DONE;
-	}
+        assert(req->dst.region == DSTM_REGIONID_LOCAL);
+        void *dptr = (void *)req->dst.offset;
+        dstm_log_debug("applying: %p %zu\n", dptr, req->size);
+        memcpy(dptr, req->buf, req->size);
+        req->status = DSTM_REQUEST_STATUS_DONE;
+    }
 	return 0;
 }
 
@@ -581,8 +580,7 @@ static void dstm_handle_incoming_msg(MPI_Status status)
  */
 int dstm_do_progress(dstm_time_t time)
 {
-	dstm_log_debug("progress loop: reqtime: %" PRId64 "\n",
-	               time);
+	dstm_log_debug("progress loop: reqtime: %" PRId64 "\n", time);
 
 	/* test if we have any message to deal with */
 	MPI_Status status;

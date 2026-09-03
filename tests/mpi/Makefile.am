@@ -21,6 +21,7 @@ AM_COLOR_TESTS = yes
 COMPILED_TESTS = \
 		allgatherv \
         combine_distances \
+        combine_distances_insufficient \
 		darray \
 		distances \
 		get_or_default \
@@ -30,6 +31,7 @@ COMPILED_TESTS = \
 		msg \
 		multi_session \
         multi_region \
+        multi_region_asym \
         multi_dgraph \
         dgraph \
         mini_airport \

@@ -71,6 +71,19 @@ int dstm_region_unregister(int region_id)
 {
         dstm_region_t *r = dstm_get_local_region(region_id);
         if (r == NULL) return -DSTM_EINVAL;
+
+        /* Purge neighbor-clock entries keyed by this region so a later
+         * re-register of the same id within the same session does not
+         * inherit stale neighbor times (which would feed wrong values
+         * into the version state machine). */
+        dstm_region_ninfo_t *ni, *tmp;
+        HASH_ITER(hh, dstm_global_context.ninfos, ni, tmp) {
+                if (ni->key.region_id == region_id) {
+                        HASH_DEL(dstm_global_context.ninfos, ni);
+                        free(ni);
+                }
+        }        
+
         dstm_region_destroy(&dstm_global_context.regions[region_id]);
         return DSTM_SUCCESS;
 }
@@ -221,6 +234,10 @@ int dstm_init(int *argc, char **argv[])
 int dstm_finalize(void)
 {
 	dstm_msg_finalize();
+
+    /* Defensive: dstm_fini normally destroys the session matrix and
+	 * nulls the pointer, so this is a no-op in the balanced case. */
+	dstm_distance_destroy(&dstm_global_context.distances);
 
 	/* Free the long-lived user communicator.  At this point `comm`
 	 * aliases user_comm (set by the last dstm_fini, or by dstm_init

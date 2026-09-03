@@ -17,15 +17,9 @@
  *
  * Requires exactly 3 ranks.
  *
- * Two directed-ring graphs, each on its own region, but drawn over
- * DIFFERENT rank subsets so their individual matrices each mark a pair
- * unreachable that the other uses:
- *
- *   Graph A (region A): edge i -> (i+1) only for i in {0,1}
- *                       => cross-rank edges 0->1, 1->2  ... (full ring here)
- *
- * To make the union matter we instead use two *disjoint-pair* line
- * graphs:
+ * Two single-cross-edge "line" graphs, each on its own region, drawn over
+ * DIFFERENT rank pairs so each individual matrix marks a pair unreachable
+ * that the other structure actually uses:
  *
  *   Graph A: single cross edge 0 -> 1  (matrix A: only (0,1) reachable)
  *   Graph B: single cross edge 1 -> 2  (matrix B: only (1,2) reachable)
@@ -169,6 +163,148 @@ int main(int argc, char *argv[])
 	CHECK_EQ(dstm_distance_get(combined, 1, 2), DELTA, "union_1_2");
 	CHECK_EQ(dstm_distance_get(combined, 2, 1), DELTA, "union_2_1");
 	CHECK_EQ(dstm_distance_get(combined, 0, 2), -1, "union_0_2_unreach");
+
+    /* ---- unit checks for dstm_distance_combine semantics ---------------
+	 * These run on every rank (pure local computation over explicit
+	 * matrices; no MPI traffic).  They directly target the combine fix
+	 * and its error paths. */
+
+	/* (a) ZERO-DISTANCE EDGES MUST SURVIVE THE UNION.
+	 * The overview states a distance of 0 between ranks is a legitimate
+	 * setup (all-to-all sync every timestep).  A prior implementation
+	 * treated 0 as a no-edge sentinel and turned it into -1, which would
+	 * mark a still-communicating pair unreachable and evict live
+	 * versions.  Build a matrix with a real 0-distance edge (0,1) and an
+	 * unreachable (0,2), combine it with an all-unreachable matrix, and
+	 * confirm the 0 is preserved (NOT promoted to -1). */
+	{
+		/* zero-edge matrix: (0,1)=0 reachable, (0,2)=-1 unreachable */
+		int mz[9] = {
+		        0,  0, -1,
+		        0,  0, -1,
+		        -1, -1, 0,
+		};
+		/* all cross pairs unreachable */
+		int mu[9] = {
+		        0, -1, -1,
+		        -1, 0, -1,
+		        -1, -1, 0,
+		};
+		dstm_distance_t *dz = NULL, *du = NULL, *cz = NULL;
+		CHECK_EQ(dstm_distance_create_from_matrix(&dz, 3, mz),
+		         DSTM_SUCCESS, "zero.create_dz");
+		CHECK_EQ(dstm_distance_create_from_matrix(&du, 3, mu),
+		         DSTM_SUCCESS, "zero.create_du");
+
+		const dstm_distance_t *const zmats[2] = {dz, du};
+		CHECK_EQ(dstm_distance_combine(&cz, zmats, 2), DSTM_SUCCESS,
+		         "zero.combine_rc");
+		CHECK_TRUE(cz != NULL, "zero.combine_nonnull");
+
+		/* THE KEY ASSERTION: a real 0-distance edge stays 0, it is
+		 * NOT collapsed to -1 (unreachable). */
+		CHECK_EQ(dstm_distance_get(cz, 0, 1), 0, "zero.edge_0_1_kept");
+		CHECK_EQ(dstm_distance_get(cz, 1, 0), 0, "zero.edge_1_0_kept");
+		/* genuinely-unreachable-everywhere pair stays -1 */
+		CHECK_EQ(dstm_distance_get(cz, 0, 2), -1, "zero.pair_0_2_unreach");
+		/* diagonal always 0 */
+		CHECK_EQ(dstm_distance_get(cz, 2, 2), 0, "zero.diag");
+
+		dstm_distance_destroy(&cz);
+		dstm_distance_destroy(&du);
+		dstm_distance_destroy(&dz);
+	}
+
+	/* (b) MIN-SELECTION: when several inputs have a real edge for the
+	 * same pair, the union must keep the SMALLEST (tightest) distance,
+	 * including when the smallest is 0. */
+	{
+		int m_small[9] = {
+		        0, 0,  -1,   /* (0,1) = 0  (tightest) */
+		        0, 0,  -1,
+		        -1, -1, 0,
+		};
+		int m_big[9] = {
+		        0, 5,  -1,   /* (0,1) = 5  (looser) */
+		        5, 0,  -1,
+		        -1, -1, 0,
+		};
+		dstm_distance_t *ds = NULL, *dbg = NULL, *cm = NULL;
+		CHECK_EQ(dstm_distance_create_from_matrix(&ds, 3, m_small),
+		         DSTM_SUCCESS, "min.create_small");
+		CHECK_EQ(dstm_distance_create_from_matrix(&dbg, 3, m_big),
+		         DSTM_SUCCESS, "min.create_big");
+
+		const dstm_distance_t *const mmats[2] = {ds, dbg};
+		CHECK_EQ(dstm_distance_combine(&cm, mmats, 2), DSTM_SUCCESS,
+		         "min.combine_rc");
+		/* smallest wins, and 0 is a valid smallest */
+		CHECK_EQ(dstm_distance_get(cm, 0, 1), 0, "min.picks_zero");
+		CHECK_EQ(dstm_distance_get(cm, 1, 0), 0, "min.picks_zero_sym");
+
+		dstm_distance_destroy(&cm);
+		dstm_distance_destroy(&dbg);
+		dstm_distance_destroy(&ds);
+	}
+
+	/* (c) SINGLE-INPUT combine (n == 1) is a legal identity-ish copy. */
+	{
+		int m1[9] = {
+		        0, 2,  -1,
+		        2, 0,  3,
+		        -1, 3, 0,
+		};
+		dstm_distance_t *d1 = NULL, *c1 = NULL;
+		CHECK_EQ(dstm_distance_create_from_matrix(&d1, 3, m1),
+		         DSTM_SUCCESS, "single.create");
+		const dstm_distance_t *const smats[1] = {d1};
+		CHECK_EQ(dstm_distance_combine(&c1, smats, 1), DSTM_SUCCESS,
+		         "single.combine_rc");
+		CHECK_EQ(dstm_distance_get(c1, 0, 1), 2, "single.0_1");
+		CHECK_EQ(dstm_distance_get(c1, 1, 2), 3, "single.1_2");
+		CHECK_EQ(dstm_distance_get(c1, 0, 2), -1, "single.0_2_unreach");
+		dstm_distance_destroy(&c1);
+		dstm_distance_destroy(&d1);
+	}
+
+	/* (d) ERROR PATHS: NULL out-param, NULL array, n == 0, NULL entry,
+	 * and size mismatch must all return -DSTM_EINVAL and leave *ret
+	 * untouched (NULL). */
+	{
+		dstm_distance_t *sink = (dstm_distance_t *)0xdead;
+
+		CHECK_EQ(dstm_distance_combine(NULL, mats, 2), -DSTM_EINVAL,
+		         "err.null_ret");
+
+		sink = NULL;
+		CHECK_EQ(dstm_distance_combine(&sink, NULL, 2), -DSTM_EINVAL,
+		         "err.null_mats");
+		CHECK_TRUE(sink == NULL, "err.null_mats_ret_untouched");
+
+		sink = NULL;
+		CHECK_EQ(dstm_distance_combine(&sink, mats, 0), -DSTM_EINVAL,
+		         "err.zero_n");
+		CHECK_TRUE(sink == NULL, "err.zero_n_ret_untouched");
+
+		/* NULL entry inside the array */
+		const dstm_distance_t *const bad_entry[2] = {da, NULL};
+		sink = NULL;
+		CHECK_EQ(dstm_distance_combine(&sink, bad_entry, 2),
+		         -DSTM_EINVAL, "err.null_entry");
+		CHECK_TRUE(sink == NULL, "err.null_entry_ret_untouched");
+
+		/* size mismatch: da is 3x3, make a 2x2 */
+		int m2[4] = {0, 1, 1, 0};
+		dstm_distance_t *d2 = NULL;
+		CHECK_EQ(dstm_distance_create_from_matrix(&d2, 2, m2),
+		         DSTM_SUCCESS, "err.create_2x2");
+		const dstm_distance_t *const mismatch[2] = {da, d2};
+		sink = NULL;
+		CHECK_EQ(dstm_distance_combine(&sink, mismatch, 2),
+		         -DSTM_EINVAL, "err.size_mismatch");
+		CHECK_TRUE(sink == NULL, "err.size_mismatch_ret_untouched");
+		dstm_distance_destroy(&d2);
+	}
 
 	/* --- Session with the COMBINED matrix ----------------------------- */
 	rc = dstm_start(combined);

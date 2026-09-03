@@ -1048,7 +1048,14 @@ int dstm_get_local_region_id(void);
 dstm_region_t *dstm_get_local_region(int region_id);
 
 /* Register an additional local backing store; returns its region id
- * (>= 0) via *region_id, or an error. Collective is NOT required. */
+ * (>= 0) via *region_id, or an error. Collective is NOT required.
+ *
+ * PRECONDITION: all regions a rank intends to use must be registered
+ * before that rank (or any neighbor) issues operations on them.
+ * Neighbor heartbeats only populate the neighbor-clock table for regions
+ * that already exist when the heartbeat is received; a region registered
+ * after a neighbor has advanced its clock would start with a stale
+ * (time 0) neighbor entry for that region. */
 int dstm_region_register(size_t size, int *region_id);
 
 /* Unregister/destroy a local region previously registered. */

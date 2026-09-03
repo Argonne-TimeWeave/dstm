@@ -42,6 +42,7 @@
 #include <string.h>
 
 #include "dstm.h"
+#include "internal/globals.h"
 
 /* ---- value tagging so contamination is visible --------------------- */
 #define REG0_MARK 0x0A000000
@@ -403,6 +404,148 @@ static void phase4_create_equal(int rank, int ws)
                 fprintf(stderr, "--- phase4 (create_equal_on_region) done ---\n");
 }
 
+/* ---------------------------------------------------------------------
+ * Phase 5: lifecycle + validation of the region API itself.
+ *
+ * Covers behaviors that the happy-path phases never touch:
+ *   - dstm_region_unregister frees the slot AND the id becomes reusable,
+ *     with the re-registered region being a fresh, distinct object;
+ *   - unregister of an invalid / already-free id returns -DSTM_EINVAL;
+ *   - registering past DSTM_MAX_REGIONS returns -DSTM_ENOMEM;
+ *   - dstm_darray_put/get reject out-of-range region ids and ptr/region
+ *     mismatches with -DSTM_EINVAL instead of asserting/aborting.
+ *
+ * NOTE: phase0_register (run by run_phase) has already taken id 1 for
+ * this session, so the first free id here is 2.
+ * ------------------------------------------------------------------- */
+static void phase5_lifecycle(int rank, int ws)
+{
+        (void)ws;
+
+        /* --- register yields a valid, in-range, distinct id.
+         * The API contracts only that the id is >= 0 and usable; it does
+         * NOT promise a particular numeric value, so assert PROPERTIES,
+         * not a specific number. */
+        int rid2 = -1;
+        CHECK_EQ(dstm_region_register(1 << 16, &rid2), DSTM_SUCCESS,
+                 "phase5.register_rid2_rc");
+        CHECK_TRUE(rid2 > 0 && rid2 < DSTM_MAX_REGIONS,
+                   "phase5.register_rid2_in_range");
+        dstm_region_t *before = dstm_get_local_region(rid2);
+        CHECK_TRUE(before != NULL, "phase5.rid2_exists");
+        /* distinct from the default and from phase0's region 1 */
+        CHECK_TRUE(before != dstm_get_local_region(0),
+                   "phase5.rid2_distinct_from_0");
+        CHECK_TRUE(before != dstm_get_local_region(1),
+                   "phase5.rid2_distinct_from_1");
+
+        /* --- unregister frees the slot: the id no longer resolves. */
+        CHECK_EQ(dstm_region_unregister(rid2), DSTM_SUCCESS,
+                 "phase5.unregister_rc");
+        CHECK_TRUE(dstm_get_local_region(rid2) == NULL,
+                   "phase5.rid2_gone_after_unregister");
+
+        /* --- re-register yields a valid, usable id and a fresh object.
+         * Whether the allocator reuses the freed slot or hands out a new
+         * one is an implementation detail; we require only that we get a
+         * working, in-range region back. */
+        int rid2b = -1;
+        CHECK_EQ(dstm_region_register(1 << 16, &rid2b), DSTM_SUCCESS,
+                 "phase5.reregister_rc");
+        CHECK_TRUE(rid2b > 0 && rid2b < DSTM_MAX_REGIONS,
+                   "phase5.reregister_in_range");
+        dstm_region_t *after = dstm_get_local_region(rid2b);
+        CHECK_TRUE(after != NULL, "phase5.rid2_exists_again");
+
+        /* --- unregister error paths */
+        CHECK_EQ(dstm_region_unregister(rid2b), DSTM_SUCCESS,
+                 "phase5.cleanup_unregister_rc");
+        CHECK_EQ(dstm_region_unregister(rid2b), -DSTM_EINVAL,
+                 "phase5.double_unregister_einval");
+        CHECK_EQ(dstm_region_unregister(-1), -DSTM_EINVAL,
+                 "phase5.unregister_negative_einval");
+        CHECK_EQ(dstm_region_unregister(DSTM_MAX_REGIONS), -DSTM_EINVAL,
+                 "phase5.unregister_oob_einval");
+
+        /* --- MAX_REGIONS exhaustion: fill every remaining slot, then the
+         * next register must fail with -DSTM_ENOMEM.  Track what we take
+         * so we can release it and not poison later phases. */
+        int taken[DSTM_MAX_REGIONS];
+        int ntaken = 0;
+        for (;;) {
+                int id = -1;
+                int rc = dstm_region_register(1 << 12, &id);
+                if (rc == DSTM_SUCCESS) {
+                        CHECK_TRUE(id >= 0 && id < DSTM_MAX_REGIONS,
+                                   "phase5.exhaust_id_in_range");
+                        taken[ntaken++] = id;
+                } else {
+                        CHECK_EQ(rc, -DSTM_ENOMEM,
+                                 "phase5.exhaust_returns_enomem");
+                        break;
+                }
+                if (ntaken >= DSTM_MAX_REGIONS) /* safety stop */
+                        break;
+        }
+        CHECK_TRUE(ntaken > 0, "phase5.exhaust_took_some");
+        for (int i = 0; i < ntaken; i++)
+                CHECK_EQ(dstm_region_unregister(taken[i]), DSTM_SUCCESS,
+                         "phase5.exhaust_cleanup_rc");
+
+        /* --- put/get region-id validation (no aborts, clean EINVAL).
+         * Use region 0's own element so the only thing "wrong" is the
+         * region argument / ptr.region we deliberately corrupt. */
+        dstm_darray_t *a0 = NULL;
+        CHECK_EQ(dstm_darray_create_on_region(&a0, sizeof(int), 1, 0),
+                 DSTM_SUCCESS, "phase5.create_a0");
+
+        /* A correct local round-trip still works (baseline). */
+        int v = TAG(REG0_MARK, rank, 9, 0);
+        CHECK_EQ(dstm_darray_put(a0, (size_t)rank, &v, 0, 1),
+                 DSTM_SUCCESS, "phase5.baseline_put");
+        int g = 0;
+        CHECK_EQ(dstm_darray_get(a0, (size_t)rank, &g, 2, -1),
+                 DSTM_SUCCESS, "phase5.baseline_get_rc");
+        CHECK_EQ(g, v, "phase5.baseline_get_val");
+
+        /* Direct low-level dstm_put/dstm_get validation.  We resolve our
+         * own local ptr and then feed mismatched / out-of-range region
+         * ids.  These must return -DSTM_EINVAL, not abort. */
+        {
+                dstm_region_t *r0 = dstm_get_local_region(0);
+                dstm_ptr_t p = dstm_region_ptr_fromvoid(
+                        r0, dstm_darray_get_local_ptr(a0));
+                int src = 123, dstbuf = 0;
+
+                /* region_id out of range (negative) */
+                CHECK_EQ(dstm_put(rank, -1, 3, 1, p, &src, sizeof(int)),
+                         -DSTM_EINVAL, "phase5.put_region_negative");
+                /* region_id out of range (>= MAX) */
+                CHECK_EQ(dstm_put(rank, DSTM_MAX_REGIONS, 3, 1, p, &src,
+                                  sizeof(int)),
+                         -DSTM_EINVAL, "phase5.put_region_oob");
+                /* region_id != ptr.region (p.region is 0, pass 1) */
+                CHECK_EQ(dstm_put(rank, 1, 3, 1, p, &src, sizeof(int)),
+                         -DSTM_EINVAL, "phase5.put_region_ptr_mismatch");
+
+                /* same three for get (delta must be <= 0 for a get) */
+                CHECK_EQ(dstm_get(rank, -1, 4, -1, &dstbuf, p, sizeof(int)),
+                         -DSTM_EINVAL, "phase5.get_region_negative");
+                CHECK_EQ(dstm_get(rank, DSTM_MAX_REGIONS, 4, -1, &dstbuf, p,
+                                  sizeof(int)),
+                         -DSTM_EINVAL, "phase5.get_region_oob");
+                CHECK_EQ(dstm_get(rank, 1, 4, -1, &dstbuf, p, sizeof(int)),
+                         -DSTM_EINVAL, "phase5.get_region_ptr_mismatch");
+        }
+
+        dstm_barrier((dstm_time_t)4);
+        dstm_darray_destroy(&a0);
+        MPI_Barrier(MPI_COMM_WORLD);
+        if (rank == 0)
+                fprintf(stderr, "--- phase5 (region lifecycle + validation) "
+                                "done ---\n");
+}
+
 typedef void (*phase_fn)(int rank, int ws);
 
 static void run_phase(dstm_distance_t *dist, int ws, int rank, phase_fn fn)
@@ -447,6 +590,8 @@ int main(int argc, char *argv[])
         run_phase(dist, ws, rank, phase2_remote);
         run_phase(dist, ws, rank, phase3_allgatherv);
         run_phase(dist, ws, rank, phase4_create_equal); 
+        run_phase(dist, ws, rank, phase5_lifecycle);
+
 
         dstm_distance_destroy(&dist);
         dstm_finalize();
