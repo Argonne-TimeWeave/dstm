@@ -91,6 +91,7 @@ static int dstm_distance_alloc(dstm_distance_t **ret, size_t size,
 		goto err_free_dist;
 
 	dist->size = size;
+    dist->discard_distances = NULL;
 	*ret = dist;
 	return DSTM_SUCCESS;
 
@@ -634,6 +635,7 @@ void dstm_distance_destroy(dstm_distance_t **dist)
 		return;
 
 	free((*dist)->distances);
+    free((*dist)->discard_distances);
 	free(*dist);
 	*dist = NULL;
 }
@@ -670,6 +672,7 @@ int dstm_distance_create_from_matrix(dstm_distance_t **ret, size_t size,
 		goto err_free_dist;
 
 	dist->size = size;
+    dist->discard_distances = NULL;
 	memcpy(dist->distances, matrix, size * size * sizeof(int));
 	*ret = dist;
 	return DSTM_SUCCESS;
@@ -690,32 +693,55 @@ int dstm_distance_create_copy(dstm_distance_t **dst, dstm_distance_t *src)
 	    src->distances == NULL)
 		return -DSTM_EINVAL;
 
+	*dst = NULL;
+
 	size_t size = src->size;
-	dstm_distance_t *dist = malloc(sizeof(*dist));
+	size_t bytes = size * size * sizeof(int);
+
+	/*
+	 * calloc ensures discard_distances starts as NULL when the source
+	 * matrix has only one bound.
+	 */
+	dstm_distance_t *dist = calloc(1, sizeof(*dist));
 	if (dist == NULL)
 		return -DSTM_ENOMEM;
 
-	dist->distances = calloc(size * size, sizeof(int));
-	if (dist->distances == NULL) {
-		free(dist);
-		return -DSTM_ENOMEM;
+	dist->distances = malloc(bytes);
+	if (dist->distances == NULL)
+		goto err_nomem;
+
+	memcpy(dist->distances, src->distances, bytes);
+
+	if (src->discard_distances != NULL) {
+		dist->discard_distances = malloc(bytes);
+		if (dist->discard_distances == NULL)
+			goto err_nomem;
+
+		memcpy(dist->discard_distances, src->discard_distances, bytes);
 	}
 
 	dist->size = size;
-	memcpy(dist->distances, src->distances,
-	       dist->size * dist->size * sizeof(int));
 	*dst = dist;
 	return DSTM_SUCCESS;
+
+err_nomem:
+	free(dist->discard_distances);
+	free(dist->distances);
+	free(dist);
+	return -DSTM_ENOMEM;
 }
 
 int dstm_distance_combine(dstm_distance_t **ret,
                           const dstm_distance_t *const *mats,
                           size_t n)
 {
-	if (ret == NULL || mats == NULL || n == 0)
+	if (ret == NULL)
 		goto err_inval;
 
 	*ret = NULL;
+
+	if (mats == NULL || n == 0)
+		goto err_inval;
 
 	/* All inputs must be non-NULL and share a common size. */
 	const dstm_distance_t *first = mats[0];
@@ -729,50 +755,104 @@ int dstm_distance_combine(dstm_distance_t **ret,
 			goto err_inval;
 	}
 
-	int *matrix = malloc(size * size * sizeof(int));
-	if (matrix == NULL)
-		goto err_nomem;
+	size_t cells = size * size;
+	size_t bytes = cells * sizeof(int);
 
-    /* Per-cell union reduction.  Only -1 is the "no edge / unreachable"
-	 * sentinel: a distance of 0 is a LEGITIMATE edge (all-to-all sync at
-	 * every timestep) and must survive the union, otherwise a structure
-	 * that uses distance 0 across a pair would see that pair marked
-	 * unreachable in the session matrix and have its versions evicted
-	 * prematurely.  We take the minimum over all real (>= 0) values so the
-	 * result reflects the most-constrained (tightest) synchronization any
-	 * structure requires.  The result is -1 only when EVERY input is -1. */
+	/*
+	 * readable holds the minimum reachable distance. It is used when
+	 * deciding that no more PUTs can arrive.
+	 *
+	 * discardable holds the maximum reachable distance. It is used when
+	 * deciding that no more GETs can arrive.
+	 */
+	int *readable = malloc(bytes);
+	int *discardable = malloc(bytes);
+	if (readable == NULL || discardable == NULL) {
+		free(readable);
+		free(discardable);
+		goto err_nomem;
+	}
+
+	int bounds_differ = 0;
+
 	for (size_t i = 0; i < size; i++) {
 		for (size_t j = 0; j < size; j++) {
-			int v;
+			size_t cell = i * size + j;
 
 			if (i == j) {
-				v = 0;
-			} else {
-				int best = -1; /* -1 == no real edge seen yet */
-
-				for (size_t k = 0; k < n; k++) {
-					int cur = mats[k]->distances[i * size
-					                             + j];
-					if (cur < 0)
-						continue; /* -1 = unreachable */
-					if (best < 0 || cur < best)
-						best = cur;
-				}
-
-				v = best; /* -1 if no input had a real edge */
+				readable[cell] = 0;
+				discardable[cell] = 0;
+				continue;
 			}
 
-			matrix[i * size + j] = v;
+			int min_dist = -1;
+			int max_dist = -1;
+
+			for (size_t k = 0; k < n; k++) {
+				const dstm_distance_t *mat = mats[k];
+
+				/*
+				 * The ordinary matrix contains this input's
+				 * readable/PUT bound.
+				 */
+				int readable_dist = mat->distances[cell];
+
+				/*
+				 * A previously combined matrix may already have a
+				 * separate discard/GET bound. Ordinary matrices use
+				 * their normal distance for both transitions.
+				 */
+				int discard_dist =
+				        mat->discard_distances != NULL
+				                ? mat->discard_distances[cell]
+				                : mat->distances[cell];
+
+				if (readable_dist >= 0 &&
+				    (min_dist < 0 || readable_dist < min_dist))
+					min_dist = readable_dist;
+
+				if (discard_dist >= 0 &&
+				    (max_dist < 0 || discard_dist > max_dist))
+					max_dist = discard_dist;
+			}
+
+			readable[cell] = min_dist;
+			discardable[cell] = max_dist;
+
+			if (min_dist != max_dist)
+				bounds_differ = 1;
 		}
 	}
 
-	int rc = dstm_distance_create_from_matrix(ret, size, matrix);
-	free(matrix);
-	return rc;
+	/*
+	 * Construct the normal/public matrix from the readable bounds.
+	 * This also validates the matrix and initializes discard_distances
+	 * to NULL.
+	 */
+	int rc = dstm_distance_create_from_matrix(ret, size, readable);
+	free(readable);
+
+	if (rc != DSTM_SUCCESS) {
+		free(discardable);
+		return rc;
+	}
+
+	/*
+	 * Avoid a second retained allocation when both bounds are identical.
+	 * This is the common case for ordinary or equal-distance matrices.
+	 */
+	if (bounds_differ) {
+		(*ret)->discard_distances = discardable;
+	} else {
+		free(discardable);
+	}
+
+	return DSTM_SUCCESS;
 
 err_nomem:
 	dstm_errno = DSTM_ENOMEM;
 	return -DSTM_ENOMEM;
+
 err_inval:
 	dstm_errno = DSTM_EINVAL;
 	return -DSTM_EINVAL;
@@ -781,6 +861,15 @@ err_inval:
 int dstm_distance_get(dstm_distance_t *dst, int i, int j)
 {
 	return dst->distances[dst->size * i + j];
+}
+
+int dstm_distance_get_discard(const dstm_distance_t *dst, int i, int j)
+{
+	const int *matrix = dst->discard_distances != NULL
+	                          ? dst->discard_distances
+	                          : dst->distances;
+
+	return matrix[dst->size * (size_t)i + (size_t)j];
 }
 
 size_t dstm_distance_size(dstm_distance_t *dst)

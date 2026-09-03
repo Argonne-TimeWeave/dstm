@@ -238,10 +238,36 @@ int main(int argc, char *argv[])
 		const dstm_distance_t *const mmats[2] = {ds, dbg};
 		CHECK_EQ(dstm_distance_combine(&cm, mmats, 2), DSTM_SUCCESS,
 		         "min.combine_rc");
-		/* smallest wins, and 0 is a valid smallest */
-		CHECK_EQ(dstm_distance_get(cm, 0, 1), 0, "min.picks_zero");
-		CHECK_EQ(dstm_distance_get(cm, 1, 0), 0, "min.picks_zero_sym");
+		
+        /*
+		 * The public matrix contains the minimum/readability bound.
+		 */
+		CHECK_EQ(dstm_distance_get(cm, 0, 1), 0,
+		         "bounds.readable_min");
+		CHECK_EQ(dstm_distance_get(cm, 1, 0), 0,
+		         "bounds.readable_min_sym");
 
+		/*
+		 * The internal discard matrix contains the maximum bound.
+		 */
+		CHECK_EQ(dstm_distance_get_discard(cm, 0, 1), 5,
+		         "bounds.discard_max");
+		CHECK_EQ(dstm_distance_get_discard(cm, 1, 0), 5,
+		         "bounds.discard_max_sym");
+
+		/*
+		 * dstm_start() uses dstm_distance_create_copy(), so verify that
+		 * copying a combined matrix preserves both bounds.
+		 */
+		dstm_distance_t *copy = NULL;
+		CHECK_EQ(dstm_distance_create_copy(&copy, cm), DSTM_SUCCESS,
+		         "bounds.copy_rc");
+		CHECK_EQ(dstm_distance_get(copy, 0, 1), 0,
+		         "bounds.copy_readable");
+		CHECK_EQ(dstm_distance_get_discard(copy, 0, 1), 5,
+		         "bounds.copy_discard");
+
+		dstm_distance_destroy(&copy);
 		dstm_distance_destroy(&cm);
 		dstm_distance_destroy(&dbg);
 		dstm_distance_destroy(&ds);

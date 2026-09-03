@@ -25,7 +25,12 @@ extern "C" {
 #endif
 
 struct dstm_distance_s {
+    /* Min sync distance for each rank pair */
+    /* WRITABLE -> READABLE */
 	int *distances;
+    /* Max sync distance for each rank pair */
+    /* READABLE -> DISCARDABLE */
+    int *discard_distances;
 	size_t size;
 };
 

@@ -175,6 +175,7 @@ typedef struct dstm_distance_s dstm_distance_t;
 
 int dstm_distance_create_copy(dstm_distance_t **dst, dstm_distance_t *src);
 int dstm_distance_get(dstm_distance_t *dst, int i, int j);
+int dstm_distance_get_discard(const dstm_distance_t *dst, int i, int j);
 size_t dstm_distance_size(dstm_distance_t *dst);
 
 /**
@@ -267,29 +268,38 @@ int dstm_distance_create_from_matrix(dstm_distance_t **ret, size_t size,
                                      const int *matrix);
 
 /**
- * Combine multiple rank-indexed distance matrices into a single
- * "most-constrained union" matrix.
+ * Combine multiple rank-indexed distance matrices into one session-global
+ * distance object covering the union of their communication.
  *
- * DSTM installs exactly one session-global distance matrix
- * (see dstm_start).  The region version state machine consults it to
- * decide when no more PUTs/GETs can arrive for a given timestep and a
- * version may be evicted.  When several data structures live in the
- * same session (each possibly on its own region, each with its own
- * derived matrix), that single matrix MUST cover the union of all
- * their traffic: if any structure communicates across a rank pair, the
- * session matrix must reflect that pair as reachable, using the
- * tightest (smallest positive) delta any structure requires.
+ * DSTM installs exactly one distance object for a session. When several
+ * data structures coexist, that object must account for every rank pair
+ * used by any of those structures.
+ *
+ * Two conservative bounds are retained internally for each rank pair:
+ *
+ *   - the minimum reachable distance is used by WRITABLE -> READABLE,
+ *     because the smallest delta determines when no more PUTs can arrive;
+ *
+ *   - the maximum reachable distance is used by READABLE -> DISCARDABLE,
+ *     because the largest look-back determines when no more GETs can
+ *     arrive.
+ *
+ * dstm_distance_get() returns the minimum/readability bound. The maximum
+ * discard bound is internal to the version state machine.
  *
  * The reduction is performed per cell (i, j) over the @p n inputs:
- *   - diagonal (i == j) is always 0;
- *   - if any input has a real edge (value > 0), the result is the
- *     minimum positive value across the inputs (smallest = most
- *     constrained = tightest synchronization);
- *   - the result is -1 (unreachable) only when every input is -1 for
- *     that cell.
  *
- * All inputs must share the same size (== world_size).  The inputs are
- * only read; the caller retains ownership of @p mats and each matrix.
+ *   - diagonal entries are always 0;
+ *   - a pair is reachable if any input marks it reachable;
+ *   - the readable bound is the minimum non-negative reachable value;
+ *   - the discardable bound is the maximum non-negative reachable value;
+ *   - the pair is -1 (unreachable) only when every input is -1.
+ *
+ * Combining an already-combined matrix is supported and preserves both
+ * bounds.
+ *
+ * All inputs must share the same size. The inputs are only read; the caller
+ * retains ownership of @p mats and each matrix.
  *
  * @param[out] ret   distance matrix handle to populate (must be non-NULL)
  * @param[in]  mats  array of @p n input matrix pointers (non-NULL, each

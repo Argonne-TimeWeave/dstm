@@ -151,8 +151,8 @@ static int dstm_version_can_become_discardable(dstm_region_t *region, int region
 	if (!dstm_global_context.barrier_all_drained) {
 		for (int i = 0; i < dstm_global_context.world_size; i++) {
 			int dist =
-			        dstm_distance_get(dstm_global_context.distances,
-			                          dstm_global_context.rank, i);
+			        dstm_distance_get_discard(dstm_global_context.distances,
+                                      dstm_global_context.rank, i);
 			if (dist <= 0)
 				continue;
 
