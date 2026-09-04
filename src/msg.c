@@ -33,7 +33,7 @@ MPI_Datatype dstm_msg_barrier_dt;
 int dstm_msg_init(void)
 {
 	/* dstm_msg_hdr_t: type(int), dst_rank(int), src_rank(int),
-	 * time(int64_t), delta(int64_t) */
+	 * time(int64_t), delta(int64_t), region_id(int) */
 	MPI_Datatype dstm_msg_hdr_sig[6] = {MPI_INT, MPI_INT, MPI_INT,
 	                                    MPI_INT64_T, MPI_INT64_T, MPI_INT};
 	int dstm_msg_hdr_bl[6] = {1, 1, 1, 1, 1, 1};

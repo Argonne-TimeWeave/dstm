@@ -1052,6 +1052,8 @@ dstm_ptr_t dstm_region_ptr_fromvoid(dstm_region_t *r, void *ptr);
 void *dstm_region_ptr_tovoid(dstm_region_t *r, dstm_ptr_t ptr);
 int dstm_ptr_isnull(dstm_ptr_t ptr);
 
+/* Return the default local region id (always 0).  Region ids are an
+ * intra-rank namespace and are NOT related to the MPI rank. */
 int dstm_get_local_region_id(void);
 
 /* Look up a local region by its id (0 == default). NULL if none. */
@@ -1091,15 +1093,16 @@ static inline dstm_ptr_t dstm_ptr_make(int region, intptr_t offset)
  * @p region_id, hosted on @p rank, at the location @p dst, taking
  * effect at logical time (time + delta).
  *
- * The triple (rank, region_id, dst.region) must be consistent: each
- * rank's region id is equal to its rank.  @p delta must be >= 0 (a
- * put cannot target the past).
+ * The triple (rank, region_id, dst.region) must be consistent:
+ * @p region_id must equal @p dst.region (the region argument and the
+ * pointer's region must agree).  @p delta must be >= 0 (a put cannot
+ * target the past).
  *
  * Local-rank invariant for delta == 0: when @p delta is zero, the
  * effective target time equals @p time and only the local rank can
  * meaningfully observe its own current state.  Therefore @p rank MUST
- * equal the local rank id (see dstm_get_local_region_id) when
- * @p delta == 0; remote puts with @p delta == 0 are rejected with
+ * equal the local rank when @p delta == 0; remote puts with
+ * @p delta == 0 are rejected with
  * -DSTM_EDOM.  Non-zero @p delta permits any @p rank.
  *
  * Put-before-get phase rule: local rank access with delta == 0 requires us to
@@ -1108,17 +1111,18 @@ static inline dstm_ptr_t dstm_ptr_make(int region, intptr_t offset)
  * enforce this and abort the program with a contract-violation message logged
  * via dstm_log_error.
  *
- * @param[in] rank       target MPI rank (must be == @p region_id)
- * @param[in] region_id  region identifier (must be == @p rank)
+ * @param[in] rank       target MPI rank
+ * @param[in] region_id  region identifier (must be == @p dst.region)
  * @param[in] time       base logical timestamp
  * @param[in] delta      non-negative offset added to @p time
  * @param[in] dst        opaque pointer into the target region
  * @param[in] src        source buffer of @p size bytes (must be non-NULL)
  * @param[in] size       number of bytes to copy
- * @return DSTM_SUCCESS on success, -DSTM_EINVAL if @p src is NULL or
- *         @p delta is negative, -DSTM_EDOM if @p delta == 0 and @p rank
- *         is not the local rank.  Aborts the program if the put
- *         violates the put-before-get phase rule above.
+ * @return DSTM_SUCCESS on success, -DSTM_EINVAL if @p src is NULL,
+ *         @p delta is negative, @p region_id is out of range, or
+ *         @p region_id != @p dst.region; -DSTM_EDOM if @p delta == 0
+ *         and @p rank is not the local rank.  Aborts the program if
+ *         the put violates the put-before-get phase rule above.
  */
 int dstm_put(int rank,
              int region_id,
@@ -1133,8 +1137,8 @@ int dstm_put(int rank,
  * hosted on @p rank, at the location @p src, into the local buffer
  * @p dst, observing the version at logical time (time + delta).
  *
- * The triple (rank, region_id, src.region) must be consistent: each
- * rank's region id is equal to its rank.  @p delta must be <= 0 (a
+ * The triple (rank, region_id, src.region) must be consistent:
+ * @p region_id must equal @p src.region.  @p delta must be <= 0 (a
  * get cannot target the future).
  *
  * Local-rank invariant for delta == 0: when @p delta is zero, the
@@ -1151,16 +1155,17 @@ int dstm_put(int rank,
  * This call is blocking: it drives the progress loop until the
  * requested version is available locally.
  *
- * @param[in]  rank       target MPI rank (must be == @p region_id)
- * @param[in]  region_id  region identifier (must be == @p rank)
+ * @param[in]  rank       target MPI rank
+ * @param[in]  region_id  region identifier (must be == @p src.region)
  * @param[in]  time       base logical timestamp
  * @param[in]  delta      non-positive offset added to @p time
  * @param[out] dst        destination buffer of @p size bytes (non-NULL)
  * @param[in]  src        opaque pointer into the source region
  * @param[in]  size       number of bytes to copy
- * @return DSTM_SUCCESS on success, -DSTM_EINVAL if @p dst is NULL or
- *         @p delta is positive, -DSTM_EDOM if @p delta == 0 and @p rank
- *         is not the local rank.
+ * @return DSTM_SUCCESS on success, -DSTM_EINVAL if @p dst is NULL,
+ *         @p delta is positive, @p region_id is out of range, or
+ *         @p region_id != @p src.region; -DSTM_EDOM if @p delta == 0
+ *         and @p rank is not the local rank.
  */
 int dstm_get(int rank,
              int region_id,
