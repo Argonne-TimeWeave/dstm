@@ -416,13 +416,21 @@ static int dstm_request_progress_out_get(dstm_request_t *req)
 	 * - irecv: GET_REQ sent, reply received and buffered in req->buf.
 	 * - done: payload copied to caller's destination.
 	 */
+
+    /* req->region_id is the remote source region id. 
+     *   the source region id, may not exist localy when region ids
+     *   are asymmetric. */
+	dstm_region_t *region = 
+                    dstm_get_local_region(dstm_get_local_region_id());
+
 	if (req->status == DSTM_REQUEST_STATUS_IRECV) {
-        assert(req->dst.region == DSTM_REGIONID_LOCAL);
-        void *dptr = (void *)req->dst.offset;
-        dstm_log_debug("applying: %p %zu\n", dptr, req->size);
-        memcpy(dptr, req->buf, req->size);
-        req->status = DSTM_REQUEST_STATUS_DONE;
-    }
+		assert(req->dst.region == DSTM_REGIONID_LOCAL);
+		void *dptr = dstm_region_ptr_tovoid(region, req->dst);
+		assert(dptr != NULL);
+		dstm_log_debug("applying: %p %zu\n", dptr, req->size);
+		memcpy(dptr, req->buf, req->size);
+		req->status = DSTM_REQUEST_STATUS_DONE;
+	}
 	return 0;
 }
 

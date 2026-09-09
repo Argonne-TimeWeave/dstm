@@ -25,13 +25,14 @@ COMPILED_TESTS = \
 		darray \
 		distances \
 		get_or_default \
-               init_comm \
-               init_comm_world \
+        init_comm \
+        init_comm_world \
 		local_delta \
 		msg \
 		multi_session \
         multi_region \
         multi_region_asym \
+        multi_region_disjoint_timesteps \
         multi_dgraph \
         dgraph \
         mini_airport \

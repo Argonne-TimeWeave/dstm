@@ -20,6 +20,10 @@
 
 #include "dstm.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #define DSTM_MAX_REGIONS 64
 
 struct dstm_region_s;
@@ -27,10 +31,6 @@ typedef struct dstm_region_s dstm_region_t;
 
 struct dstm_region_ninfo_s;
 typedef struct dstm_region_ninfo_s dstm_region_ninfo_t;
-
-#ifdef __cplusplus
-extern "C" {
-#endif
 
 struct dstm_context_s {
 	/* Active communicator used by all session-level traffic

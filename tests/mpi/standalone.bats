@@ -123,3 +123,15 @@ bats_require_minimum_version 1.5.0
 @test "mpirun -n 4 multi_region_asym" {
         run -0 --separate-stderr timeout --preserve-status 5 mpirun -n 4 $LOG_COMPILER $LOG_FLAGS $ABS_TOP_BUILDDIR/tests/mpi/multi_region_asym
 }
+
+@test "mpirun -n 2 multi_region_disjoint_timesteps" {
+        run -0 --separate-stderr timeout --preserve-status 5 \
+                mpirun -n 2 $LOG_COMPILER $LOG_FLAGS \
+                $ABS_TOP_BUILDDIR/tests/mpi/multi_region_disjoint_timesteps
+}
+
+@test "mpirun -n 4 multi_region_disjoint_timesteps" {
+        run -0 --separate-stderr timeout --preserve-status 5 \
+                mpirun -n 4 $LOG_COMPILER $LOG_FLAGS \
+                $ABS_TOP_BUILDDIR/tests/mpi/multi_region_disjoint_timesteps
+}
