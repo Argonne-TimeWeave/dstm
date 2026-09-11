@@ -2,8 +2,13 @@
 # scale_stale.sh -- fix ranks, sweep --stale-delay for graph_traffic.
 #
 #   For a single fixed rank count, run ./traffic --replica-mode stale over
-#   a ladder of --stale-delay values and record trip/staleness stats to a
-#   CSV. One row per (stale_delay, rep).
+#   a ladder of --stale-delay values and record early-departure cohort
+#   routing metrics, overall arrivals, and staleness stats to a CSV.
+#   One row per (stale_delay, rep).
+#
+#   Routing metrics are computed by traffic for cars departing during the
+#   first 10% of simulation timestamps:
+#     mean_dur, mean_hops, arrived_pct, cohort_arrived, cohort_spawned.
 #
 #   Only the STALE replica mode reads --stale-delay (oracle syncs every
 #   tick, blind never merges), so this sweep runs stale mode only.
@@ -216,9 +221,7 @@ fi
 } | tee "${CONFIG}"
 echo
 
-# Requested columns: mean_dur, mode, rank(s), stale_mx, age (+ arrived).
-# Plus the swept variable stale_delay and rep so rows are identifiable.
-echo "ranks,mode,stale_delay,rep,status,mean_dur,arrived,mean_age,stale_max,run_time,mib_tick_total,mib_tick_per_rank" > "${CSV}"
+echo "ranks,mode,stale_delay,rep,status,mean_dur,mean_hops,arrived_pct,cohort_arrived,cohort_spawned,arrived,mean_age,stale_max,run_time,mib_tick_total,mib_tick_per_rank" > "${CSV}"
 
 # --------------------------------------------------------------------------
 # One run.
@@ -274,30 +277,81 @@ run_one() {
                 status="launch_err"
         fi
 
-        # Parse only the fields we keep: mean_dur, arrived, mean_age, stale_max,
-        # run_time, and the aggregate MiB/tick (per-rank is derived below).
-        local dur arr age smax rt mibt mibt_pr
-        dur=$(  sed -n 's/.*mean duration=\([0-9.]*\).*/\1/p'              "${log}" | tail -1)
-        arr=$(  sed -n 's/^spawned=[0-9]* arrived=\([0-9]*\).*/\1/p'       "${log}" | tail -1)
-        age=$(  sed -n 's/.*consulted entry=\([0-9.]*\).*/\1/p'            "${log}" | tail -1)
-        smax=$( sed -n 's/.*staleness.*max=\([0-9]*\).*/\1/p'              "${log}" | tail -1)
-        rt=$(   sed -n 's/^total run time:[[:space:]]*\([0-9.]*\).*/\1/p'  "${log}" | tail -1)
-        mibt=$( sed -n 's/.*(\([0-9.]*\) MiB\/tick across all ranks).*/\1/p' "${log}" | tail -1)
+                # Parse the early-departure routing cohort, overall arrivals,
+        # staleness, runtime, and communication volume.
+        #
+        # Expected cohort line:
+        #   routing metric: cohort_spawned=N cohort_arrived=N
+        #   arrived_pct=P mean_dur=D mean_hops=H
+        #
+        # Floating-point fields use [^ ]* so "nan" is accepted when no
+        # member of the cohort has arrived.
+        local dur hops arrived_pct cohort_arr cohort_spawn
+        local arr age smax rt mibt mibt_pr
 
-        # Derive per-rank MiB/tick = aggregate / rank count (np).
+        dur=$(sed -n \
+                's/^routing metric: .*mean_dur=\([^ ]*\).*/\1/p'             \
+                "${log}" | tail -1)
+        hops=$(sed -n \
+                's/^routing metric: .*mean_hops=\([^ ]*\).*/\1/p'            \
+                "${log}" | tail -1)
+        arrived_pct=$(sed -n \
+                's/^routing metric: .*arrived_pct=\([^ ]*\).*/\1/p'          \
+                "${log}" | tail -1)
+        cohort_arr=$(sed -n \
+                's/^routing metric: .*cohort_arrived=\([0-9]*\).*/\1/p'      \
+                "${log}" | tail -1)
+        cohort_spawn=$(sed -n \
+                's/^routing metric: cohort_spawned=\([0-9]*\).*/\1/p'        \
+                "${log}" | tail -1)
+
+        # Overall arrival count, not restricted to the routing cohort.
+        arr=$(sed -n \
+                's/^spawned=[0-9]* arrived=\([0-9]*\).*/\1/p'                \
+                "${log}" | tail -1)
+
+        age=$(sed -n \
+                's/.*consulted entry=\([0-9.]*\).*/\1/p'                     \
+                "${log}" | tail -1)
+        smax=$(sed -n \
+                's/.*staleness.*max=\([0-9]*\).*/\1/p'                       \
+                "${log}" | tail -1)
+        rt=$(sed -n \
+                's/^total run time:[[:space:]]*\([0-9.]*\).*/\1/p'           \
+                "${log}" | tail -1)
+        mibt=$(sed -n \
+                's/.*(\([0-9.]*\) MiB\/tick across all ranks).*/\1/p'        \
+                "${log}" | tail -1)
+
+        # Derive per-rank MiB/tick = aggregate / rank count.
         if [[ -n "${mibt}" ]]; then
-                mibt_pr=$(awk -v t="${mibt}" -v n="${np}" 'BEGIN{ printf "%.4f", (n>0)? t/n : 0 }')
+                mibt_pr=$(awk -v t="${mibt}" -v n="${np}" \
+                        'BEGIN { if (n > 0) printf "%.4f", t/n; else print "nan" }')
         fi
 
-        [[ -z "${dur}" && "${status}" == ok ]] && status="parse_fail"
-        : "${dur:=nan}" "${arr:=-1}" "${age:=nan}" "${smax:=-1}"
-        : "${rt:=nan}" "${mibt:=nan}" "${mibt_pr:=nan}"
+        # A successful run must contain the complete routing-metric line.
+        # "nan" is a valid parsed value; an empty value indicates failure.
+        if [[ "${status}" == ok &&
+              ( -z "${dur}" ||
+                -z "${hops}" ||
+                -z "${arrived_pct}" ||
+                -z "${cohort_arr}" ||
+                -z "${cohort_spawn}" ) ]]; then
+                status="parse_fail"
+        fi
 
-        echo "${np},${mode},${sd_csv},${rep},${status},${dur},${arr},${age},${smax},${rt},${mibt},${mibt_pr}" >> "${CSV}"
+        : "${dur:=nan}" "${hops:=nan}" "${arrived_pct:=nan}"
+        : "${cohort_arr:=-1}" "${cohort_spawn:=-1}" "${arr:=-1}"
+        : "${age:=nan}" "${smax:=-1}" "${rt:=nan}"
+        : "${mibt:=nan}" "${mibt_pr:=nan}"
+
+        echo "${np},${mode},${sd_csv},${rep},${status},${dur},${hops},${arrived_pct},${cohort_arr},${cohort_spawn},${arr},${age},${smax},${rt},${mibt},${mibt_pr}" >> "${CSV}"
 
         if [[ "${status}" == ok ]]; then
-                printf 'dur=%-8s arr=%-7s age=%-6s stale_mx=%-3s rt=%-8s MiB/tick=%-8s per_rank=%s\n' \
-                       "${dur}" "${arr}" "${age}" "${smax}" "${rt}" "${mibt}" "${mibt_pr}"
+                printf 'dur=%-8s hops=%-7s cohort=%s/%s (%s%%) age=%-6s stale_mx=%-3s rt=%-8s MiB/tick=%-8s per_rank=%s\n' \
+                       "${dur}" "${hops}" \
+                       "${cohort_arr}" "${cohort_spawn}" "${arrived_pct}" \
+                       "${age}" "${smax}" "${rt}" "${mibt}" "${mibt_pr}"
         else
                 printf '%s (%s)\n' "${status}" "$(basename "${log}")"
         fi
@@ -339,27 +393,85 @@ fi
 echo "csv:  ${CSV}"
 echo "logs: ${RAWDIR}"
 echo
-echo "quick median-of-reps view (by stale_delay; oracle baseline last):"
-awk -F, 'NR>1 && $5=="ok" {
-        # For stale rows key on stale_delay; for the na-keyed baselines
-        # (oracle/blind) key on the mode so they do not collide.
+echo "quick median-of-reps view (early-departure cohort by stale delay):"
+awk -F, 'NR > 1 && $5 == "ok" {
+        # For stale rows, key on stale_delay. For na-keyed oracle/blind
+        # baselines, key on mode so the two baselines do not collide.
         key = ($3 == "na") ? $2 : $3;
-        dur[key]=dur[key]" "$6; arr[key]=arr[key]" "$7; age[key]=age[key]" "$8; sm[key]=sm[key]" "$9;
-        rt[key]=rt[key]" "$10; mibt[key]=mibt[key]" "$11; mibp[key]=mibp[key]" "$12;
-        if ($3 == "na") { base[$2]=1 } else { seen[key]=1 }   # keep na out of numeric sort
+
+        dur[key]  = dur[key]  " " $6;
+        hops[key] = hops[key] " " $7;
+        pct[key]  = pct[key]  " " $8;
+        age[key]  = age[key]  " " $12;
+        smax[key] = smax[key] " " $13;
+        rt[key]   = rt[key]   " " $14;
+        mibt[key] = mibt[key] " " $15;
+        mibp[key] = mibp[key] " " $16;
+
+        if ($3 == "na")
+                base[$2] = 1;
+        else
+                seen[key] = 1;
 }
-function med(s,   a,n,i,j,t) { n=split(s,a," "); if(!n) return "nan";
-        for(i=1;i<=n;i++) for(j=i+1;j<=n;j++) if(a[j]<a[i]){t=a[i];a[i]=a[j];a[j]=t};
-        return (n%2)? a[(n+1)/2] : (a[n/2]+a[n/2+1])/2 }
+function med(s,   a,v,n,m,i,j,t) {
+        # Ignore "nan" values when calculating a median. This matters when
+        # a cohort has no arrivals and therefore has no defined duration or
+        # hop mean.
+        n = split(s, a, " ");
+        m = 0;
+        for (i = 1; i <= n; i++) {
+                if (a[i] == "" || tolower(a[i]) == "nan")
+                        continue;
+                v[++m] = a[i] + 0;
+        }
+
+        if (m == 0)
+                return "nan";
+
+        for (i = 1; i <= m; i++)
+                for (j = i + 1; j <= m; j++)
+                        if (v[j] < v[i]) {
+                                t = v[i];
+                                v[i] = v[j];
+                                v[j] = t;
+                        }
+
+        return (m % 2) ? v[(m + 1) / 2]
+                       : (v[m / 2] + v[m / 2 + 1]) / 2;
+}
+function print_row(label, note) {
+        printf "%-12s %10s %10s %11s %8s %9s %10s %12s %12s%s\n",
+               label,
+               med(dur[label]),
+               med(hops[label]),
+               med(pct[label]),
+               med(age[label]),
+               med(smax[label]),
+               med(rt[label]),
+               med(mibt[label]),
+               med(mibp[label]),
+               note;
+}
 END {
-        printf "%-12s %10s %10s %8s %9s %10s %12s %12s\n","stale_delay","mean_dur","arrived","age","stale_mx","run_time","MiB/tick","per_rank";
-        n=asorti(seen,sk,"@val_num_asc");
-        for(i=1;i<=n;i++){ k=sk[i];
-                printf "%-12s %10s %10s %8s %9s %10s %12s %12s\n", k, med(dur[k]), med(arr[k]), med(age[k]), med(sm[k]), med(rt[k]), med(mibt[k]), med(mibp[k]) }
+        printf "%-12s %10s %10s %11s %8s %9s %10s %12s %12s\n",
+               "stale_delay",
+               "mean_dur",
+               "mean_hops",
+               "arrived_pct",
+               "age",
+               "stale_mx",
+               "run_time",
+               "MiB/tick",
+               "per_rank";
+
+        n = asorti(seen, sk, "@val_num_asc");
+        for (i = 1; i <= n; i++)
+                print_row(sk[i], "");
+
         if ("oracle" in base)
-                printf "%-12s %10s %10s %8s %9s %10s %12s %12s   <- always-fresh upper bound\n", \
-                       "oracle", med(dur["oracle"]), med(arr["oracle"]), med(age["oracle"]), med(sm["oracle"]), med(rt["oracle"]), med(mibt["oracle"]), med(mibp["oracle"]);
+                print_row("oracle", "   <- always-fresh upper bound");
+
         if ("blind" in base)
-                printf "%-12s %10s %10s %8s %9s %10s %12s %12s   <- never-merge lower bound\n", \
-                       "blind", med(dur["blind"]), med(arr["blind"]), med(age["blind"]), med(sm["blind"]), med(rt["blind"]), med(mibt["blind"]), med(mibp["blind"]);
-}' "${CSV}" 2>/dev/null || echo "  (install gawk for the summary view; raw CSV is complete)"
+                print_row("blind", "   <- never-merge lower bound");
+}' "${CSV}" 2>/dev/null ||
+        echo "  (install gawk for the summary view; raw CSV is complete)"

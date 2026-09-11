@@ -2,8 +2,13 @@
 # scale_replica.sh -- scale ranks x replica-mode sweep for graph_traffic.
 #
 #   For each rank count in the ladder and each replica mode (blind stale
-#   oracle), run ./traffic --data DIR and record runtime + trip stats to a
-#   CSV. One row per (ranks, mode, stale_delay, rep).
+#   oracle), run ./traffic --data DIR and record runtime, early-departure
+#   cohort routing metrics, and overall simulation totals to a CSV.
+#   One row per (ranks, mode, stale_delay, rep).
+#
+#   Routing metrics are computed by traffic for cars departing during the
+#   first 10% of simulation timestamps:
+#     mean_dur, mean_hops, arrived_pct, cohort_arrived, cohort_spawned.
 #
 #   For mode=stale the run is repeated once per value in STALE_DELAYS
 #   (default "2 8 32"); blind and oracle ignore --stale-delay and run once
@@ -197,7 +202,7 @@ mkdir -p "${RAWDIR}"
 } | tee "${CONFIG}"
 echo
 
-echo "ranks,nodes,ppn,mode,stale_delay,rep,status,run_time,mean_dur,mean_hops,arrived,spawned,live,lost,blocked_pct,crossings,mean_age,stale_mean,stale_max,mib_tick_total,mib_tick_per_rank,seed,steps,cars,rate,cap" > "${CSV}"
+echo "ranks,nodes,ppn,mode,stale_delay,rep,status,run_time,mean_dur,mean_hops,arrived_pct,cohort_arrived,cohort_spawned,arrived,spawned,live,lost,blocked_pct,crossings,mean_age,stale_mean,stale_max,mib_tick_total,mib_tick_per_rank,seed,steps,cars,rate,cap" > "${CSV}"
 
 # --------------------------------------------------------------------------
 # One run.
@@ -254,11 +259,36 @@ run_one() {
                 status="launch_err"
         fi
 
-        # Parse the traffic summary block (same sed/awk style as compare.sh).
-        local dur hops arr spawn live lost blk cross age smean smax prog_time mibt mibt_pr
+                # Parse the routing-metric cohort and the overall simulation totals.
+        #
+        # Expected cohort line:
+        #   routing metric: cohort_spawned=N cohort_arrived=N
+        #   arrived_pct=P mean_dur=D mean_hops=H
+        #
+        # [^ ]* is used for floating-point metrics so "nan" is accepted when
+        # no member of the cohort has arrived.
+        local dur hops arrived_pct cohort_arr cohort_spawn
+        local arr spawn live lost blk cross age smean smax prog_time mibt mibt_pr
+
         prog_time=$(sed -n 's/^total run time: \([0-9.]*\).*/\1/p'              "${log}" | tail -1)
-        dur=$(  sed -n 's/.*mean duration=\([0-9.]*\).*/\1/p'                    "${log}" | tail -1)
-        hops=$( sed -n 's/.*mean hops=\([0-9.]*\).*/\1/p'                        "${log}" | tail -1)
+
+        dur=$(sed -n \
+                's/^routing metric: .*mean_dur=\([^ ]*\).*/\1/p'                \
+                "${log}" | tail -1)
+        hops=$(sed -n \
+                's/^routing metric: .*mean_hops=\([^ ]*\).*/\1/p'               \
+                "${log}" | tail -1)
+        arrived_pct=$(sed -n \
+                's/^routing metric: .*arrived_pct=\([^ ]*\).*/\1/p'             \
+                "${log}" | tail -1)
+        cohort_arr=$(sed -n \
+                's/^routing metric: .*cohort_arrived=\([0-9]*\).*/\1/p'         \
+                "${log}" | tail -1)
+        cohort_spawn=$(sed -n \
+                's/^routing metric: cohort_spawned=\([0-9]*\).*/\1/p'           \
+                "${log}" | tail -1)
+
+        # Overall simulation totals, not restricted to the metric cohort.
         arr=$(  sed -n 's/^spawned=[0-9]* arrived=\([0-9]*\).*/\1/p'             "${log}" | tail -1)
         spawn=$(sed -n 's/^spawned=\([0-9]*\).*/\1/p'                            "${log}" | tail -1)
         live=$( sed -n 's/^spawned=[0-9]* arrived=[0-9]* live=\([0-9]*\).*/\1/p' "${log}" | tail -1)
@@ -270,10 +300,20 @@ run_one() {
         smax=$( sed -n 's/.*staleness.*max=\([0-9]*\).*/\1/p'                    "${log}" | tail -1)
         mibt=$( sed -n 's/.*(\([0-9.]*\) MiB\/tick across all ranks).*/\1/p'     "${log}" | tail -1)
 
-        [[ -z "${dur}" && "${status}" == ok ]] && status="parse_fail"
-        : "${dur:=nan}" "${hops:=nan}" "${arr:=-1}" "${spawn:=-1}" "${live:=-1}"
-        : "${lost:=-1}" "${blk:=nan}" "${cross:=-1}" "${age:=nan}" "${smean:=nan}" "${smax:=-1}"
-        : "${mibt:=nan}"
+        if [[ "${status}" == ok &&
+              ( -z "${dur}" ||
+                -z "${hops}" ||
+                -z "${arrived_pct}" ||
+                -z "${cohort_arr}" ||
+                -z "${cohort_spawn}" ) ]]; then
+                status="parse_fail"
+        fi
+
+        : "${dur:=nan}" "${hops:=nan}" "${arrived_pct:=nan}"
+        : "${cohort_arr:=-1}" "${cohort_spawn:=-1}"
+        : "${arr:=-1}" "${spawn:=-1}" "${live:=-1}" "${lost:=-1}"
+        : "${blk:=nan}" "${cross:=-1}" "${age:=nan}"
+        : "${smean:=nan}" "${smax:=-1}" "${mibt:=nan}"
 
         # Aggregate MiB/tick -> per-rank.
         if [[ "${mibt}" != "nan" ]]; then
@@ -285,10 +325,13 @@ run_one() {
         # Prefer the program's own reported time; fall back to launcher wall clock.
         : "${prog_time:=${wall}}"
 
-        echo "${np},${nodes},${ppn},${mode},${delay_lbl},${rep},${status},${prog_time},${dur},${hops},${arr},${spawn},${live},${lost},${blk},${cross},${age},${smean},${smax},${mibt},${mibt_pr},${SEED},${STEPS},${CARS},${RATE},${CAP}" >> "${CSV}"
+        echo "${np},${nodes},${ppn},${mode},${delay_lbl},${rep},${status},${prog_time},${dur},${hops},${arrived_pct},${cohort_arr},${cohort_spawn},${arr},${spawn},${live},${lost},${blk},${cross},${age},${smean},${smax},${mibt},${mibt_pr},${SEED},${STEPS},${CARS},${RATE},${CAP}" >> "${CSV}"
 
         if [[ "${status}" == ok ]]; then
-                printf '%8ss  dur=%-7s hops=%-6s arr=%-7s blk=%-5s%% mib/t=%-7s\n' "${prog_time}" "${dur}" "${hops}" "${arr}" "${blk}" "${mibt}"
+                printf '%8ss  dur=%-7s hops=%-6s cohort=%s/%s (%s%%) blk=%-5s%% mib/t=%-7s\n' \
+                        "${prog_time}" "${dur}" "${hops}" \
+                        "${cohort_arr}" "${cohort_spawn}" "${arrived_pct}" \
+                        "${blk}" "${mibt}"
         else
                 printf '%s (%s)\n' "${status}" "$(basename "${log}")"
         fi
@@ -326,21 +369,50 @@ done
 echo "csv:  ${CSV}"
 echo "logs: ${RAWDIR}"
 echo
-echo "quick median-of-reps view (arrived / mean_dur by ranks x mode x delay):"
+echo "quick median-of-reps view (early-departure cohort by ranks x mode x delay):"
 awk -F, 'NR>1 && $7=="ok" {
         key=$1"|"$4"|"$5;
-        dur[key]=dur[key]" "$9; arr[key]=arr[key]" "$11; age[key]=age[key]" "$17;
-        sm[key]=sm[key]" "$19; mib[key]=mib[key]" "$20;
-        seen[$1]=1; combo[$4"|"$5]=1;
+
+        dur[key]=dur[key]" "$9;
+        hops[key]=hops[key]" "$10;
+        pct[key]=pct[key]" "$11;
+        age[key]=age[key]" "$20;
+        smax[key]=smax[key]" "$22;
+        mib[key]=mib[key]" "$23;
+
+        seen[$1]=1;
+        combo[$4"|"$5]=1;
 }
-function med(s,   a,n,i,j,t) { n=split(s,a," "); if(!n) return "nan";
-        for(i=1;i<=n;i++) for(j=i+1;j<=n;j++) if(a[j]<a[i]){t=a[i];a[i]=a[j];a[j]=t};
-        return (n%2)? a[(n+1)/2] : (a[n/2]+a[n/2+1])/2 }
+function med(s,   a,n,i,j,t) {
+        n=split(s,a," ");
+        if(!n) return "nan";
+        for(i=1;i<=n;i++)
+                for(j=i+1;j<=n;j++)
+                        if(a[j]<a[i]) {
+                                t=a[i];
+                                a[i]=a[j];
+                                a[j]=t
+                        }
+        return (n%2) ? a[(n+1)/2] : (a[n/2]+a[n/2+1])/2
+}
 END {
-        printf "%-6s %-7s %-6s %10s %10s %8s %8s %10s\n","ranks","mode","delay","mean_dur","arrived","age","stale_mx","mib/tick";
+        printf "%-6s %-7s %-6s %10s %10s %11s %8s %8s %10s\n",
+               "ranks", "mode", "delay",
+               "mean_dur", "mean_hops", "arrived_pct",
+               "age", "stale_mx", "mib/tick";
+
         n=asorti(seen,rk,"@val_num_asc");
-        for(i=1;i<=n;i++){ r=rk[i];
-                for(c in combo){ split(c,cc,"|"); k=r"|"c;
-                        if(k in dur) printf "%-6s %-7s %-6s %10s %10s %8s %8s %10s\n", r,cc[1],cc[2],med(dur[k]),med(arr[k]),med(age[k]),med(sm[k]),med(mib[k]) }
+        for(i=1;i<=n;i++) {
+                r=rk[i];
+                for(c in combo) {
+                        split(c,cc,"|");
+                        k=r"|"c;
+                        if(k in dur)
+                                printf "%-6s %-7s %-6s %10s %10s %11s %8s %8s %10s\n",
+                                       r, cc[1], cc[2],
+                                       med(dur[k]), med(hops[k]), med(pct[k]),
+                                       med(age[k]), med(smax[k]), med(mib[k])
+                }
         }
-}' "${CSV}" 2>/dev/null || echo "  (install gawk for the summary view; raw CSV is complete)"
+}' "${CSV}" 2>/dev/null ||
+        echo "  (install gawk for the summary view; raw CSV is complete)"
