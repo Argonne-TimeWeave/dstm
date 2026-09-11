@@ -237,8 +237,12 @@ struct rank_stats {
         uint64_t merge_updates;
         uint64_t route_lookups;
         uint64_t route_age_sum;
-        uint64_t hop_sum;
-        uint64_t trip_time_sum;
+
+        uint64_t metric_spawned;
+        uint64_t metric_arrived;
+        uint64_t metric_hop_sum;
+        uint64_t metric_trip_time_sum;
+
         uint64_t bytes_out;
 };
 
@@ -316,10 +320,31 @@ struct sim {
         int spawn_rate;         /* cars per rank per tick */
         int next_car_id;        /* persistent across calls */
 
+        /* Number of initial timestamps included in the routing-metric
+         * cohort. A car is included when:
+         *
+         *     0 <= depart_tick < metric_depart_limit
+         *
+         * Since timestamps are 0..t_end inclusive, this is
+         * ceil((t_end + 1) / 10). */
+        int32_t metric_depart_limit; 
+
         struct rank_stats st;
 };
 
 static struct sim S;
+
+/* Return true when a car belongs to the fixed routing-metric cohort.
+ *
+ * Restricting the metric to cars that depart near the beginning gives
+ * every measured car a long observation window. The percentage-arrived
+ * metric reports how much of the cohort was completed, so slow unfinished
+ * trips are not silently omitted from the result. */
+static int routing_metric_member(int32_t depart_tick)
+{
+        return depart_tick >= 0 &&
+               depart_tick < S.metric_depart_limit;
+}
 
 /* Per-vertex state published every tick. Its only job today is to create
  * the local region version at (t, 0) and emit heartbeats -- nothing reads
@@ -370,8 +395,14 @@ static void inject_car(const struct car_rec *r, int32_t t)
 
         if ((size_t)r->dest == at) {
                 S.st.arrived++;
-                S.st.hop_sum       += (uint64_t)(r->hops + 1);
-                S.st.trip_time_sum += (uint64_t)(t - r->depart_tick);
+
+                if (routing_metric_member(r->depart_tick)) {
+                        S.st.metric_arrived++;
+                        S.st.metric_hop_sum +=
+                                (uint64_t)(r->hops + 1);
+                        S.st.metric_trip_time_sum +=
+                                (uint64_t)(t - r->depart_tick);
+                }
                 return;
         }
 
@@ -822,6 +853,9 @@ static void spawn_cars(int n, int s)
                 car_pool_insert(&S.pool, c);
                 S.vqueue[origin - S.v_lo]++;
                 S.st.spawned++;
+
+                if (routing_metric_member(c.depart_tick))
+                        S.st.metric_spawned++;
         }
 }
 
@@ -1159,6 +1193,9 @@ static int setup(const char *dir, int steps, unsigned int cap)
 
         S.t     = 0;
         S.t_end = steps;
+
+        S.metric_depart_limit = 1 + steps / 10;
+
         S.rng   = (unsigned int)(S.seed * 7919u + (unsigned int)S.rank * 31u
                                  + 1u);
 
@@ -1260,7 +1297,12 @@ static void collect_and_print_stats(void)
 
         uint64_t t_spawn = 0, t_arr = 0, t_live = 0, t_cross = 0, t_blk = 0;
         uint64_t t_send = 0, t_recv = 0, t_merge = 0, t_look = 0, t_age = 0;
-        uint64_t t_hops = 0, t_trip = 0, t_bytes = 0;
+        uint64_t t_bytes = 0;
+
+        uint64_t m_spawn = 0;
+        uint64_t m_arr   = 0;
+        uint64_t m_hops  = 0;
+        uint64_t m_trip  = 0;
 
         printf("\n=== Per-rank stats (replica mode: %s) ===\n",
                replica_mode_name(S.mode));
@@ -1285,9 +1327,12 @@ static void collect_and_print_stats(void)
                 t_merge += all[r].merge_updates;
                 t_look  += all[r].route_lookups;
                 t_age   += all[r].route_age_sum;
-                t_hops  += all[r].hop_sum;
-                t_trip  += all[r].trip_time_sum;
                 t_bytes += all[r].bytes_out;
+
+                m_spawn += all[r].metric_spawned;
+                m_arr   += all[r].metric_arrived;
+                m_hops  += all[r].metric_hop_sum;
+                m_trip  += all[r].metric_trip_time_sum;
         }
 
         printf("--- totals ---\n");
@@ -1307,11 +1352,28 @@ static void collect_and_print_stats(void)
                (double)t_bytes / (1024.0 * 1024.0) /
                        (double)(S.t_end + 1));
 
-        if (t_arr > 0)
-                printf("completed trips: mean hops=%.2f mean duration=%.2f "
-                       "ticks\n",
-                       (double)t_hops / (double)t_arr,
-                       ((double)t_trip + (((double)t_spawn - (double)t_arr) * ((double)S.t_end*2))) / (double)t_spawn);
+        {
+                double arrived_pct =
+                        100.0 * (double)m_arr /
+                        (double)(m_spawn ? m_spawn : 1);
+                double mean_dur =
+                        m_arr ? (double)m_trip / (double)m_arr : NAN;
+                double mean_hops =
+                        m_arr ? (double)m_hops / (double)m_arr : NAN;
+
+                printf("routing metric cohort: depart ticks [0, %d), "
+                       "%d of %d timestamps\n",
+                       (int)S.metric_depart_limit,
+                       (int)S.metric_depart_limit,
+                       (int)S.t_end + 1);
+
+                printf("routing metric: cohort_spawned=%" PRIu64
+                       " cohort_arrived=%" PRIu64
+                       " arrived_pct=%.2f"
+                       " mean_dur=%.2f"
+                       " mean_hops=%.2f\n",
+                       m_spawn, m_arr, arrived_pct, mean_dur, mean_hops);
+        }
 
         if (S.mode == REPLICA_BLIND)
                 printf("routing decisions: not counted in blind mode "
@@ -1428,6 +1490,8 @@ int main(int argc, char *argv[])
                 }
         }
 
+        if (steps < 0)
+            steps = 0;
         if (cap < 1)
                 cap = 1;
         if (S.stale_delay < 1)
