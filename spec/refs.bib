@@ -1,0 +1,272 @@
+% ============================================================================
+%  Bibliography for the DSTM specification.
+%
+%  Two distinct Bernsteins appear here and are easy to confuse:
+%    bernstein1966  -- A. J. Bernstein, the parallelism/dependence conditions.
+%    bernstein1981  -- P. A. Bernstein, the concurrency-control survey (MVCC).
+% ============================================================================
+
+% ---------------------------------------------------------------------------
+%  Dependence, determinacy and dataflow
+% ---------------------------------------------------------------------------
+
+@article{bernstein1966,
+  author  = {Bernstein, Arthur J.},
+  title   = {Analysis of Programs for Parallel Processing},
+  journal = {IEEE Transactions on Electronic Computers},
+  volume  = {EC-15},
+  number  = {5},
+  pages   = {757--763},
+  year    = {1966},
+  doi     = {10.1109/PGEC.1966.264565},
+}
+
+@inproceedings{kahn1974,
+  author    = {Kahn, Gilles},
+  title     = {The Semantics of a Simple Language for Parallel Programming},
+  booktitle = {Information Processing 74: Proceedings of the IFIP Congress},
+  pages     = {471--475},
+  year      = {1974},
+  publisher = {North-Holland},
+}
+
+@article{lamport1978,
+  author  = {Lamport, Leslie},
+  title   = {Time, Clocks, and the Ordering of Events in a Distributed System},
+  journal = {Communications of the ACM},
+  volume  = {21},
+  number  = {7},
+  pages   = {558--565},
+  year    = {1978},
+  doi     = {10.1145/359545.359563},
+}
+
+@article{cytron1991ssa,
+  author  = {Cytron, Ron and Ferrante, Jeanne and Rosen, Barry K. and
+             Wegman, Mark N. and Zadeck, F. Kenneth},
+  title   = {Efficiently Computing Static Single Assignment Form and the
+             Control Dependence Graph},
+  journal = {ACM Transactions on Programming Languages and Systems},
+  volume  = {13},
+  number  = {4},
+  pages   = {451--490},
+  year    = {1991},
+  doi     = {10.1145/115372.115320},
+}
+
+@article{feautrier1991,
+  author  = {Feautrier, Paul},
+  title   = {Dataflow Analysis of Array and Scalar References},
+  journal = {International Journal of Parallel Programming},
+  volume  = {20},
+  number  = {1},
+  pages   = {23--53},
+  year    = {1991},
+  doi     = {10.1007/BF01407931},
+}
+
+@article{valiant1990bsp,
+  author  = {Valiant, Leslie G.},
+  title   = {A Bridging Model for Parallel Computation},
+  journal = {Communications of the ACM},
+  volume  = {33},
+  number  = {8},
+  pages   = {103--111},
+  year    = {1990},
+  doi     = {10.1145/79173.79181},
+}
+
+% ---------------------------------------------------------------------------
+%  Parallel discrete-event simulation
+% ---------------------------------------------------------------------------
+
+@article{chandy1979,
+  author  = {Chandy, K. Mani and Misra, Jayadev},
+  title   = {Distributed Simulation: A Case Study in Design and Verification
+             of Distributed Programs},
+  journal = {IEEE Transactions on Software Engineering},
+  volume  = {SE-5},
+  number  = {5},
+  pages   = {440--452},
+  year    = {1979},
+  doi     = {10.1109/TSE.1979.230182},
+}
+
+@article{chandy1981termination,
+  author  = {Chandy, K. Mani and Misra, Jayadev},
+  title   = {Asynchronous Distributed Simulation via a Sequence of Parallel
+             Computations},
+  journal = {Communications of the ACM},
+  volume  = {24},
+  number  = {4},
+  pages   = {198--206},
+  year    = {1981},
+  doi     = {10.1145/358598.358613},
+}
+
+@article{jefferson1985,
+  author  = {Jefferson, David R.},
+  title   = {Virtual Time},
+  journal = {ACM Transactions on Programming Languages and Systems},
+  volume  = {7},
+  number  = {3},
+  pages   = {404--425},
+  year    = {1985},
+  doi     = {10.1145/3916.3988},
+}
+
+@inproceedings{chandy1989spacetime,
+  author    = {Chandy, K. Mani and Sherman, Rivka},
+  title     = {Space-Time and Simulation},
+  booktitle = {Distributed Simulation},
+  year      = {1989},
+}
+
+@inproceedings{fujimoto1990,
+  author    = {Fujimoto, Richard M.},
+  title     = {Performance of {Time Warp} under Synthetic Workloads},
+  booktitle = {Proceedings of the SCS Multiconference on Distributed
+               Simulation},
+  pages     = {23--28},
+  year      = {1990},
+}
+
+@book{fujimoto1999,
+  author    = {Fujimoto, Richard M.},
+  title     = {Parallel and Distribution Simulation Systems},
+  edition   = {1},
+  publisher = {John Wiley \& Sons},
+  address   = {New York, NY, USA},
+  year      = {1999},
+}
+
+@inproceedings{ross2000,
+  author    = {Carothers, Christopher and Bauer, David and Pearce, Shawn},
+  title     = {{ROSS}: A High-Performance, Low Memory, Modular {Time Warp}
+               System},
+  booktitle = {Proceedings of the Fourteenth Workshop on Parallel and
+               Distributed Simulation},
+  pages     = {53--60},
+  year      = {2000},
+}
+
+@inproceedings{ross2013,
+  author    = {Barnes, Peter D. and Carothers, Christopher D. and
+               Jefferson, David R. and LaPre, Justin M.},
+  title     = {Warp Speed: Executing {Time Warp} on 1,966,080 Cores},
+  booktitle = {Proceedings of the 1st ACM SIGSIM Conference on Principles of
+               Advanced Discrete Simulation},
+  pages     = {327--336},
+  year      = {2013},
+  doi       = {10.1145/2486092.2486134},
+}
+
+% ---------------------------------------------------------------------------
+%  Agent-based modelling
+% ---------------------------------------------------------------------------
+
+@incollection{repasthpc2011,
+  author    = {Collier, Nicholson and North, Michael},
+  title     = {{Repast HPC}: A Platform for Large-Scale Agent-Based Modeling},
+  booktitle = {Large-Scale Computing Techniques for Complex System
+               Simulations},
+  chapter   = {5},
+  pages     = {81--109},
+  publisher = {John Wiley \& Sons, Ltd},
+  year      = {2011},
+  doi       = {10.1002/9781118130506.ch5},
+}
+
+@inproceedings{repast4py2022,
+  author    = {Collier, Nicholson and Ozik, Jonathan},
+  title     = {Distributed Agent-Based Simulation with {Repast4Py}},
+  booktitle = {2022 Winter Simulation Conference (WSC)},
+  pages     = {192--206},
+  year      = {2022},
+}
+
+% ---------------------------------------------------------------------------
+%  Concurrency control and memory models
+% ---------------------------------------------------------------------------
+
+@article{bernstein1981,
+  author  = {Bernstein, Philip A. and Goodman, Nathan},
+  title   = {Concurrency Control in Distributed Database Systems},
+  journal = {ACM Computing Surveys},
+  volume  = {13},
+  number  = {2},
+  pages   = {185--221},
+  year    = {1981},
+  doi     = {10.1145/356842.356846},
+}
+
+@inproceedings{batty2011c11,
+  author    = {Batty, Mark and Owens, Scott and Sarkar, Susmit and
+               Sewell, Peter and Weber, Tjark},
+  title     = {Mathematizing {C++} Concurrency},
+  booktitle = {Proceedings of the 38th Annual ACM SIGPLAN-SIGACT Symposium on
+               Principles of Programming Languages (POPL)},
+  pages     = {55--66},
+  year      = {2011},
+  doi       = {10.1145/1926385.1926394},
+}
+
+% ---------------------------------------------------------------------------
+%  Asynchronous runtimes and PGAS
+% ---------------------------------------------------------------------------
+
+@inproceedings{upcxx2019,
+  author    = {Bachan, John and Baden, Scott B. and Hofmeyr, Steven and
+               Jacquelin, Mathias and Kamil, Amir and Bonachea, Dan and
+               Hargrove, Paul H. and Ahmed, Hadia},
+  title     = {{UPC++}: A High-Performance Communication Framework for
+               Asynchronous Computation},
+  booktitle = {IEEE International Parallel and Distributed Processing
+               Symposium (IPDPS)},
+  year      = {2019},
+}
+
+@inproceedings{charmpp1993,
+  author    = {Kale, Laxmikant V. and Krishnan, Sanjeev},
+  title     = {{CHARM++}: A Portable Concurrent Object Oriented System Based
+               on {C++}},
+  booktitle = {Proceedings of the Eighth Annual Conference on Object-Oriented
+               Programming Systems, Languages, and Applications (OOPSLA)},
+  year      = {1993},
+}
+
+% ---------------------------------------------------------------------------
+%  Formal methods
+% ---------------------------------------------------------------------------
+
+@book{lamport2002tla,
+  author    = {Lamport, Leslie},
+  title     = {Specifying Systems: The {TLA+} Language and Tools for Hardware
+               and Software Engineers},
+  publisher = {Addison-Wesley},
+  year      = {2002},
+}
+
+@article{abadi1991,
+  author  = {Abadi, Mart\'{i}n and Lamport, Leslie},
+  title   = {The Existence of Refinement Mappings},
+  journal = {Theoretical Computer Science},
+  volume  = {82},
+  number  = {2},
+  pages   = {253--284},
+  year    = {1991},
+  doi     = {10.1016/0304-3975(91)90224-P},
+}
+
+% ---------------------------------------------------------------------------
+%  This system
+% ---------------------------------------------------------------------------
+
+@inproceedings{dstm2026,
+  author    = {Cassarino, Nicholas and Perarnau, Swann and Ozik, Jonathan and
+               Collier, Nicholson and Cook, Jamie and Brown, Kevin},
+  title     = {Distributed Shared Timestamped Memory},
+  booktitle = {(to appear)},
+  year      = {2026},
+  note      = {Argonne National Laboratory},
+}

@@ -1,0 +1,267 @@
+\section{Execution Model}
+\label{sec:execution-model}
+
+The memory model says what the store contains. The execution model says how
+\glspl{process} walk along the timeline reading and writing it, and what each
+must do so its neighbours can make progress.
+
+% ===========================================================================
+\subsection{Processes and the shape of a program}
+\label{sec:exec-shape}
+
+A DSTM program is one sequential program executed by every process. Each runs
+a single thread of control, occupies one point on the timeline at a time, and
+hosts no virtualised sub-entities: no logical processes, no migratable agents.
+Agents, if wanted, are built above DSTM with their state in the \gls{store}.
+
+The canonical shape is a loop over ticks:
+
+\begin{lstlisting}
+for (dstm_time_t t = 0; t < T; t++) {
+        /* 1. consume: read what neighbours made visible at t */
+        /* 2. compute: local work, arbitrary duration                */
+        /* 3. produce: publish results, visible at t + delta         */
+}
+dstm_barrier(last_time);
+\end{lstlisting}
+
+There is no \gls{barrier} at the tick boundary. \Glspl{process} leave the loop
+body at different wall-clock instants and reach tick $t+1$ at different
+instants; nothing resynchronises them.
+
+\begin{definition}[Program]\label{def:program}
+The \emph{program} of rank $p$ is the sequence of \glspl{operation} $p$ issues,
+ordered by $\po$ (\cref{def:history}). A program is \emph{well clocked} when
+that sequence has nondecreasing \glspl{origin-time}.
+\end{definition}
+
+The runtime does not check well-clockedness \devmark{dev:monotone-origin}. It
+is a program restriction (\cref{res:monotone}), and essentially every
+guarantee here is conditional on it.
+
+% ===========================================================================
+\subsection{Clocks and their publication}
+\label{sec:exec-clocks}
+
+Position on the \gls{logical-time} timeline is communicated implicitly: there
+is no ``advance to time $t$'' call. A process declares where it is by issuing
+an operation with origin time $t$; when that exceeds the clock, the runtime
+advances it and broadcasts a heartbeat to the \gls{neighbourhood}.
+
+\begin{definition}[Clock advance]\label{def:clock-advance}
+Issuing an operation with origin time $t > \clk{p}$ has the effect
+\[
+  \clk{p} \mathrel{{:}{=}} t,
+  \qquad
+  \text{heartbeat } \langle p, t \rangle \text{ sent to every } q \in \nbr{p}.
+\]
+Issuing with $t \le \clk{p}$ leaves the clock unchanged and sends nothing.
+\end{definition}
+
+Two things follow.
+
+First, \textbf{a silent process blocks its neighbours.} A process that stops issuing
+operations stops advancing its clock, so its neighbours' \glspl{known-time} for it
+stop rising, so the \glspl{version} those neighbours hold cannot be published. A process
+with nothing to say must still say it, by continuing to issue at increasing
+origin times or by entering the \gls{termination} barrier.
+
+Second, \textbf{the clock tracks origin time, not \gls{effective-time}.} A put with
+origin $t$ and \gls{delta} $\delta$ advances the clock to $t$, not to $t+\delta$
+\devmark{dev:clock-conflation}. This is the correct choice --- the clock's job
+is to report where the \emph{issuer} is, and the issuer is at $t$ --- but it
+means the largest effective time a process has produced can exceed its clock by
+an unbounded amount, which is exactly what \cref{res:horizon} constrains.
+
+\begin{definition}[Known-time update]\label{def:known-update}
+Every message carries its sender's identity $q$ and a stamp $t \le \clk{q}$.
+On receipt at $p$: $\kn{p}{q} \mathrel{{:}{=}} \max(\kn{p}{q}, t)$.
+\end{definition}
+
+The stamp is a \emph{lower} bound on the sender's clock, not necessarily equal
+to it: a reply to a read is stamped with the read's \gls{effective-time}
+rather than the responder's clock. Taking the maximum makes known times
+monotone, and \cref{inv:clock-soundness} makes them sound. Underestimating is
+harmless where overestimating would not be:
+
+\begin{proposition}[Conservatism of known times]\label{prop:conservative}
+Both promotion guards of \cref{sec:publication} are monotone in the known
+times: lowering any $\kn{p}{q}$ can only prevent a promotion, never cause one.
+Consequently an implementation that underestimates neighbour clocks is
+\emph{safe but possibly slow}, whereas one that overestimates them is
+\emph{unsound}.
+\end{proposition}
+
+% ===========================================================================
+\subsection{Issue, completion and blocking}
+\label{sec:exec-blocking}
+
+The two \glspl{operation} differ in the gap between \gls{issue} and
+\gls{completion}, and the asymmetry is deliberate.
+
+\begin{description}[leftmargin=0.9cm,style=nextline,font=\normalfont\bfseries]
+\item[A put is asynchronous.]
+  It returns as soon as the payload has been copied out of the caller's
+  buffer. It carries no result and cannot report a delivery failure. Its
+  effect on the store is settled later, possibly long after the issuing process
+  has moved on. A program therefore has no way to observe that its own put has
+  landed, other than by reaching \gls{quiescence}.
+
+\item[A get is synchronous.]
+  It does not return until the requested version has been published and its
+  bytes copied into the caller's buffer. While waiting it drives the runtime's
+  progress engine, so a blocked process continues to serve its neighbours'
+  requests, forward messages and promote its own versions. This is what keeps
+  a blocked get from becoming a deadlock in the common case.
+\end{description}
+
+\begin{remark}[Blocking is where drift is absorbed]
+A get is the only place a DSTM program waits, and its duration is exactly how
+far the reader has run ahead of the producer it reads. Versioning, distance
+bounds and \glspl{heartbeat} all exist to make that wait as short as the
+application's real data dependence requires.
+\end{remark}
+
+% ===========================================================================
+\subsection{The task grid and drift}
+\label{sec:exec-grid}
+
+Picture an execution as a grid: one row per rank, one column per tick, one
+\emph{task} per \gls{cell}. The task $\task{p}{t}$ is the work $\proc{p}$
+performs at origin time $t$ --- one loop iteration. \Glspl{operation} create
+edges between tasks, weighted by their \gls{delta}.
+
+\begin{definition}[Task]\label{def:task}
+A \emph{task} $\task{p}{t}$ is the set of operations issued by $p$ with origin
+time $t$, together with the local computation between them. Its \emph{work}
+$\work{p}{t} \ge 0$ is the wall-clock duration of that computation.
+\end{definition}
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+  x=17mm, y=-12mm,
+  every node/.style={font=\scriptsize},
+  tk/.style={draw,rounded corners=1.5pt,minimum width=11mm,minimum height=6mm,
+             fill=resbg,draw=dstmblue,inner sep=1pt},
+  >={Stealth[round]},
+]
+  % tick axis
+  \foreach \t in {0,1,2,3,4} {
+    \node[text=dstmgrey] at (\t,-0.75) {$t=\t$};
+  }
+  % process rows
+  \foreach \r/\name/\last in {0/r_0/4, 1/r_1/3, 2/r_2/2, 3/r_3/3} {
+    \node[text=dstmgrey,anchor=east] at (-0.55,\r) {$\name$};
+    \draw[dstmgrey!40] (-0.35,\r) -- (4.6,\r);
+    \foreach \t in {0,...,\last} { \node[tk] (n\r-\t) at (\t,\r) {$\t$}; }
+  }
+  % put edges: forward in time, to a neighbour  (solid)
+  \draw[->,thick,dstmblue] (n0-1) -- node[above right,inner sep=1pt]{$+1$} (n1-2);
+  \draw[->,thick,dstmblue] (n1-1) -- node[above right,inner sep=1pt]{$+1$} (n2-2);
+  \draw[->,thick,dstmblue] (n3-1) -- node[below right,inner sep=1pt]{$+1$} (n2-2);
+  \draw[->,thick,dstmblue] (n0-2) -- (n3-3);
+  % get edges: backward in time, from a neighbour (dashed)
+  \draw[->,thick,dashed,dstmred] (n1-2) to[bend left=18] (n0-3);
+  \draw[->,thick,dashed,dstmred] (n2-2) to[bend right=18] (n3-3);
+  % drift bracket
+  \draw[decorate,decoration={brace,amplitude=4pt},dstmamber,thick]
+       (2.55,2.35) -- (4.45,2.35)
+       node[midway,below=4pt,text=dstmamber]{drift of $r_0$ over $r_2$};
+\end{tikzpicture}
+\caption{An execution as a task grid, for a four-process ring with all distances
+equal to $1$. Solid edges are puts (forward in time, into a neighbour's
+region); dashed edges are gets (backward in time, out of a neighbour's
+region). Process $r_0$ has reached tick $4$ while $r_2$ is still at tick $2$:
+they have drifted apart by two ticks and neither has rolled back or waited at
+a barrier. The edges, not the rows, are what constrain the schedule.}
+\label{fig:task-grid}
+\end{figure}
+
+\Cref{fig:task-grid} makes the central claim visible: rows are independent,
+and the only coupling is the edges, every one of which spans at least one tick
+because every \gls{distance} is at least one. A process is never blocked by
+\emph{where} its neighbours are, only by \emph{what} they have already
+produced.
+
+\begin{definition}[Bounded drift]\label{def:bounded-drift}
+An execution has \emph{bounded drift} $\Theta$ when
+$|\drift{p}{q}| \le \Theta$ for every $p$ and every $q \in \nbr{p}$
+throughout. Drift between non-neighbours is unconstrained and unobservable.
+\end{definition}
+
+Drift is not bounded by the model but by the application's own data
+dependences: a process reading from a neighbour every tick cannot outrun it by
+more than the \gls{distance} between them. \Cref{thm:space-bound} shows memory
+consumption is a function of drift, which is the reason to care.
+
+% ===========================================================================
+\subsection{Session lifecycle}
+\label{sec:exec-lifecycle}
+
+\begin{figure}[htbp]
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tikzpicture}[
+  node distance=6mm and 9mm,
+  every node/.style={font=\scriptsize},
+  ph/.style={draw,rounded corners=2pt,minimum height=8mm,align=center,
+             inner xsep=4pt,draw=dstmblue,fill=resbg},
+  >={Stealth[round]},
+]
+  \node[ph] (init)  {\code{dstm\_init}};
+  \node[ph,right=of init]  (start) {\code{dstm\_start}$(\Dmat)$};
+  \node[ph,right=of start] (mk)    {\code{darray/dgraph}\\\code{\_create}};
+  \node[ph,right=of mk]    (loop)  {tick loop\\\code{put}/\code{get}};
+  \node[ph,right=of loop]  (fini)  {\code{dstm\_fini}$(\ell)$};
+  \node[ph,right=of fini]  (final) {\code{dstm\_finalize}};
+  \foreach \a/\b in {init/start,start/mk,mk/loop,loop/fini,fini/final}
+    { \draw[->,thick] (\a) -- (\b); }
+  \draw[->,thick,dstmteal] (fini.south) .. controls +(0,-7mm) and +(0,-7mm) ..
+       node[below,text=dstmteal]{further sessions} (start.south);
+
+  \begin{scope}[on background layer]
+    \node[fit=(start)(fini),draw=dstmteal,dashed,rounded corners,
+          inner sep=5pt,label={[text=dstmteal,font=\scriptsize]above:session}] {};
+  \end{scope}
+\end{tikzpicture}}
+\caption{Session lifecycle. The distance matrix and every region are fixed
+between \code{dstm\_start} and \code{dstm\_fini}; changing topology means
+closing the session and opening another.}
+\label{fig:lifecycle}
+\end{figure}
+
+The restrictions attach to different scopes: \cref{res:collective} to the
+whole process lifetime; \crefrange{res:monotone}{res:phase} and
+\cref{res:write-disjoint} to a single \gls{session}; \cref{res:terminate} to
+the transition out of one.
+
+% ===========================================================================
+\subsection{The two synchronisation idioms}
+\label{sec:exec-idioms}
+
+The API admits many \gls{delta} choices; applications use two, and both
+benchmark applications in \cite{dstm2026} use one of them exclusively.
+
+\begin{center}
+\small
+\begin{tabular}{@{}lll@{}}
+\toprule
+ & \textbf{Pull} & \textbf{Push} \\
+\midrule
+Producer $p$ writes & own region, $\delta = 0$
+                    & neighbour $q$'s region, $\delta = +\dist{p}{q}$ \\
+Consumer $q$ reads  & $p$'s region, $\delta = -\dist{p}{q}$
+                    & own region, $\delta = 0$ \\
+Data movement       & on demand, at read time & eager, at write time \\
+Messages per pair   & two (request, reply)    & one \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+They look like opposites, but the value produced by $\proc{p}$ at tick $t$
+becomes available to $\proc{q}$ at tick $t + \dist{p}{q}$ in both cases: the
+\gls{distance}, not the direction of data movement, sets the pipeline depth.
+\Cref{thm:pipeline-depth} states this precisely. The choice is therefore a
+communication-cost decision --- one message versus two --- never a semantic
+one.

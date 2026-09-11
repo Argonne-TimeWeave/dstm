@@ -1,0 +1,441 @@
+\section{\texorpdfstring{$\Lzm$}{L0}: Axiomatic Semantics}
+\label{sec:l0}
+
+% ===========================================================================
+\subsection{Histories}
+\label{sec:l0-histories}
+
+Everything here is a function of the \gls{history} (\cref{def:history}): the
+\glspl{operation} issued, ordered per rank. No timing, message order or
+interleaving is an input.
+
+\begin{notationx}\label{not:history}
+Throughout, $\Hist$ is a history over a rank set $\Ranks$ with a distance
+well-formed \gls{comm-graph} $\cgraph$ (\cref{def:metric-closure}). We write $\Hist_{\opput}$ and
+$\Hist_{\opget}$ for the \glspl{put} and \glspl{get} in $\Hist$, and
+$\Hist|_p \defeq \{o \in \Hist : \opsrc{o} = p\}$ for the operations issued by
+process $\proc{p}$, totally ordered by $\po$.
+\end{notationx}
+
+% ===========================================================================
+\subsection{Restrictions}
+\label{sec:l0-restrictions}
+
+A history is not automatically meaningful. DSTM buys its simple memory model
+by pushing the difficulty onto the program, as eight restrictions in three
+groups:
+
+
+
+\begin{description}[leftmargin=1.1cm,style=nextline,font=\normalfont\bfseries]
+  \item[Semantic] \cref{res:write-disjoint} alone makes the store well
+    defined. Without it ``the'' value of a \gls{cell} does not exist, and
+    there is nothing to be correct \emph{about}.
+  \item[Mechanical] \cref{res:monotone,res:lookahead,res:staleness,res:phase}
+    make the store \emph{computable} by the mechanism of \cref{sec:l1}. A
+    program violating them has a well-defined meaning DSTM cannot deliver.
+  \item[Resource and lifecycle] \cref{res:horizon,res:collective,%
+    res:terminate} bound memory and govern \gls{session} structure.
+\end{description}
+
+None of the eight is currently checked by the implementation; see
+\crefrange{dev:zero-distance}{dev:barrier-doc}. \Cref{ch:restrictions}
+collects them with proposed runtime checks.
+
+\subsubsection*{Mechanical restrictions}
+
+\begin{restr}[Monotone origin time]\label{res:monotone}
+For every process $\proc{p}$ and every $o_1, o_2 \in \Hist|_p$ with $o_1 \po o_2$,
+\[
+  \optime{o_1} \le \optime{o_2}.
+\]
+Equivalently: a process never moves backwards along the timeline.
+\devmark{dev:monotone-origin}
+\end{restr}
+
+\begin{restr}[Lookahead]\label{res:lookahead}
+For every put $o \in \Hist_{\opput}$ with $p = \opsrc{o}$ and
+$q = \optgt{o}$,
+\[
+  \opdelta{o} \;\ge\; \dist{p}{q},
+  \qquad\text{and}\qquad
+  q \in \nbr{p} \ \text{ or }\ q = p .
+\]
+By (M2) the local case degenerates to $\opdelta{o} \ge 0$.
+\devmark{dev:lookahead-uncheck}
+\end{restr}
+
+\begin{restr}[Staleness bound]\label{res:staleness}
+For every get $o \in \Hist_{\opget}$ with $p = \opsrc{o}$ and
+$q = \optgt{o}$,
+\[
+  -\opdelta{o} \;\le\; \dist{p}{q},
+  \qquad\text{and}\qquad
+  q \in \nbr{p} \ \text{ or }\ q = p .
+\]
+The local case degenerates to $\opdelta{o} \le 0$ combined with
+$-\opdelta{o} \le 0$, hence $\opdelta{o} = 0$: a process reading its own \gls{region}
+may only read its current effective time.
+\devmark{dev:lookahead-uncheck}
+\end{restr}
+
+\Cref{res:lookahead,res:staleness} are duals, and reading them together is the
+key to the whole model:
+
+\begin{center}
+\emph{The \gls{distance} is a lower bound on how long a write takes to
+become visible,\\ and an upper bound on how far back a read may look.}
+\end{center}
+
+A write may take longer than $\dist{p}{q}$ and a read may look back less far;
+what neither may do is beat the distance. Everything in \cref{sec:l1} is a
+consequence.
+
+\begin{restr}[Phase order]\label{res:phase}
+For every process $\proc{p}$ and every $w \in \Hist_{\opput} \cap \Hist|_p$,
+$g \in \Hist_{\opget} \cap \Hist|_p$ with
+$\optgt{w} = \optgt{g}$ and $\opeff{w} = \opeff{g}$,
+\[
+  w \po g .
+\]
+That is: within one process, every write to a given version is issued before any
+read of that version. \devmark{dev:phase-strictness}
+\end{restr}
+
+\Cref{res:phase} is stated per rank, which looks too weak: surely a
+\emph{remote} write arriving after a read is served is equally fatal? It is,
+but cannot happen.
+
+\begin{proposition}[Minimality of the phase restriction]
+\label{prop:phase-minimality}
+Let $\Hist$ satisfy \cref{res:monotone,res:lookahead,res:phase}, and let
+$g$ be a get targeting $(q,\eff)$ and $w$ a put targeting $(q,\eff)$ with
+$\opsrc{w} \ne \opsrc{g}$. If $\opsrc{w} \ne q$ then
+$\optime{w} \le \eff - \dist{\opsrc{w}}{q} < \eff$, whereas any operation
+issued by $\opsrc{w}$ after a read of $(q,\eff)$ could be served has origin
+time at least $\eff$. Hence the cross-process case of the phase order is implied,
+and the per-rank statement of \cref{res:phase} is the only genuine
+restriction.
+\end{proposition}
+
+\begin{proof}
+By \cref{res:lookahead}, $\opdelta{w} \ge \dist{\opsrc{w}}{q} \ge 1$ using
+(M2) and $\opsrc{w} \ne q$. Since $\opeff{w} = \optime{w} + \opdelta{w} =
+\eff$, we get $\optime{w} \le \eff - 1 < \eff$. By \cref{res:monotone} the
+\glspl{origin-time} of $\opsrc{w}$ are nondecreasing, so every put by $\opsrc{w}$
+targeting $(q,\eff)$ occurs while that process's clock is still at most
+$\eff - 1$. The publish guard of \cref{sec:l1-rules} does not fire until every
+neighbour's \gls{known-time} $\kn{q}{r}$ satisfies $\kn{q}{r} + \dist{q}{r} > \eff$,
+which for $r = \opsrc{w}$ requires $\opsrc{w}$ to have advanced strictly past
+$\eff - \dist{q}{\opsrc{w}}$, i.e.\ past the last origin time at which it
+could have produced such a put.
+
+The remaining case is $\opsrc{w} = q \ne \opsrc{g}$, a local put on the target
+process concurrent with a remote read. By \cref{res:staleness} applied to $g$,
+$\eff \le \optime{g} - \dist{\opsrc{g}}{q} < \optime{g}$, and the read cannot
+be served before $q$'s own clock reaches $\eff$; a local put at $\eff$ issued
+after that point would violate \cref{res:monotone} unless it has
+$\opdelta{} = 0$ and origin exactly $\eff$, which is the case
+\cref{res:phase} governs on process $\proc{q}$ itself.
+\end{proof}
+
+This explains a puzzling feature of the implementation: the publish guard
+tests $\clk{p} \ge \eff$, not $\clk{p} > \eff$
+\devmark{dev:phase-strictness}. The non-strict test leaves exactly one hole
+--- a local, zero-\gls{delta} write at the process's current time --- and
+\cref{res:phase} plugs that hole and nothing more. A strict guard would close
+it automatically but forbid a process from reading its own current tick, which
+is the entire \glslink{push-model}{push idiom} (\cref{sec:exec-idioms}).
+
+\subsubsection*{Semantic restriction}
+
+\begin{restr}[Write disjointness]\label{res:write-disjoint}
+For all distinct $w_1, w_2 \in \Hist_{\opput}$,
+\[
+  \fpw{w_1} \cap \fpw{w_2} = \emptyset .
+\]
+Equivalently: every cell is written at most once in the entire execution.
+\devmark{dev:write-disjoint}
+\end{restr}
+
+Because a \gls{cell} carries an \gls{effective-time}, this is weaker than it
+sounds: two writes to one address at different ticks do not conflict, only two
+at the same tick. The \glslink{mailbox}{mailbox idiom}
+(\cref{sec:gloss-idioms}) discharges it structurally.
+
+\subsubsection*{Resource and lifecycle restrictions}
+
+\begin{restr}[Bounded horizon]\label{res:horizon}
+There is a constant $\Theta_{\max}$ such that $\opdelta{o} \le \Theta_{\max}$
+for every $o \in \Hist_{\opput}$.
+\end{restr}
+
+This affects no result about values; only \cref{thm:space-bound} needs it. A
+put with unbounded \gls{delta} creates a version that stays writable
+indefinitely, and memory grows without limit.
+
+\begin{restr}[Collective agreement]\label{res:collective}
+Every collective entry point --- session start and end, the \gls{termination}
+\gls{barrier}, and the creation of any derived structure --- is invoked by every
+process, the same number of times, in the same order, with matching arguments.
+\devmark{dev:noncollective}
+\end{restr}
+
+\begin{restr}[Termination bound]\label{res:terminate}
+The argument $\ell$ passed to the terminating barrier satisfies
+\[
+  \ell \;\ge\; \max_{o \in \Hist} \opeff{o},
+\]
+and every process passes the same $\ell$. \devmark{dev:clock-conflation}
+\end{restr}
+
+\begin{definition}[Legality]\label{def:legal}
+$\Legal{\Hist}$ holds when $\Hist$ satisfies
+\crefrange{res:monotone}{res:terminate}.
+\end{definition}
+
+% ===========================================================================
+\subsection{The store}
+\label{sec:l0-store}
+
+With legality in hand the semantics is a single equation.
+
+\begin{definition}[Denotation of a history]\label{def:store-h}
+For a history $\Hist$ satisfying \cref{res:write-disjoint}, the store
+$\StoreH : \Cells \to \Bytes$ is
+\[
+  \StoreH\bigl(\cell{q}{\eff}{a}\bigr) \;\defeq\;
+  \begin{cases}
+    v_j
+      & \text{if } \exists\, w = \Put{p}{q}{t}{\delta}{a_0}{v} \in \Hist
+        \text{ with } t + \delta = \eff \\[-1pt]
+      & \text{and } j = a - a_0 \in \{0, \dots, |v| - 1\}, \\[4pt]
+    0 & \text{otherwise.}
+  \end{cases}
+\]
+\end{definition}
+
+\begin{lemma}[Well-definedness]\label{lem:store-welldef}
+If $\Hist$ satisfies \cref{res:write-disjoint} then $\StoreH$ is a
+well-defined total function.
+\end{lemma}
+
+\begin{proof}
+Totality is immediate from the second clause. For single-valuedness, suppose
+two puts $w_1 \ne w_2$ both satisfy the first clause for the cell
+$c = \cell{q}{\eff}{a}$. Then $c \in \fpw{w_1}$ and $c \in \fpw{w_2}$ by
+\cref{def:footprint}, contradicting \cref{res:write-disjoint}.
+\end{proof}
+
+\Cref{def:store-h} is the whole of the DSTM memory semantics: no clocks, no
+distances, no \glspl{version}, no statuses, no messages. Those exist in
+\cref{sec:l1} solely to compute this function without a global \gls{barrier}.
+
+\begin{definition}[Read result]\label{def:read-result}
+A get $g = \Get{p}{q}{t}{\delta}{a}{\ell}$ \emph{returns}
+\[
+  \StoreH(\cell{q}{t+\delta}{a})
+  \;\cdots\;
+  \StoreH(\cell{q}{t+\delta}{a+\ell-1}).
+\]
+\end{definition}
+
+\begin{definition}[Default-valued read]\label{def:get-or-default}
+A default-valued get carries an extra argument $d \in \Values$ with $|d| =
+\ell$ and returns $d$ when $t + \delta < 0$, and behaves as
+\cref{def:read-result} otherwise. This is the only construct that consults the
+sign of an effective time; it exists so that the first ticks of a simulation,
+whose producers have no history yet, need not be special-cased by the
+application.
+\end{definition}
+
+\begin{definition}[Reads-from]\label{def:reads-from}
+$w \rf g$ holds when $w \in \Hist_{\opput}$, $g \in \Hist_{\opget}$ and
+$\fpw{w} \cap \fpr{g} \ne \emptyset$. By \cref{res:write-disjoint} each byte
+returned by $g$ is supplied by at most one such $w$; bytes with no such $w$
+read as $0$.
+\end{definition}
+
+% ===========================================================================
+\subsection{Determinacy}
+\label{sec:l0-determinacy}
+
+$\StoreH$ depends on $\Hist$ alone, so fixing the \gls{history} fixes every
+read. The question is whether the history itself is fixed: control flow
+depends on what is read, which depends on what others wrote. The restrictions
+make that circle well founded.
+
+\begin{definition}[Deterministic program]\label{def:det-program}
+A program is \emph{deterministic} when the operation each process issues next,
+and the values it writes, are functions of that process's inputs and of the
+values it has read so far.
+\end{definition}
+
+\begin{theorem}[Determinacy]\label{thm:determinism}
+Let $P$ be a deterministic program all of whose executions are legal
+(\cref{def:legal}). Then $P$ has a unique history $\Hist(P)$ and a unique
+store $\Sigma_{\Hist(P)}$. In particular, every read returns the same value in
+every execution, independently of scheduling, message order, and the relative
+progress of processes.
+\end{theorem}
+
+\begin{proof}
+Order operations by the lexicographic process
+$\rho(o) \defeq \bigl(\opeff{o},\, \iota(o)\bigr)$, where $\iota(o)$ is the
+position of $o$ in the \gls{program-order} of $\opsrc{o}$. We show that the value
+returned by a get $g$ depends only on operations of strictly smaller $\rho$,
+so that $\Hist(P)$ is determined by induction.
+
+Let $g$ be a get targeting $(q,\eff)$ and let $w$ be any put with
+$\fpw{w} \cap \fpr{g} \ne \emptyset$; then $\optgt{w} = q$ and
+$\opeff{w} = \eff$, so the first components agree. Two cases.
+
+\emph{Case $\opsrc{w} \ne \opsrc{g}$.} By \cref{prop:phase-minimality}, $w$ is
+issued by a process whose clock is strictly below $\eff$ at the time, while $g$'s
+issuer has clock at least $\eff$; the two are ordered by the causal chain of
+\glspl{heartbeat}, and $w$'s issue necessarily precedes $g$'s completion. Its value
+therefore depends only on reads that $\opsrc{w}$ performed at origin times
+$\le \eff - \dist{\opsrc{w}}{q} < \eff$, all of strictly smaller first
+component by (M2).
+
+\emph{Case $\opsrc{w} = \opsrc{g} = p$.} Then $\optgt{w} = q$ and
+$\opeff{w} = \opeff{g}$, so \cref{res:phase} gives $w \po g$, hence
+$\iota(w) < \iota(g)$ and $\rho(w) < \rho(g)$.
+
+In both cases every put contributing to $g$'s result has strictly smaller
+$\rho$. The relation is well founded because \glspl{effective-time} are bounded below
+by $0$ on any version that exists and program-order positions are natural
+numbers. Determinism of $P$ then fixes each successive operation, and
+\cref{lem:store-welldef} fixes each read result.
+\end{proof}
+
+\begin{corollary}[Equivalence with lockstep execution]\label{thm:bsp}
+Let $P$ be as in \cref{thm:determinism}, and let $\mathrm{BSP}(P)$ be the
+execution in which every process completes tick $t$ and passes a global barrier
+before any process begins tick $t+1$. Then $\mathrm{BSP}(P)$ is a legal execution
+of $P$ and produces $\Sigma_{\Hist(P)}$. Consequently every DSTM execution of
+$P$ returns exactly the values the barrier-synchronised execution would.
+\end{corollary}
+
+\begin{proof}
+$\mathrm{BSP}(P)$ satisfies every restriction, since a global barrier at each
+tick boundary only adds ordering. By \cref{thm:determinism} the history is
+unique, so $\mathrm{BSP}(P)$ realises $\Hist(P)$.
+\end{proof}
+
+\Cref{thm:bsp} licenses the whole design: removing the per-tick \gls{barrier}
+and letting \glspl{process} drift changes \emph{when} work happens and
+\emph{how much memory} is live, provably not \emph{what is computed}. Unlike
+optimistic simulation nothing is ever discarded, because nothing is ever
+wrong.
+
+% ===========================================================================
+\subsection{Objects as transition systems}
+\label{sec:l0-ts}
+
+The \gls{store} is static; what moves are the clocks, known times and
+\glspl{version-status}. Each is a transition system, and \cref{sec:l1}'s
+global system is their composition. Separating them shows which invariants are
+local and which belong to the composition.
+
+\begin{definition}[Transition system]\label{def:ts}
+A \emph{transition system} is a tuple
+$\TS{} = \langle \States, \Init, \Labels, \steps \rangle$ with $\States$ a set
+of states, $\Init \in \States$ the initial state, $\Labels$ a set of labels
+and ${\steps} \subseteq \States \times \Labels \times \States$. We write
+$s \stepl{\lambda} s'$ for $(s,\lambda,s') \in {\steps}$.
+\end{definition}
+
+\begin{definition}[Clock]\label{ts:clock}
+$\TS{\mathrm{clk}}(p) \defeq \langle \Time,\; 0,\;
+ \{\optick(t) : t \in \Time\},\; \steps \rangle$ with
+\[
+  c \stepl{\optick(t)} t \quad\text{iff}\quad t > c .
+\]
+Monotone and deterministic in the label.
+\end{definition}
+
+\begin{definition}[Known time]\label{ts:known}
+$\TS{\mathrm{kn}}(p,q) \defeq \langle \Time,\; 0,\;
+ \{\mathsf{hear}(t) : t \in \Time\},\; \steps \rangle$ with
+\[
+  k \stepl{\mathsf{hear}(t)} \max(k, t).
+\]
+Total --- every label is enabled in every state --- and monotone.
+\end{definition}
+
+\begin{definition}[Version status]\label{ts:version}
+$\TS{\mathrm{st}}(p,\eff) \defeq \langle \Status,\; \Absent,\;
+ \{\mathsf{create}, \mathsf{publish}, \mathsf{retire}, \mathsf{evict}\},\;
+ \steps \rangle$ with
+\[
+  \Absent \stepl{\mathsf{create}} \Wr
+  \stepl{\mathsf{publish}} \Rd
+  \stepl{\mathsf{retire}} \Dc
+  \stepl{\mathsf{evict}} \Absent .
+\]
+Every transition is monotone in the order of \cref{def:status} except
+$\mathsf{evict}$, which returns the system to $\Absent$. That single
+non-monotone edge is why \cref{thm:discard-safety} is needed: it must be
+impossible to distinguish an evicted version from one that never existed,
+which holds exactly when nothing will ever ask for it again.
+\end{definition}
+
+\begin{definition}[Cell]\label{ts:cell}
+$\TS{\mathrm{cell}}(c) \defeq \langle \Bytes,\; 0,\;
+ \{\mathsf{write}(v) : v \in \Bytes\},\; \steps \rangle$ with
+$b \stepl{\mathsf{write}(v)} v$, subject to the guard that
+$\mathsf{write}$ is enabled only while the enclosing version's status is
+$\Wr$. Under \cref{res:write-disjoint} at most one $\mathsf{write}$ ever
+occurs, so the reachable states are exactly $\{0\} \cup \{v\}$ and the
+system is confluent.
+\end{definition}
+
+\begin{definition}[Allocation]\label{ts:alloc}
+$\TS{\mathrm{alloc}}(p) \defeq \langle \States,\; \emptyset,\;
+ \{\mathsf{alloc}(n,h,I), \mathsf{free}(h)\},\; \steps \rangle$, where
+$\States$ is the set of well-formed allocation states
+(\cref{def:allocation}) and
+\[
+  \allocof{p} \stepl{\mathsf{alloc}(n,h,I)} \allocof{p}[\,I \mapsto h\,],
+  \qquad
+  \allocof{p} \stepl{\mathsf{free}(h)} \restrict{\allocof{p}}{\Addrof{p}
+    \setminus \extent{p}{h}},
+\]
+the first enabled when $h$ is fresh and $I$ is a length-$n$ interval disjoint
+from $\live{p}$. The label carries $I$: the system is \emph{nondeterministic},
+and every resolution of that nondeterminism is a conforming allocator
+(\cref{rem:alloc-policy}).
+\end{definition}
+
+\begin{remark}[Where the difficulty lives]
+Each of \crefrange{ts:clock}{ts:alloc} is trivial in isolation: two monotone
+counters, a four-state chain, a single-assignment register and a disjointness
+bookkeeper. All the difficulty is in the \emph{guards} coupling them --- when
+$\mathsf{publish}$ and $\mathsf{retire}$ may fire, which is a question about
+other processes. \Cref{sec:l1} supplies them.
+\end{remark}
+
+\Cref{ts:alloc} is the one object with no such guard: allocation is purely
+local, involves no message and constrains no other process. That is why it
+does not appear in \cref{sec:l1-rules} --- its work is done before any
+operation is issued.
+
+% ===========================================================================
+\subsection{The correctness criterion}
+\label{sec:l0-correctness}
+
+\begin{definition}[Correct implementation]\label{def:correctness}
+An implementation is \emph{correct} if, for every deterministic program $P$
+all of whose executions are legal, every execution of $P$
+\begin{enumerate}[label=(\roman*),leftmargin=1.4cm]
+  \item terminates, with every get having completed, and
+  \item returns, for each get, the bytes prescribed by
+    \cref{def:read-result} with respect to $\Sigma_{\Hist(P)}$.
+\end{enumerate}
+\end{definition}
+
+Clause (ii) is safety and is discharged by \cref{thm:read-soundness}; clause
+(i) is liveness and is discharged by \cref{thm:deadlock-freedom} together with
+\cref{thm:barrier-correct}. Both are proved against $\Lom$ in the next
+section.

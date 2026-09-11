@@ -88,3 +88,10 @@ __pycache__
 
 # tooling
 /.cache*
+
+# spec (LaTeX): the blanket `*` rule above hides extensionless files, so the
+# build driver and its config must be re-included explicitly. Build artifacts
+# all land in spec/build/, which is ignored wholesale.
+!spec/Makefile
+!spec/.latexmkrc
+spec/build/

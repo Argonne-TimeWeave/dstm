@@ -1,0 +1,268 @@
+% ============================================================================
+%  Glossary entries.
+%
+%  These declare the *keys* used by \gls{...} throughout the document, and the
+%  text each key expands to. The authoritative treatment of every term --- the
+%  prose reading plus the formal definition --- lives in section 1.1, and that
+%  is where \gls{...} hyperlinks to: the \term macro emits the \glstarget
+%  anchor for the corresponding key.
+%
+%  Consequently no generated glossary is printed. Section 1.1 *is* the
+%  glossary; this file exists so that \gls, \glspl, \Gls and \Glspl know what
+%  to typeset and where to point.
+%
+%  To add a term:
+%    1. add a \newglossaryentry here;
+%    2. add \term{<key>}{<Heading>} at its treatment in 01a-glossary.tex,
+%       or \alsoterm{<key>} if it shares a heading with another term.
+% ============================================================================
+
+% ---------------------------------------------------------------------------
+%  Identity and structure
+% ---------------------------------------------------------------------------
+\newglossaryentry{process}{
+  name={process},
+  plural={processes},
+  description={One participant in a distributed simulation: a running instance
+    of the program. Processes are the entities that own memory, advance along
+    the timeline and issue operations}}
+
+\newglossaryentry{rank}{
+  name={rank},
+  description={An integer in [0,n) naming a process uniquely; the index by
+    which every structure in the model is addressed}}
+
+\newglossaryentry{session}{
+  name={session},
+  description={A maximal interval during which the distance matrix and every
+    region size are fixed}}
+
+\newglossaryentry{region}{
+  name={region},
+  description={The flat, byte-addressable slab of versioned memory owned by
+    one process}}
+
+\newglossaryentry{address-space}{
+  name={address space},
+  plural={address spaces},
+  description={The set of byte offsets valid within a given region}}
+
+\newglossaryentry{allocation}{
+  name={allocation},
+  plural={allocations},
+  description={A contiguous run of addresses reserved for one data structure;
+    a property of addresses, uniform across all versions}}
+
+\newglossaryentry{pointer}{
+  name={pointer},
+  description={A (region, offset) pair naming a location; the region
+    identifier is also the owning process}}
+
+% ---------------------------------------------------------------------------
+%  Time
+% ---------------------------------------------------------------------------
+\newglossaryentry{logical-time}{
+  name={logical time},
+  description={Simulation time; the shared timeline along which all processes
+    advance, unrelated to wall-clock time}}
+
+\newglossaryentry{origin-time}{
+  name={origin time},
+  description={The point on the timeline at which the issuing process sits when
+    it issues an operation}}
+
+\newglossaryentry{delta}{
+  name={delta},
+  description={The signed displacement separating when an operation happens
+    from when its effect is visible}}
+
+\newglossaryentry{effective-time}{
+  name={effective time},
+  description={Origin time plus delta; the version an operation actually
+    touches}}
+
+\newglossaryentry{local-clock}{
+  name={local clock},
+  description={The furthest point along the timeline a process has declared
+    itself to be at; monotone, and published to neighbours}}
+
+\newglossaryentry{known-time}{
+  name={known time},
+  description={A process's current lower bound on a neighbour's local clock}}
+
+\newglossaryentry{drift}{
+  name={drift},
+  description={The clock skew between two processes}}
+
+\newglossaryentry{mvt}{
+  name={minimum virtual time},
+  description={The oldest version a process still holds}}
+
+% ---------------------------------------------------------------------------
+%  Locality
+% ---------------------------------------------------------------------------
+\newglossaryentry{comm-graph}{
+  name={communication graph},
+  plural={communication graphs},
+  description={The declaration of which pairs of processes may exchange
+    operations, and what each such channel costs in simulated time}}
+
+\newglossaryentry{distance}{
+  name={distance},
+  plural={distances},
+  description={The least total channel weight joining two processes; an
+    extended metric on the set of processes}}
+
+\newglossaryentry{distance-matrix}{
+  name={distance matrix},
+  plural={distance matrices},
+  description={The API-level encoding of a communication graph as an
+    n-by-n integer matrix, with -1 marking the absence of a channel}}
+
+\newglossaryentry{reachability}{
+  name={reachability},
+  description={The relation holding between two processes that the distance matrix
+    assigns a distance}}
+
+\newglossaryentry{neighbourhood}{
+  name={neighbourhood},
+  description={The set of ranks naming the processes reachable from a given process}}
+
+\newglossaryentry{lookahead}{
+  name={lookahead},
+  description={The guarantee that nothing a process does now can affect a
+    neighbour's state sooner than the distance between them}}
+
+\newglossaryentry{heartbeat}{
+  name={heartbeat},
+  description={A contentless message publishing a process's clock advance to its
+    neighbourhood}}
+
+% ---------------------------------------------------------------------------
+%  State
+% ---------------------------------------------------------------------------
+\newglossaryentry{cell}{
+  name={cell},
+  description={The smallest unit of DSTM state, identified by rank, effective
+    time and offset}}
+
+\newglossaryentry{version}{
+  name={version},
+  description={The whole of one process's region at one effective time; the unit
+    the runtime allocates, publishes and reclaims}}
+
+\newglossaryentry{version-status}{
+  name={version status},
+  plural={version statuses},
+  description={A version's position in the one-way progression absent,
+    writable, readable, discardable}}
+
+\newglossaryentry{store}{
+  name={versioned store},
+  description={The total map from versioned cells to bytes; the object the
+    memory model is about}}
+
+\newglossaryentry{publication}{
+  name={publication},
+  description={The promotion of a version to readable, after which its
+    contents are immutable}}
+
+% ---------------------------------------------------------------------------
+%  Operations
+% ---------------------------------------------------------------------------
+\newglossaryentry{operation}{
+  name={operation},
+  description={A one-sided read or write against the versioned store}}
+
+\newglossaryentry{put}{
+  name={put},
+  description={A write operation, carrying a non-negative delta}}
+
+\newglossaryentry{get}{
+  name={get},
+  description={A read operation, carrying a non-positive delta}}
+
+\newglossaryentry{footprint}{
+  name={footprint},
+  description={The set of cells an operation touches, including their
+    effective-time coordinate}}
+
+\newglossaryentry{issue}{
+  name={issue},
+  description={The instant the API call for an operation is made, as distinct
+    from its completion}}
+
+\newglossaryentry{completion}{
+  name={completion},
+  description={The instant an operation's effect on the store, or its result,
+    is determined}}
+
+\newglossaryentry{history}{
+  name={history},
+  plural={histories},
+  description={The record of every operation a program issued, totally ordered
+    within each process}}
+
+\newglossaryentry{program-order}{
+  name={program order},
+  description={The total order on the operations issued by a single process}}
+
+% ---------------------------------------------------------------------------
+%  Coordination
+% ---------------------------------------------------------------------------
+\newglossaryentry{quiescence}{
+  name={quiescence},
+  description={The condition that no operation is in flight and no process will
+    issue another}}
+
+\newglossaryentry{barrier}{
+  name={barrier},
+  description={The three-round ring protocol establishing quiescence}}
+
+\newglossaryentry{termination}{
+  name={termination},
+  description={Quiescence together with teardown of every process's region}}
+
+% ---------------------------------------------------------------------------
+%  Derived structures
+% ---------------------------------------------------------------------------
+\newglossaryentry{darray}{
+  name={distributed array},
+  plural={distributed arrays},
+  description={A one-dimensional array of fixed-size elements cut into one
+    contiguous slice per process}}
+
+\newglossaryentry{partition}{
+  name={partition},
+  description={The assignment of contiguous global index ranges to processes, named by rank}}
+
+\newglossaryentry{dgraph}{
+  name={distributed graph},
+  plural={distributed graphs},
+  description={A static directed graph carrying versioned state on vertices
+    and edges, each edge owned by the owner of its source}}
+
+\newglossaryentry{topology-replica}{
+  name={topology replica},
+  plural={topology replicas},
+  description={The static, unversioned copy of a neighbouring process's adjacency
+    structure, exchanged once at construction}}
+
+% ---------------------------------------------------------------------------
+%  Idioms
+% ---------------------------------------------------------------------------
+\newglossaryentry{pull-model}{
+  name={pull model},
+  description={Producers publish locally at the current time; consumers read a
+    neighbour's past}}
+
+\newglossaryentry{push-model}{
+  name={push model},
+  description={Producers write into a neighbour's future; consumers read their
+    own region at the current time}}
+
+\newglossaryentry{mailbox}{
+  name={mailbox pattern},
+  plural={mailbox patterns},
+  description={Indexing a shared structure by (destination, source) so that
+    each cell has exactly one writer per effective time}}

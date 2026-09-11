@@ -1,0 +1,102 @@
+% ============================================================================
+%  A Formal Specification of Distributed Shared Timestamped Memory (DSTM)
+%
+%  Build:  make            (-> build/main.pdf)
+%          make watch      (continuous rebuild + preview)
+%
+%  Editing:
+%    * preamble.tex  -- packages and styling
+%    * notation.tex  -- every mathematical symbol
+%    * sections/*    -- one file per section
+%
+%  To rebuild only part of the document while drafting, uncomment and edit
+%  the \includeonly line below. Cross references to omitted chapters keep
+%  working as long as build/ still holds their .aux files.
+% ============================================================================
+
+\documentclass[11pt,a4paper,oneside]{report}
+
+\input{preamble}
+\input{notation}
+
+%\includeonly{sections/02-semantics}
+
+\begin{document}
+
+% Roman from the very first page, so that the title page does not create a
+% second "page 1" destination competing with the first body page.
+\pagenumbering{roman}
+
+% ---------------------------------------------------------------------------
+%  Title page
+% ---------------------------------------------------------------------------
+\begin{titlepage}
+\centering
+\vspace*{3cm}
+
+{\Huge\bfseries\color{dstmblue} Distributed Shared\\[0.3em] Timestamped Memory\par}
+\vspace{1.2cm}
+{\LARGE A Formal Specification\par}
+\vspace{0.6cm}
+{\large Objects, Memory Model, Semantics and APIs\par}
+
+\vspace{2.5cm}
+
+\begin{minipage}{0.78\textwidth}
+\small\itshape
+This document supplies the formal ground for the DSTM programming model. It
+fixes the objects the model manipulates, states the restrictions a program must
+discharge for its execution to be meaningful, gives an axiomatic and an
+operational semantics for the runtime, and proves the properties --- write
+closure, determinism, deadlock freedom, bounded memory --- that justify
+running a distributed simulation without rollback and without global
+barriers.
+\end{minipage}
+
+\vfill
+
+{\large Specification revision: draft\par}
+\vspace{0.3em}
+{\small Tracks the \code{dstm} implementation at \code{include/dstm.h} and \code{src/}\par}
+
+\vspace{1cm}
+\end{titlepage}
+
+% The titlepage environment resets the page counter to 1, which would make the
+% following page "i" a second time. Step past it.
+\setcounter{page}{2}
+
+% ---------------------------------------------------------------------------
+%  Front matter
+% ---------------------------------------------------------------------------
+\tableofcontents
+\cleardoublepage
+
+\include{sections/00-summary}
+
+\cleardoublepage
+\pagenumbering{arabic}
+\setcounter{page}{1}
+
+% ---------------------------------------------------------------------------
+%  Body
+% ---------------------------------------------------------------------------
+\include{sections/01-definitions}
+\include{sections/02-semantics}
+\include{sections/03-apis}
+
+% ---------------------------------------------------------------------------
+%  Appendices
+% ---------------------------------------------------------------------------
+\appendix
+\include{sections/A-restrictions}
+\include{sections/B-deviations}
+
+% ---------------------------------------------------------------------------
+%  Bibliography
+% ---------------------------------------------------------------------------
+\cleardoublepage
+\addcontentsline{toc}{chapter}{Bibliography}
+\printbibliography[title={Bibliography}]
+
+\end{document}

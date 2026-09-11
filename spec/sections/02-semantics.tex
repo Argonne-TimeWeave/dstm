@@ -1,0 +1,42 @@
+\chapter{Semantics}
+\label{ch:semantics}
+
+This chapter gives DSTM a meaning in three layers.
+
+\Cref{sec:l0} is the \emph{axiomatic} layer $\Lzm$: eight restrictions a
+program must discharge, and one equation defining the store in terms of its
+\gls{history}. It mentions no message, clock, version or distance. This is
+what ``correct'' means.
+
+\Cref{sec:l1} is the \emph{operational} layer $\Lom$: a labelled transition
+system whose rules are the mechanism an implementation runs. Clocks, known
+times, statuses, messages and termination appear here and nowhere else. A
+refinement theorem justifies it against $\Lzm$.
+
+\Cref{sec:sync} reads the same system as a dependence graph. Versioning is
+renaming, distances are edge weights, drift is slack; acyclicity gives
+deadlock freedom, the critical path gives the makespan, and the neighbourhood
+diameter gives the memory bound.
+
+\begin{table}[htbp]
+\centering
+\small
+\begin{tabularx}{\textwidth}{@{}l l >{\raggedright\arraybackslash}X@{}}
+\toprule
+\textbf{Layer} & \textbf{Kind} & \textbf{Answers} \\
+\midrule
+$\Lzm$ (\cref{sec:l0})   & axiomatic   & What must a read return? \\
+$\Lom$ (\cref{sec:l1})   & operational & By what mechanism, and when may it return? \\
+$\Lim$ (implementation)  & code        & Over MPI, with what message types and buffers? \\
+\bottomrule
+\end{tabularx}
+\caption{The three layers. This document specifies $\Lzm$ and $\Lom$ and
+proves $\Lom \refines \Lzm$; the mapping from $\Lim$ to $\Lom$ is given by the
+rule annotations in \cref{sec:l1-rules}, which cite the implementing source
+line for each transition.}
+\label{tab:layers}
+\end{table}
+
+\input{sections/02a-l0-axiomatic}
+\input{sections/02b-l1-operational}
+\input{sections/02c-synchronization}

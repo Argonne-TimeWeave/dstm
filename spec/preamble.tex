@@ -1,0 +1,277 @@
+% ============================================================================
+%  Packages, theorem environments and presentation styling.
+%
+%  Mathematical *notation* lives in notation.tex, not here. The split is
+%  deliberate: change how the document looks in this file, change what the
+%  symbols are in that one.
+% ============================================================================
+
+% ---------------------------------------------------------------------------
+%  Encoding, fonts, page geometry
+% ---------------------------------------------------------------------------
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage{microtype}
+
+\usepackage[a4paper,margin=3cm,marginparwidth=2cm]{geometry}
+
+% ---------------------------------------------------------------------------
+%  Mathematics
+% ---------------------------------------------------------------------------
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{amsthm}
+\usepackage{mathtools}
+\usepackage{stmaryrd}     % \llbracket .. \rrbracket for semantic brackets
+\usepackage{mathpartir}   % \inferrule and the mathpar environment
+
+% ---------------------------------------------------------------------------
+%  Tables, lists, graphics
+% ---------------------------------------------------------------------------
+\usepackage{array}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{tabularx}
+\usepackage{multirow}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage{graphicx}
+
+\usepackage{tikz}
+\usetikzlibrary{positioning,arrows.meta,calc,fit,backgrounds,%
+                shapes.geometric,matrix,decorations.pathreplacing,patterns}
+
+% ---------------------------------------------------------------------------
+%  Colour palette
+% ---------------------------------------------------------------------------
+\definecolor{dstmblue}{HTML}{1F4E79}
+\definecolor{dstmteal}{HTML}{116B70}
+\definecolor{dstmred}{HTML}{9B2226}
+\definecolor{dstmamber}{HTML}{9C6500}
+\definecolor{dstmgrey}{HTML}{4A4A4A}
+\definecolor{resbg}{HTML}{EEF4FA}
+\definecolor{devbg}{HTML}{FDF1F1}
+\definecolor{codebg}{HTML}{F6F6F4}
+
+% ---------------------------------------------------------------------------
+%  Source code listings
+% ---------------------------------------------------------------------------
+\usepackage{listings}
+\lstdefinestyle{dstmc}{%
+  language=C,
+  basicstyle=\ttfamily\footnotesize,
+  keywordstyle=\color{dstmblue}\bfseries,
+  commentstyle=\color{dstmgrey}\itshape,
+  stringstyle=\color{dstmteal},
+  backgroundcolor=\color{codebg},
+  frame=leftline,
+  framerule=1pt,
+  rulecolor=\color{dstmblue!30},
+  framesep=6pt,
+  xleftmargin=8pt,
+  breaklines=true,
+  breakatwhitespace=true,
+  columns=fullflexible,
+  keepspaces=true,
+  showstringspaces=false,
+  morekeywords={dstm_time_t,dstm_ptr_t,dstm_darray_t,dstm_dgraph_t,%
+                dstm_distance_t,dstm_region_t,dstm_opts_t,size_t,%
+                int64_t,intptr_t,MPI_Comm},
+}
+\lstset{style=dstmc}
+
+% ---------------------------------------------------------------------------
+%  Callout boxes
+% ---------------------------------------------------------------------------
+\usepackage[most]{tcolorbox}
+\tcbuselibrary{skins,breakable}
+
+% ---------------------------------------------------------------------------
+%  Theorem environments
+%
+%  Two numbering families:
+%
+%    * Mathematical results share one per-chapter counter, so a cross
+%      reference such as "Theorem 2.7" is unambiguous without the reader
+%      having to know which of five counters it came from.
+%
+%    * Restrictions (O1..) and deviations (D1..) get flat document-wide
+%      counters with a letter prefix, because they are referred to by name
+%      throughout the text and in the source tree.
+% ---------------------------------------------------------------------------
+%  Sharing one counter across environments would normally make cleveref
+%  mislabel every cross reference, because it keys off the *counter* name
+%  rather than the environment name: \cref to a theorem sharing the
+%  `definition' counter prints "Definition". aliascnt gives each environment
+%  its own counter name aliased onto a single shared value, so the numbering
+%  is shared but cleveref still prints the right word.
+\usepackage{aliascnt}
+
+\newcommand{\sharedtheorem}[3][plain]{%
+  \theoremstyle{#1}%
+  \newaliascnt{#2}{definition}%
+  \newtheorem{#2}[#2]{#3}%
+  \aliascntresetthe{#2}%
+}
+
+\theoremstyle{definition}
+\newtheorem{definition}{Definition}[chapter]
+
+\sharedtheorem[definition]{notationx}{Notation}
+\sharedtheorem[definition]{example}{Example}
+\sharedtheorem[definition]{remark}{Remark}
+\sharedtheorem[definition]{convention}{Convention}
+
+\sharedtheorem{axiom}{Axiom}
+\sharedtheorem{theorem}{Theorem}
+\sharedtheorem{lemma}{Lemma}
+\sharedtheorem{proposition}{Proposition}
+\sharedtheorem{corollary}{Corollary}
+\sharedtheorem{invariant}{Invariant}
+
+% Flat, prefixed counters. These use the upright `definition' style rather
+% than the italic `plain' one: their bodies run to several paragraphs and
+% contain code, displays and tables, none of which read well in italic.
+\theoremstyle{definition}
+
+\newtheorem{restr}{Restriction}
+\renewcommand{\therestr}{R\arabic{restr}}
+
+\newtheorem{deviation}{Deviation}
+\renewcommand{\thedeviation}{D\arabic{deviation}}
+
+% Styling applied on top of amsthm, so the environments keep their normal
+% \begin{restr}\label{..} usage.
+\tcolorboxenvironment{restr}{%
+  breakable, enhanced, sharp corners=downhill,
+  colback=resbg, colframe=dstmblue, boxrule=0pt,
+  leftrule=2.5pt, top=6pt, bottom=6pt, left=8pt, right=8pt,
+  before skip=10pt, after skip=10pt,
+}
+\tcolorboxenvironment{deviation}{%
+  breakable, enhanced, sharp corners=downhill,
+  colback=devbg, colframe=dstmred, boxrule=0pt,
+  leftrule=2.5pt, top=6pt, bottom=6pt, left=8pt, right=8pt,
+  before skip=10pt, after skip=10pt,
+}
+
+% ---------------------------------------------------------------------------
+%  Bibliography
+% ---------------------------------------------------------------------------
+\usepackage[backend=biber,style=numeric,sorting=nyt,maxbibnames=6]{biblatex}
+\addbibresource{refs.bib}
+
+% ---------------------------------------------------------------------------
+%  Headers, chapter titles, TOC depth
+% ---------------------------------------------------------------------------
+\usepackage{titlesec}
+\titleformat{\chapter}[display]
+  {\normalfont\huge\bfseries\color{dstmblue}}
+  {\normalsize\MakeUppercase{\chaptertitlename}\ \thechapter}{10pt}{\Huge}
+\titlespacing*{\chapter}{0pt}{-20pt}{28pt}
+
+\usepackage{fancyhdr}
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\small\nouppercase{\leftmark}}
+\fancyhead[R]{\small\thepage}
+\renewcommand{\headrulewidth}{0.4pt}
+\fancypagestyle{plain}{\fancyhf{}\fancyfoot[C]{\small\thepage}%
+  \renewcommand{\headrulewidth}{0pt}}
+
+\setcounter{tocdepth}{2}
+\setcounter{secnumdepth}{3}
+
+% ---------------------------------------------------------------------------
+%  Cross references (hyperref must come late, cleveref after it)
+% ---------------------------------------------------------------------------
+% plainpages=false: the front matter is numbered in roman and the body in
+% arabic, so both contain a "page 1" and hyperref would emit a duplicate
+% destination without it.
+\usepackage[hidelinks,colorlinks=true,plainpages=false,
+            linkcolor=dstmblue,citecolor=dstmteal,urlcolor=dstmteal]{hyperref}
+\usepackage[capitalise,nameinlink]{cleveref}
+
+\crefname{definition}{Definition}{Definitions}
+\crefname{notationx}{Notation}{Notations}
+\crefname{example}{Example}{Examples}
+\crefname{remark}{Remark}{Remarks}
+\crefname{convention}{Convention}{Conventions}
+\crefname{axiom}{Axiom}{Axioms}
+\crefname{theorem}{Theorem}{Theorems}
+\crefname{lemma}{Lemma}{Lemmas}
+\crefname{proposition}{Proposition}{Propositions}
+\crefname{corollary}{Corollary}{Corollaries}
+\crefname{invariant}{Invariant}{Invariants}
+\crefname{restr}{Restriction}{Restrictions}
+\crefname{deviation}{Deviation}{Deviations}
+
+% ---------------------------------------------------------------------------
+%  Glossary
+%
+%  Loaded after hyperref, as the package requires. No \makeglossaries and no
+%  \printglossary: section 1.1 is the glossary, written by hand, and the
+%  \term macro plants the \glstarget anchors there. \gls and friends then
+%  hyperlink into that section. This also keeps the build a single latexmk
+%  invocation with no external makeglossaries step.
+% ---------------------------------------------------------------------------
+\usepackage[nopostdot,nonumberlist,nogroupskip]{glossaries}
+\input{glossary-entries}
+
+% ---------------------------------------------------------------------------
+%  Presentation helpers
+% ---------------------------------------------------------------------------
+
+% Inline code. C identifiers in this project are long (up to
+% dstm_region_version_find_or_create), and TeX will not break inside a
+% \texttt run, producing overfull lines. Redefining \_ locally to permit a
+% break after each underscore fixes every such identifier at once.
+% In math mode the content is wrapped in \mbox so that \ttfamily is legal;
+% breaking is lost there, but math-mode occurrences are short identifiers.
+\newcommand{\codeus}{\textunderscore\allowbreak}
+\newcommand{\codebody}[1]{\small\ttfamily\let\_\codeus #1}
+\newcommand{\code}[1]{%
+  \ifmmode\mbox{\codebody{#1}}\else{\codebody{#1}}\fi}
+
+% A reference into the implementation, e.g. \srcref{ops.c}{99}.
+\newcommand{\srcref}[2]{\texttt{\small #1:#2}}
+\newcommand{\srcrefr}[3]{\texttt{\small #1:#2--#3}}
+
+% Inline badge marking a point where the implementation departs from this
+% specification; hyperlinks to the register in Appendix B.
+\newcommand{\devmark}[1]{%
+  \tcbox[on line, boxsep=0pt, left=3pt, right=3pt, top=1pt, bottom=1pt,
+         colback=devbg, colframe=dstmred, boxrule=0.5pt, arc=1.5pt]%
+        {\scriptsize\bfseries\color{dstmred}\ref{#1}}%
+}
+
+% Name of an LTS rule. \textnormal resets the surrounding font first:
+% mathpartir sets rule labels in italic, and Latin Modern has no
+% small-caps-italic face, so a bare \textsc there triggers a font substitution.
+\newcommand{\rn}[1]{\textnormal{\textsc{#1}}}
+
+% Run-in heading for a glossary term. Deliberately not a sectioning command:
+% the glossary has ~35 entries and they would swamp the table of contents.
+%
+%   \term{<key>}{<Heading>}  heading for the term, and the hyperlink target
+%                            that every \gls{<key>} in the document points to.
+%   \alsoterm{<key>}         an additional target, for a term treated under a
+%                            heading belonging to another key.
+%
+% Exactly one target per key must exist, or hyperref reports a duplicate.
+\newcommand{\term}[2]{%
+  \par\medskip\noindent
+  \glstarget{#1}{}%
+  \textbf{\color{dstmblue}\sffamily #2}\par\nopagebreak\noindent%
+}
+\newcommand{\alsoterm}[1]{\glstarget{#1}{}\ignorespaces}
+
+% Column type: fixed-width, ragged right, for contract tables.
+\newcolumntype{L}[1]{>{\raggedright\arraybackslash}p{#1}}
+
+% Table rules a touch lighter than booktabs defaults.
+\setlength{\heavyrulewidth}{0.9pt}
+\setlength{\lightrulewidth}{0.4pt}
+
+\allowdisplaybreaks

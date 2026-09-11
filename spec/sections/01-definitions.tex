@@ -1,0 +1,20 @@
+\chapter{Definitions}
+\label{ch:definitions}
+
+This chapter fixes the vocabulary. Four distinct quantities are informally
+called ``time'' and three are called ``memory''; separating them is most of
+the work, after which the semantics in \cref{ch:semantics} is short.
+
+\Cref{sec:glossary} defines every concept twice, informally then formally.
+\Cref{sec:memory-model} assembles the state concepts into the memory model:
+what a program can store, and what a read may return.
+\Cref{sec:execution-model} assembles the time and \gls{operation} concepts
+into the execution model: how processes make progress against that store.
+
+The specification is \emph{prescriptive}. Where the implementation departs
+from it a marker like \devmark{dev:zero-distance} points to the deviation
+register in \cref{ch:deviations}.
+
+\input{sections/01a-glossary}
+\input{sections/01b-memory-model}
+\input{sections/01c-execution-model}

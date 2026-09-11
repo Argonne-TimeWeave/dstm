@@ -1,0 +1,272 @@
+\section{Memory Model}
+\label{sec:memory-model}
+
+The memory model answers one question: \emph{what may a read return?}
+Messages, clocks, distances and scheduling belong to the execution model and
+exist only to implement what follows.
+
+% ===========================================================================
+\subsection{The store is a map, not an array with history}
+\label{sec:store-is-a-map}
+
+``Versioned memory'' suggests a mutable array plus a log of its past states,
+so that version $\eff$ is what the array looked like at time $\eff$. That
+reading is wrong, and every subsequent confusion follows from it.
+
+DSTM's memory is a \emph{total map from versioned \glspl{cell} to bytes}.
+Time is a coordinate of the cell, on the same footing as the address, not an
+annotation on a location that persists across time.
+
+\begin{definition}[Memory model]\label{def:memory-model}
+The state of a DSTM \gls{session} is a \gls{store}
+$\Store : \Cells \to \Bytes$ (\cref{def:store}). A read of
+$\cell{q}{\eff}{a}$ returns $\Store(\cell{q}{\eff}{a})$.
+\end{definition}
+
+Three properties give this map its character.
+
+\begin{definition}[Zero default]\label{def:zero-default}
+$\Store$ is total. A cell that no \gls{operation} ever writes holds the byte $0$.
+\end{definition}
+
+\begin{definition}[Independence across time]\label{def:independence}
+For $\eff \ne \eff'$, the cells $\cell{q}{\eff}{a}$ and $\cell{q}{\eff'}{a}$
+are distinct and unrelated. Writing one does not affect the other, and the
+value of one is never derived from the other. \devmark{dev:non-inheriting}
+\end{definition}
+
+\begin{definition}[Single assignment]\label{def:single-assignment}
+Each cell is written at most once over the whole execution. A program in which
+two distinct writes target the same cell is not a legal DSTM program
+(\cref{res:write-disjoint}).
+\end{definition}
+
+Together these put DSTM memory in \emph{dynamic single assignment} form
+\cite{feautrier1991} over $\Ranks \times \Time \times \Addr$: every cell is
+defined at most once and never redefined. This is the discipline SSA imposes
+on scalars \cite{cytron1991ssa}, lifted to a distributed setting with
+simulation time as the extra index.
+
+\begin{remark}[The consequence programs must live with]
+\label{rem:republish}
+Because \glspl{version} do not inherit (\cref{def:independence}), state does
+not persist across timesteps by itself: a value must be rewritten at $\eff+1$
+to remain visible there. There is no read-modify-write across time and no
+``current value'' of an address independent of a timestamp. Treating the store
+as a per-timestep mailbox --- what both benchmark applications in
+\cite{dstm2026} do --- costs nothing; treating it as long-lived state means
+re-publishing.
+\end{remark}
+
+\begin{remark}[Allocation is not part of the store]
+\label{rem:alloc-orthogonal}
+$\Store$ is total over $\Addrof{q}$ whether or not an address is allocated
+(\cref{def:allocation}). \Gls{allocation} does not decide which \glspl{cell}
+\emph{exist}, but which addresses a program may legally \emph{name}. Keeping
+the two apart lets the memory model stay a plain total map.
+\end{remark}
+
+\begin{definition}[Addressability]\label{def:addressability}
+An operation targeting process $\proc{q}$ over the address range
+$[a, a + \ell)$ is \emph{addressable} when that whole range lies within a
+single extent of $\allocof{q}$:
+\[
+  \exists\, h .\quad [a,\, a + \ell) \subseteq \extent{q}{h} .
+\]
+A DSTM program may only issue addressable operations. Targeting an unallocated
+address, or straddling two extents, is undefined: the store still answers, but
+the byte returned belongs to another structure or to no structure at all
+\devmark{dev:darray-bounds}.
+\end{definition}
+
+Addressability is a well-formedness condition, not a synchronisation
+restriction --- the analogue of not dereferencing a wild pointer, prior to any
+question about time. It belongs in the memory model because it concerns
+\emph{which memory exists to be named}, not \emph{when it may be touched}.
+
+\begin{remark}[Absence is not observable]
+Zero-fill (\cref{def:zero-default}) makes ``nobody wrote here'' and ``somebody
+wrote zero'' indistinguishable; a program needing to tell them apart must
+encode presence in the value. In exchange reads never fail for want of data,
+and a producer may publish only the cells it changes.
+\end{remark}
+
+% ===========================================================================
+\subsection{Publication: the version life cycle}
+\label{sec:publication}
+
+\Cref{def:memory-model} describes the store as though it existed at once. An
+implementation must instead decide, per version, the moment after which no
+further write can arrive, since only then may it answer a read. That decision
+--- promotion from writable to readable --- is the pivot of the design. Status
+(\cref{def:status}) moves monotonically through four values.
+
+\begin{figure}[htbp]
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tikzpicture}[
+  node distance=26mm,
+  every node/.style={font=\small},
+  st/.style={draw,rounded corners=2pt,minimum width=24mm,minimum height=9mm,
+             align=center,fill=resbg,draw=dstmblue,thick},
+  >={Stealth[round]},
+]
+  \node[st,fill=white,draw=dstmgrey] (a)             {$\Absent$\\[-1pt]\scriptsize absent};
+  \node[st,right=of a]               (w)             {$\Wr$\\[-1pt]\scriptsize writable};
+  \node[st,right=of w]               (r)             {$\Rd$\\[-1pt]\scriptsize readable};
+  \node[st,right=of r,fill=devbg,draw=dstmred] (x)   {$\Dc$\\[-1pt]\scriptsize discardable};
+
+  \draw[->,thick] (a) -- node[above,font=\scriptsize]{first write}
+                          node[below,font=\scriptsize]{\emph{create}} (w);
+  \draw[->,thick] (w) -- node[above,font=\scriptsize]{no write can arrive}
+                          node[below,font=\scriptsize]{\emph{publish}} (r);
+  \draw[->,thick] (r) -- node[above,font=\scriptsize]{no read can arrive}
+                          node[below,font=\scriptsize]{\emph{retire}} (x);
+  \draw[->,thick,dashed,draw=dstmred] (x.south) .. controls +(0,-9mm) and +(0,-9mm) ..
+        node[below,font=\scriptsize]{\emph{evict} (reclaim storage)} (a.south);
+
+  \node[below=13mm of w,font=\scriptsize,align=center,text=dstmgrey]
+       {writes accepted\\reads blocked};
+  \node[below=13mm of r,font=\scriptsize,align=center,text=dstmgrey]
+       {contents frozen\\reads served};
+\end{tikzpicture}}
+\caption{The version status automaton. Progression is one-way; the dashed
+edge is storage reclamation, not a semantic transition --- an evicted version
+is indistinguishable from one that was never created, which is sound precisely
+because \emph{retire} certifies that nobody will ask for it again.}
+\label{fig:status-automaton}
+\end{figure}
+
+\begin{definition}[Publication]\label{def:publication}
+A version is \emph{published} when its status reaches $\Rd$. From that instant
+its content function $\Vbuf{p}{\eff}$ is immutable.
+\end{definition}
+
+Both promotions carry the correctness burden, and each is a claim about the
+future:
+
+\begin{description}[leftmargin=1.4cm,style=nextline,font=\normalfont\bfseries]
+  \item[\emph{publish}] asserts that \emph{no operation that will ever be
+    issued can write to this version}. Getting this wrong loses an update: a
+    reader observes a version that a later write was still entitled to modify.
+  \item[\emph{retire}] asserts that \emph{no operation that will ever be
+    issued can read this version}. Getting this wrong either deadlocks a
+    reader --- the version it wants is gone and nothing will recreate it ---
+    or, worse, lets a subsequent write resurrect the version and serve
+    a spuriously zero-filled snapshot.
+\end{description}
+
+Neither claim can be checked directly, because a process cannot see the future
+and cannot see its neighbours. Both are instead \emph{deduced} from the
+\gls{comm-graph} and the \glspl{known-time}, and the deduction is sound only if the
+program honours the restrictions of \cref{ch:restrictions}. The exact guards are
+given in \cref{sec:l1-rules}; their soundness is
+\cref{thm:write-closure,thm:discard-safety}.
+
+\begin{remark}[Eviction is an optimisation, promotion is not]
+Reclaiming a $\Dc$ version changes no observable behaviour, so an
+implementation with unbounded memory could skip eviction. \emph{Retire} itself
+is not optional, since it licenses eviction. This matters for
+\cref{thm:space-bound}: the \gls{footprint} is bounded because retirement is
+bounded, not because eviction is eager.
+\end{remark}
+
+% ===========================================================================
+\subsection{What the memory model does not provide}
+\label{sec:non-guarantees}
+
+The model is unusually strong for a distributed memory: a read returns
+exactly the byte written, with no coherence protocol, fences or visibility
+ordering. That strength is bought by the restrictions placed on the program,
+and comes with sharp limits.
+
+\begin{description}[leftmargin=0.9cm,style=nextline,font=\normalfont\bfseries]
+\item[No atomics, no read-modify-write.]
+  There is no compare-and-swap, no fetch-and-add and no way to read a cell and
+  write it based on what was read, at the same effective time. The phase
+  discipline of \cref{sec:publication} forbids it structurally: by the time a
+  version can be read it can no longer be written.
+
+\item[No ordering between distinct cells.]
+  Two writes by the same process to different cells are unordered with respect to
+  each other in the store, even when one precedes the other in \gls{program-order}.
+  Ordering exists only through effective time. A program needing ``$x$ before
+  $y$'' must place them at different \glspl{effective-time}.
+
+\item[No conflict detection.]
+  Violating single assignment (\cref{def:single-assignment}) is undefined
+  behaviour, not an error. There is no abort, no retry and no
+  last-writer-wins rule to fall back on \devmark{dev:write-disjoint}.
+
+\item[No partial-failure model.]
+  \Glspl{process} do not fail. Messages are not lost, duplicated or reordered in a way
+  that matters. This is an MPI-level assumption inherited wholesale.
+
+\item[No dynamic topology.]
+  Neither the rank set, the distance matrix, the \gls{region} sizes nor a \glslink{dgraph}{dgraph}'s
+  edge set may change within a session (\cref{def:session}).
+\end{description}
+
+% ===========================================================================
+\subsection{Relation to neighbouring memory models}
+\label{sec:model-comparison}
+
+DSTM's store differs from familiar designs in one place: what the version
+index means, and therefore what makes a version final.
+
+\begin{table}[htbp]
+\centering
+\small
+\begin{tabularx}{\textwidth}{@{}l >{\raggedright\arraybackslash}X
+                                 >{\raggedright\arraybackslash}X
+                                 >{\raggedright\arraybackslash}X@{}}
+\toprule
+ & \textbf{DSTM} & \textbf{MVCC} \cite{bernstein1981}
+ & \textbf{Time Warp} \cite{jefferson1985} \\
+\midrule
+Version index
+ & simulation time, chosen by the program
+ & commit timestamp, chosen by the system
+ & send/receive time, with saved state per event \\[2pt]
+Version content
+ & independent snapshot, zero-filled
+ & delta against the previous committed value
+ & full checkpoint of process state \\[2pt]
+Write conflict
+ & forbidden by contract; undefined if violated
+ & detected, resolved by abort and retry
+ & tolerated, resolved by rollback and antimessages \\[2pt]
+Finality of a version
+ & deduced from distance and neighbour clocks
+ & established at commit
+ & never; any version may be undone \\[2pt]
+Reclamation
+ & distance-bounded retirement
+ & garbage collection of unreachable snapshots
+ & fossil collection below global virtual time \\[2pt]
+Read of unwritten cell
+ & zero
+ & last committed value
+ & value in the checkpointed state \\[2pt]
+Cost of drift
+ & extra live versions (bounded, \cref{thm:space-bound})
+ & longer snapshot chains, more aborts
+ & rollback and re-execution \\
+\bottomrule
+\end{tabularx}
+\caption{DSTM against multi-version concurrency control and optimistic
+simulation. The decisive row is \emph{finality}: MVCC learns a version is
+final by observing a commit that has already happened, Time Warp never learns
+it at all, and DSTM \emph{predicts} it from static topology plus a lower bound
+on neighbour progress.}
+\label{tab:model-comparison}
+\end{table}
+
+The contrast with a partitioned global \gls{address-space} such as UPC++
+\cite{upcxx2019} is of a different kind. PGAS supplies one-sided \code{put} and
+\code{get} over remote memory, exactly as DSTM does, but has no version index
+at all: a \code{put} overwrites, and the application is responsible for
+establishing that no reader is concurrently observing the location. DSTM's
+addition is precisely the time coordinate and the runtime-enforced
+\gls{publication} discipline that comes with it. Everything else in the interface is
+recognisably PGAS.

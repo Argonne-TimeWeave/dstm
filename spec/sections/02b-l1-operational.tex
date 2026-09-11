@@ -1,0 +1,592 @@
+\section{\texorpdfstring{$\Lom$}{L1}: Operational Semantics}
+\label{sec:l1}
+
+$\Lzm$ said what a read must return, not how a process could know, without
+asking anyone, that a version is complete. That is $\Lom$: a labelled
+transition system whose rules are the mechanism the runtime executes.
+
+Each rule is annotated with the source location implementing it; those
+annotations are the refinement map from $\Lim$ to $\Lom$.
+\Cref{sec:l1-refinement} discharges $\Lom$ against $\Lzm$.
+
+% ===========================================================================
+\subsection{Configurations}
+\label{sec:l1-config}
+
+\begin{definition}[Local state]\label{def:local-state}
+The state of process $\proc{p}$ is a quadruple $(\clk{p}, K_p, \Vers{p}, \Pend{p})$:
+\begin{itemize}[leftmargin=1.5em,itemsep=1pt]
+  \item $\clk{p} \in \Time$, the \gls{local-clock} (\cref{ts:clock});
+  \item $K_p : \Ranks \to \Time$, the \glspl{known-time} (\cref{ts:known}), written
+    $\kn{p}{q}$;
+  \item $\Vers{p} : \Time \pto \Status \times (\Addrof{p} \to \Bytes)$, the
+    partial map of live \glspl{version}, with components $\Vst{p}{\eff}$ and
+    $\Vbuf{p}{\eff}$; we set $\Vst{p}{\eff} = \Absent$ when
+    $\eff \notin \operatorname{dom} \Vers{p}$;
+  \item $\Pend{p}$, a finite multiset of pending requests.
+\end{itemize}
+\end{definition}
+
+\begin{definition}[Requests]\label{def:requests}
+A pending request is one of
+\[
+\begin{array}{ll}
+  \mathsf{lput}(\eff, a, v)            & \text{local put, not yet applied}\\
+  \mathsf{lget}(\eff, a, \ell)         & \text{local get, awaiting publication}\\
+  \mathsf{iput}(\eff, a, v)            & \text{received put, not yet applied}\\
+  \mathsf{iget}(\eff, a, \ell, r, \iota) & \text{received read request from } r\\
+  \mathsf{oput}                        & \text{outgoing put, awaiting send completion}\\
+  \mathsf{oget}(\eff, \iota)           & \text{outgoing read, awaiting reply}
+\end{array}
+\]
+We write $\opeff{\varrho}$ for the \gls{effective-time} recorded in request
+$\varrho$. The kinds mirror \srcrefr{request.h}{33}{40} exactly.
+\end{definition}
+
+\begin{definition}[Messages]\label{def:messages}
+$\Net$ is a finite multiset of in-flight messages, each of one of the five
+forms of \srcrefr{msg.h}{39}{43}:
+\[
+\begin{array}{ll}
+  \mathsf{PUT}(p \to q,\, t,\, \delta,\, a,\, v) &
+  \mathsf{GETREQ}(p \to q,\, t,\, \delta,\, a,\, \ell,\, \iota) \\
+  \mathsf{GETREP}(q \to p,\, \eff,\, v,\, \iota) &
+  \mathsf{HB}(p \to q,\, t) \\
+  \mathsf{TOK}(p \to q,\, \ell) &
+\end{array}
+\]
+Every message carries a \emph{stamp}: the value $t$ for $\mathsf{PUT}$,
+$\mathsf{GETREQ}$ and $\mathsf{HB}$, the value $\eff$ for $\mathsf{GETREP}$,
+and $\ell$ for $\mathsf{TOK}$. We write $\mathit{stamp}(m)$ for it.
+\end{definition}
+
+\begin{definition}[Global configuration]\label{def:configuration}
+$\Cfg \defeq \bigl\langle (\clk{p}, K_p, \Vers{p}, \Pend{p})_{p \in \Ranks},\
+\Net \bigr\rangle$. The initial configuration $\Cfg_0$ has $\clk{p} = 0$,
+$\kn{p}{q} = 0$, $\Vers{p} = \emptyset$, $\Pend{p} = \emptyset$ and
+$\Net = \emptyset$ for all $p, q$.
+\end{definition}
+
+\begin{convention}[Notation in rules]\label{conv:rule-notation}
+$\Cfg[\,x \mapsto e\,]$ denotes $\Cfg$ with component $x$ replaced by $e$. We
+write $\Pend{p} \uplus \{\varrho\}$ for multiset insertion and
+$\Net \uplus \{m\}$ for message injection. Rules are read as: if the premises
+hold in $\Cfg$, then $\Cfg \steps \Cfg'$ with $\Cfg'$ as described in the
+conclusion.
+\end{convention}
+
+% ===========================================================================
+\subsection{Transition rules}
+\label{sec:l1-rules}
+
+\subsubsection*{Clock and publication of progress}
+
+\begin{mathpar}
+\inferrule*[left=\rn{Tick}]
+  {t > \clk{p}}
+  {\clk{p} \mathrel{{:}{=}} t \\\\
+   \Net \mathrel{{:}{=}} \Net \uplus
+     \{\, \mathsf{HB}(p \to q,\, t) : q \in \nbr{p} \,\}}
+\end{mathpar}
+
+\noindent\srcrefr{ops.c}{37}{53} (broadcast), \srcref{ops.c}{603} and
+\srcref{ops.c}{672} (the guard, folded into put and get issue). \rn{Tick}
+is not a separate API call: it fires as a side effect of issuing an \gls{operation}
+whose \gls{origin-time} exceeds the clock.
+
+\subsubsection*{Issuing operations}
+
+\begin{mathpar}
+\inferrule*[left=\rn{Put-Local}]
+  {\delta \ge 0 \\ q = p}
+  {\Pend{p} \mathrel{{:}{=}} \Pend{p} \uplus
+     \{\mathsf{lput}(t + \delta,\, a,\, v)\}}
+
+\inferrule*[left=\rn{Put-Remote}]
+  {\delta \ge 1 \\ q \in \nbr{p}}
+  {\Pend{p} \mathrel{{:}{=}} \Pend{p} \uplus \{\mathsf{oput}\} \\\\
+   \Net \mathrel{{:}{=}} \Net \uplus
+     \{\mathsf{PUT}(p \to q,\, t,\, \delta,\, a,\, v)\}}
+\end{mathpar}
+
+\begin{mathpar}
+\inferrule*[left=\rn{Get-Local}]
+  {\delta = 0 \\ q = p}
+  {\Pend{p} \mathrel{{:}{=}} \Pend{p} \uplus
+     \{\mathsf{lget}(t,\, a,\, \ell)\}}
+
+\inferrule*[left=\rn{Get-Remote}]
+  {\delta \le -1 \\ q \in \nbr{p} \\ \iota \text{ fresh}}
+  {\Pend{p} \mathrel{{:}{=}} \Pend{p} \uplus \{\mathsf{oget}(t+\delta, \iota)\} \\\\
+   \Net \mathrel{{:}{=}} \Net \uplus
+     \{\mathsf{GETREQ}(p \to q,\, t,\, \delta,\, a,\, \ell,\, \iota)\}}
+\end{mathpar}
+
+\noindent\srcrefr{ops.c}{608}{636} and \srcrefr{ops.c}{677}{720}. The
+$\delta = 0 \Rightarrow q = p$ side conditions are the \code{-DSTM\_EDOM}
+checks at \srcref{ops.c}{598} and \srcref{ops.c}{667}. Note what the rules do
+\emph{not} require: neither checks $\delta$ against $\dist{p}{q}$. That is
+\cref{res:lookahead,res:staleness}, and it is assumed, not verified
+\devmark{dev:lookahead-uncheck}.
+
+\subsubsection*{Message delivery}
+
+Every delivery raises the receiver's known time; this is the only way known
+times ever change.
+
+\begin{mathpar}
+\inferrule*[left=\rn{Recv}]
+  {m \in \Net \\ \mathit{dst}(m) = p \\ \mathit{src}(m) = r}
+  {\Net \mathrel{{:}{=}} \Net \setminus \{m\} \\\\
+   \kn{p}{r} \mathrel{{:}{=}} \max\bigl(\kn{p}{r},\, \mathit{stamp}(m)\bigr) \\\\
+   \rn{Dispatch}(m)}
+\end{mathpar}
+
+\noindent\srcrefr{ops.c}{432}{436}. $\rn{Dispatch}$ is:
+
+\begin{mathpar}
+\inferrule*[left=\rn{D-Put}]
+  {m = \mathsf{PUT}(r \to p,\, t,\, \delta,\, a,\, v)}
+  {\Pend{p} \mathrel{{:}{=}} \Pend{p} \uplus \{\mathsf{iput}(t+\delta,\, a,\, v)\}}
+
+\inferrule*[left=\rn{D-Req}]
+  {m = \mathsf{GETREQ}(r \to p,\, t,\, \delta,\, a,\, \ell,\, \iota)}
+  {\Pend{p} \mathrel{{:}{=}} \Pend{p} \uplus
+     \{\mathsf{iget}(t+\delta,\, a,\, \ell,\, r,\, \iota)\}}
+\end{mathpar}
+
+\begin{mathpar}
+\inferrule*[left=\rn{D-Rep}]
+  {m = \mathsf{GETREP}(r \to p,\, \eff,\, v,\, \iota) \\
+   \mathsf{oget}(\eff, \iota) \in \Pend{p}}
+  {\Pend{p} \mathrel{{:}{=}} \Pend{p} \setminus \{\mathsf{oget}(\eff,\iota)\} \\\\
+   \text{the issuing get returns } v}
+
+\inferrule*[left=\rn{D-Beat}]
+  {m = \mathsf{HB}(r \to p,\, t)}
+  {\text{no further effect}}
+\end{mathpar}
+
+\noindent\srcrefr{ops.c}{438}{506}. \rn{D-Beat} has no effect beyond the
+known-time update performed by \rn{Recv}: that update is the heartbeat's
+entire purpose.
+
+\subsubsection*{Applying writes}
+
+\begin{mathpar}
+\inferrule*[left=\rn{Apply}]
+  {\varrho \in \Pend{p} \\
+   \varrho \in \{\mathsf{lput}(\eff,a,v),\, \mathsf{iput}(\eff,a,v)\} \\
+   \Vst{p}{\eff} \in \{\Absent, \Wr\}}
+  {\Vst{p}{\eff} \mathrel{{:}{=}} \Wr \\\\
+   \Vbuf{p}{\eff} \mathrel{{:}{=}} \Vbuf{p}{\eff}[a \dots a{+}|v|{-}1 \mapsto v] \\\\
+   \Pend{p} \mathrel{{:}{=}} \Pend{p} \setminus \{\varrho\}}
+\end{mathpar}
+
+\noindent\srcrefr{ops.c}{223}{258} (local) and \srcrefr{ops.c}{282}{315}
+(incoming). Creating a version initialises $\Vbuf{p}{\eff}$ to all zeroes
+(\cref{conv:no-inherit}), implemented as the \code{calloc} in
+\code{dstm\_region\_version\_find\_or\_create}.
+
+\begin{mathpar}
+\inferrule*[left=\rn{Apply-Violation}]
+  {\varrho \in \Pend{p} \\
+   \varrho \in \{\mathsf{lput}(\eff,a,v),\, \mathsf{iput}(\eff,a,v)\} \\
+   \Vst{p}{\eff} \in \{\Rd, \Dc\}}
+  {\textbf{abort}}
+\end{mathpar}
+
+\noindent\srcrefr{ops.c}{244}{253} and \srcrefr{ops.c}{301}{310}.
+\rn{Apply-Violation} is not a semantic rule: it is a detector. On a legal
+history it is unreachable (\cref{thm:write-closure}), so reaching it proves
+that \cref{res:phase}, \cref{res:monotone} or \cref{res:lookahead} was
+violated. The implementation deliberately aborts rather than dropping or
+applying the write, because both alternatives silently corrupt a value some
+reader has already observed.
+
+\subsubsection*{Promotion --- the two rules that matter}
+
+\begin{mathpar}
+\inferrule*[left=\rn{Publish}]
+  {\Vst{p}{\eff} = \Wr \\
+   \nexists\, \varrho \in \Pend{p}.\;
+     \varrho \in \{\mathsf{lput},\mathsf{iput}\} \wedge \opeff{\varrho} = \eff \\\\
+   \forall q \in \nbr{p}.\;\ \kn{p}{q} + \dist{p}{q} > \eff \\
+   \clk{p} \ge \eff}
+  {\Vst{p}{\eff} \mathrel{{:}{=}} \Rd}
+\end{mathpar}
+
+\noindent\srcrefr{ops.c}{57}{117}: the pending-put scan at
+\srcrefr{ops.c}{63}{76}, the neighbour scan at \srcrefr{ops.c}{86}{101}, the
+local-clock clause at \srcref{ops.c}{112}.
+
+\begin{mathpar}
+\inferrule*[left=\rn{Retire}]
+  {\Vst{p}{\eff} = \Rd \\
+   \nexists\, \varrho \in \Pend{p}.\;
+     \varrho \in \{\mathsf{lget},\mathsf{iget}\} \wedge \opeff{\varrho} = \eff \\\\
+   \forall q \in \nbr{p}.\;\ \kn{p}{q} - \dist{p}{q} > \eff \\
+   \clk{p} \ge \eff}
+  {\Vst{p}{\eff} \mathrel{{:}{=}} \Dc}
+\end{mathpar}
+
+\noindent\srcrefr{ops.c}{121}{172}.
+
+\begin{mathpar}
+\inferrule*[left=\rn{Evict}]
+  {\Vst{p}{\eff} = \Dc}
+  {\Vers{p} \mathrel{{:}{=}} \Vers{p} \setminus \{\eff\}}
+\end{mathpar}
+
+\noindent\srcrefr{ops.c}{201}{205}.
+
+The two neighbour clauses are the design in one line. A neighbour $q$ believed
+to be at $\kn{p}{q}$ can still write as early as $\kn{p}{q} + \dist{p}{q}$ and
+still read as far back as $\kn{p}{q} - \dist{p}{q}$. Publication waits for the
+first bound to pass $\eff$, retirement for the second: one \gls{distance}
+serving as a forward horizon for writes and a backward horizon for reads.
+
+\subsubsection*{Serving reads}
+
+\begin{mathpar}
+\inferrule*[left=\rn{Serve-Local}]
+  {\mathsf{lget}(\eff, a, \ell) \in \Pend{p} \\ \Vst{p}{\eff} = \Rd}
+  {\Pend{p} \mathrel{{:}{=}} \Pend{p} \setminus \{\mathsf{lget}(\eff,a,\ell)\} \\\\
+   \text{the issuing get returns } \Vbuf{p}{\eff}[a \dots a{+}\ell{-}1]}
+\end{mathpar}
+
+\begin{mathpar}
+\inferrule*[left=\rn{Serve-Remote}]
+  {\mathsf{iget}(\eff, a, \ell, r, \iota) \in \Pend{p} \\ \Vst{p}{\eff} = \Rd}
+  {\Pend{p} \mathrel{{:}{=}} \Pend{p} \setminus \{\mathsf{iget}(\dots)\} \\\\
+   \Net \mathrel{{:}{=}} \Net \uplus
+     \{\mathsf{GETREP}(p \to r,\, \eff,\, \Vbuf{p}{\eff}[a \dots a{+}\ell{-}1],\, \iota)\}}
+\end{mathpar}
+
+\noindent\srcrefr{ops.c}{260}{280} and \srcrefr{ops.c}{317}{357}. Both rules
+require status exactly $\Rd$: a $\Wr$ version is incomplete and a $\Dc$ one is
+already forfeit. A get whose target version is $\Absent$ simply does not
+fire, which is why violating \cref{res:staleness} manifests as a hang rather
+than an error \devmark{dev:lookahead-uncheck}.
+
+\subsubsection*{Termination}
+
+The \gls{barrier} is a three-round token ring, summarised as three rules; the
+five-state machine implementing them is \srcrefr{barrier.c}{113}{225}.
+
+\begin{mathpar}
+\inferrule*[left=\rn{Bar-One}]
+  {p \text{ has no } \mathsf{oput}/\mathsf{oget} \text{ pending} \\
+   p = 0 \vee \text{first-round token received}}
+  {\text{forward first-round token to } p \oplus 1}
+
+\inferrule*[left=\rn{Bar-Two}]
+  {\text{first ring closed} \\ \Pend{p} = \emptyset}
+  {\mathit{drained}_p \mathrel{{:}{=}} \mathsf{true} \\\\
+   \text{forward second-round token to } p \oplus 1}
+\end{mathpar}
+
+\begin{mathpar}
+\inferrule*[left=\rn{Bar-Exit}]
+  {\text{second ring closed}}
+  {\text{forward exit token} \\\\ \mathit{drained}_p \mathrel{{:}{=}} \mathsf{false} \\\\
+   \text{barrier returns}}
+\end{mathpar}
+
+While $\mathit{drained}_p$ holds, \rn{Publish} and \rn{Retire} drop their
+neighbour clauses (\srcref{ops.c}{85}, \srcref{ops.c}{149}). This is sound
+because the closed first ring certifies no process will issue another
+\gls{operation}, making those horizons vacuous; and necessary, since without
+it the last \glspl{version} could never publish, no further \glspl{heartbeat}
+arriving to raise the known times.
+
+% ===========================================================================
+\subsection{Fairness}
+\label{sec:l1-fairness}
+
+Safety holds for every execution; liveness needs the usual assumptions for an
+asynchronous message-passing system.
+
+\begin{definition}[Admissible execution]\label{def:admissible}
+An execution is \emph{admissible} when
+\begin{enumerate}[label=(F\arabic*),leftmargin=1.5cm,itemsep=1pt]
+  \item \label{f:delivery} every message in $\Net$ is eventually delivered by
+    \rn{Recv} (reliable, eventual, no loss or duplication);
+  \item \label{f:progress} every rule other than \rn{Tick} that stays
+    continuously enabled eventually fires --- in particular a process blocked in
+    a get keeps driving the engine (\srcref{ops.c}{724});
+  \item \label{f:clock} every process either eventually enters the terminating
+    barrier or advances its clock without bound.
+\end{enumerate}
+\end{definition}
+
+\ref{f:clock} formalises the warning in \cref{sec:exec-clocks} that a silent
+process blocks its neighbours. It is a restriction on the \emph{application},
+not the runtime.
+
+% ===========================================================================
+\subsection{Invariants}
+\label{sec:l1-invariants}
+
+\begin{invariant}[Clock soundness]\label{inv:l1-clock}
+$\kn{p}{q} \le \clk{q}$ for all $p,q$, at every reachable configuration.
+\end{invariant}
+
+\begin{proof}
+Initially both sides are $0$. $\kn{p}{q}$ changes only in \rn{Recv}, to
+$\mathit{stamp}(m)$ for a message $m$ sent by $q$. Each message form is
+stamped at or below $q$'s clock at send time: $\mathsf{PUT}$, $\mathsf{GETREQ}$
+and $\mathsf{HB}$ carry the origin time $t$, and \rn{Tick} has already set
+$\clk{q} \ge t$; $\mathsf{GETREP}$ carries $\eff = t + \delta \le t \le \clk{q}$
+because \glspl{get} have $\delta \le 0$; $\mathsf{TOK}$ carries $\ell$, which by
+\cref{res:terminate} bounds every effective time and is passed identically by
+all \glspl{rank}. Since $\clk{q}$ is nondecreasing (\cref{ts:clock}), the bound
+survives.
+\end{proof}
+
+\Cref{prop:conservative} now has teeth: known times are lower bounds, both
+guards are monotone in them, so every promotion the runtime makes is one a
+perfectly-informed oracle would also make. The runtime is never wrong, only
+sometimes late.
+
+% ===========================================================================
+\subsection{Safety}
+\label{sec:l1-safety}
+
+\begin{theorem}[Write closure]\label{thm:write-closure}
+Let $\Hist$ be legal. If $\Vst{p}{\eff} \ge \Rd$ in some reachable
+configuration, then no operation issued at or after that point is a \gls{put}
+targeting $(p, \eff)$, and $\Pend{p}$ contains no unapplied put for $\eff$.
+Consequently \rn{Apply-Violation} is unreachable.
+\end{theorem}
+
+\begin{proof}
+The second clause is the first premise of \rn{Publish}. For the first,
+consider a put $w$ targeting $(p,\eff)$ issued by process $\proc{r}$ after the
+promotion.
+
+\emph{Case $r \ne p$.} Then $r \in \nbr{p}$, since \cref{res:lookahead}
+requires $r \in \nbr{p}$. The \rn{Publish} premise gives
+$\kn{p}{r} + \dist{p}{r} > \eff$, and \cref{inv:l1-clock} gives
+$\clk{r} \ge \kn{p}{r}$, hence
+\[
+  \clk{r} + \dist{r}{p} \;\ge\; \kn{p}{r} + \dist{p}{r} \;>\; \eff,
+\]
+using (M3) for $\dist{r}{p} = \dist{p}{r}$. By \cref{res:monotone} the origin
+time of $w$ is at least $\clk{r}$ as it stands now, and by
+\cref{res:lookahead} $\opdelta{w} \ge \dist{r}{p}$. Therefore
+$\opeff{w} = \optime{w} + \opdelta{w} \ge \clk{r} + \dist{r}{p} > \eff$, so
+$w$ does not target $\eff$. Contradiction.
+
+\emph{Case $r = p$.} The \rn{Publish} premise gives $\clk{p} \ge \eff$. By
+\cref{res:monotone}, $\optime{w} \ge \clk{p} \ge \eff$, and
+$\opdelta{w} \ge 0$, so $\opeff{w} \ge \eff$ with equality only if
+$\optime{w} = \eff$ and $\opdelta{w} = 0$. That residual case is exactly a
+local zero-\gls{delta} write at the process's current time, and it is excluded by
+\cref{res:phase}: the promotion to $\Rd$ can only have been triggered by a get
+on $(p,\eff)$ having been issued, and \cref{res:phase} forbids $p$ from
+issuing a put on $(p,\eff)$ after such a get.
+\end{proof}
+
+\Cref{thm:write-closure} consumes all four mechanical restrictions, and is
+where (M2) and (M3) earn their place. Dropping symmetry breaks the inequality
+chain in the first case \devmark{dev:asymmetric}; dropping (M2) makes the
+second case's strictness fail for a neighbour at distance zero
+\devmark{dev:zero-distance}.
+
+\begin{corollary}[Immutability]\label{thm:immutability}
+For a legal history, $\Vbuf{p}{\eff}$ is constant from the moment
+$\Vst{p}{\eff}$ reaches $\Rd$ until the version is evicted.
+\end{corollary}
+
+\begin{proof}
+$\Vbuf{p}{\eff}$ is modified only by \rn{Apply}, whose premise requires
+$\Vst{p}{\eff} \in \{\Absent, \Wr\}$. By \cref{thm:write-closure} no such
+request exists after publication, and statuses never decrease except through
+\rn{Evict}, which removes the version outright.
+\end{proof}
+
+\begin{theorem}[Discard safety]\label{thm:discard-safety}
+Let $\Hist$ be legal. If $\Vst{p}{\eff} = \Dc$ in some reachable
+configuration, then no operation issued at or after that point is a get
+targeting $(p,\eff)$.
+\end{theorem}
+
+\begin{proof}
+Let $g$ be such a get, issued by $r$.
+
+\emph{Case $r \ne p$.} Then $r \in \nbr{p}$ by \cref{res:staleness}. The
+\rn{Retire} premise gives $\kn{p}{r} - \dist{p}{r} > \eff$, and
+\cref{inv:l1-clock} gives $\clk{r} \ge \kn{p}{r}$, so
+$\clk{r} - \dist{r}{p} > \eff$ by (M3). By \cref{res:monotone},
+$\optime{g} \ge \clk{r}$; by \cref{res:staleness},
+$\opdelta{g} \ge -\dist{r}{p}$. Hence
+$\opeff{g} \ge \clk{r} - \dist{r}{p} > \eff$.
+
+\emph{Case $r = p$.} The premise gives $\clk{p} \ge \eff$, and
+\cref{res:staleness} forces $\opdelta{g} = 0$ for a local get, so
+$\opeff{g} = \optime{g} \ge \clk{p} \ge \eff$. Equality would require
+$\optime{g} = \eff = \clk{p}$; but retirement additionally requires no pending
+$\mathsf{lget}$ at $\eff$, and by \cref{res:phase} combined with
+\cref{thm:write-closure} the version was already published, so any local get
+at $\eff$ was issued before retirement and has been served.
+\end{proof}
+
+\begin{theorem}[Read soundness: $\Lom \refines \Lzm$]\label{thm:read-soundness}
+Let $\Hist$ be a legal history. Every get in $\Hist$ that completes in an
+$\Lom$ execution returns exactly the bytes prescribed by
+\cref{def:read-result} with respect to $\StoreH$.
+\end{theorem}
+
+\begin{proof}
+A get on $(q,\eff)$ returns via \rn{Serve-Local} or \rn{Serve-Remote},
+both of which read $\Vbuf{q}{\eff}$ while $\Vst{q}{\eff} = \Rd$. Define the
+abstraction $\alpha(\Cfg)$ mapping each published or retired version to the
+byte function $\Vbuf{q}{\eff}$. We show $\alpha(\Cfg)$ agrees with $\StoreH$
+on every published version.
+
+Fix a \gls{cell} $c = \cell{q}{\eff}{a}$ with $\Vst{q}{\eff} = \Rd$. By
+\cref{thm:write-closure}, every put in $\Hist$ targeting $c$ has already been
+applied by \rn{Apply}. By \cref{res:write-disjoint} there is at most one
+such put $w$, so no application overwrote another, and the byte in
+$\Vbuf{q}{\eff}$ at offset $a$ is the byte $w$ supplied --- which is
+$\StoreH(c)$ by \cref{def:store-h}. If there is no such put, no
+\rn{Apply} ever touched offset $a$ of this version, so it retains the
+zero from version creation (\cref{conv:no-inherit}), and
+$\StoreH(c) = 0$ by the second clause of \cref{def:store-h}.
+By \cref{thm:immutability} the value does not subsequently change, so every
+get on $c$ returns the same byte.
+\end{proof}
+
+% ===========================================================================
+\subsection{Liveness}
+\label{sec:l1-liveness}
+
+Safety says a completed get is right; liveness says it completes.
+
+\begin{theorem}[Deadlock freedom]\label{thm:deadlock-freedom}
+Let $\Hist$ be legal and let the execution be admissible
+(\cref{def:admissible}). Then every get completes.
+\end{theorem}
+
+\begin{proof}
+Suppose not, and consider a get blocked forever on $(q, \eff)$. It is waiting
+for \rn{Publish} at $(q,\eff)$, whose premises are of three kinds.
+
+The pending-put clause discharges itself: $\Pend{q}$ is finite, no new put
+targeting $\eff$ can be created once $q$'s neighbours have advanced (see
+below), and \rn{Apply} is always enabled for a pending put on a
+non-published version, so by \ref{f:progress} they all clear.
+
+The local-clock clause $\clk{q} \ge \eff$ discharges by \ref{f:clock}: $q$
+either advances past $\eff$ or enters the barrier, and in the barrier
+$\mathit{drained}_q$ removes the clause.
+
+The neighbour clause requires, for each $r \in \nbr{q}$, that
+$\kn{q}{r} > \eff - \dist{q}{r}$. By \ref{f:clock} and \ref{f:delivery} the
+heartbeats of \rn{Tick} raise $\kn{q}{r}$ without bound unless $r$ is
+itself permanently blocked. So define the \emph{demand relation}: a process
+blocked at effective time $\eff$ on process $\proc{q}$ demands that each
+$r \in \nbr{q}$ reach origin time strictly greater than
+$\eff - \dist{q}{r}$.
+
+Each step of this relation strictly decreases the demanded time, by at least
+$\dist{q}{r} \ge 1$ (M2). A cyclic wait would therefore require a chain
+$\eff > \eff_1 > \dots > \eff_k = \eff$, which is impossible. Since $\Ranks$
+is finite, the demand chain from any blocked process is a finite acyclic chain
+terminating at a process whose demand is vacuous, and that process makes progress
+by \ref{f:clock}. Working back along the chain, every blocked process is
+eventually released.
+\end{proof}
+
+\begin{remark}[Why (M2) is not negotiable]\label{rem:zero-cycle}
+The proof consumes (M2) exactly once, essentially. Suppose $\dist{p}{q} = 0$
+were permitted with its natural reading, ``visible in the same tick''. Then
+$p$'s \rn{Publish} clause at $\eff$ reads $\kn{p}{q} > \eff$ and $q$'s reads
+$\kn{q}{p} > \eff$: each must observe the other strictly beyond $\eff$ before
+either may publish $\eff$, and neither can advance past $\eff$ until it has
+read the other's version at $\eff$. The demand chain closes into a zero-weight
+cycle and both block forever --- the smallest instance of the classical
+zero-lookahead deadlock \cite{chandy1979} \devmark{dev:zero-distance}.
+\end{remark}
+
+\begin{theorem}[Barrier correctness]\label{thm:barrier-correct}
+Under \cref{def:admissible} and \cref{res:collective,res:terminate}, the
+three-round protocol terminates at every process, and when a process returns from
+it, $\Pend{p} = \emptyset$ at every process and $\Net$ contains no
+$\mathsf{PUT}$, $\mathsf{GETREQ}$ or $\mathsf{GETREP}$.
+\end{theorem}
+
+\begin{proof}[Proof sketch]
+First round terminates because each process's outgoing set is finite and
+\ref{f:delivery} completes the sends. When the first-round token returns to process $0$,
+every process has passed \rn{Bar-One}, so no process will emit a further
+$\mathsf{PUT}$ or $\mathsf{GETREQ}$. Second round sets $\mathit{drained}_p$, which
+removes the neighbour clauses, so every remaining version publishes and
+retires without further external input; every pending $\mathsf{iget}$ is then
+served and every $\mathsf{oget}$ receives its reply, so $\Pend{p}$ drains.
+When the second-round token returns to process $0$, this has happened everywhere. The exit
+round propagates that conclusion.
+\end{proof}
+
+\begin{proposition}[Three rounds are necessary]\label{thm:barrier-three-rounds}
+No two-round ring protocol establishes the postcondition of
+\cref{thm:barrier-correct} at every process.
+\end{proposition}
+
+\begin{proof}
+Two distinct global predicates must be established in sequence:
+$\Phi_1$, ``no process will issue another operation'', and $\Phi_2$, ``no process
+holds an incomplete request''. $\Phi_2$ cannot be evaluated locally before
+$\Phi_1$ is known globally, because until every process has stopped issuing, a
+process with an empty queue may still receive a request. A single ring traversal
+establishes one predicate, and establishes it \emph{only at the initiator}:
+when the token returns to process $0$, process $0$ knows $\Phi_1$, but process $\proc{i}$ with $i > 0$
+knows only that processes $0..i$ had passed when the token crossed it.
+
+Hence traversal one establishes $\Phi_1$ at process $0$, and traversal two both
+propagates $\Phi_1$ and collects $\Phi_2$, again terminating the knowledge at
+process $0$. A process $\proc{i}$ with $i > 0$ that exited after forwarding the second token would
+do so without knowing $\Phi_2$ holds at processes $\proc{j}$ with $j > i$; such a process may still
+be driving progress, and tearing down \gls{region} $i$ at that moment orphans any
+reply still owed to it. A third traversal is required to announce $\Phi_2$.
+\end{proof}
+
+% ===========================================================================
+\subsection{Refinement}
+\label{sec:l1-refinement}
+
+\begin{corollary}[$\Lom$ implements $\Lzm$]\label{cor:refinement}
+For every deterministic program whose executions are legal, every admissible
+$\Lom$ execution satisfies \cref{def:correctness}.
+\end{corollary}
+
+\begin{proof}
+Clause (ii) is \cref{thm:read-soundness}. Clause (i) is
+\cref{thm:deadlock-freedom} for the gets and \cref{thm:barrier-correct} for
+\gls{termination}.
+\end{proof}
+
+The refinement map is the annotation on each rule in \cref{sec:l1-rules}.
+Three aspects of $\Lim$ are abstracted away:
+
+\begin{description}[leftmargin=1.1cm,style=nextline,font=\normalfont\bfseries]
+\item[The allocation policy.] $\Lom$ fixes only the contract of
+  \cref{def:alloc-ops} --- fresh handle, contiguous extent, disjoint from
+  every live one, stable until freed --- and \cref{ts:alloc} leaves the choice
+  of interval nondeterministic. Any policy resolving that nondeterminism
+  refines the specification, so the scheme
+  \code{dstm\_region\_malloc} happens to implement is not modelled. It
+  determines which addresses a derived structure occupies, never what a
+  \gls{cell} contains.
+
+\item[MPI tags, buffers and packing.] The $\iota$ of \rn{Get-Remote} is
+  the only piece of the messaging layer $\Lom$ retains, because reply matching
+  is semantically visible. Packing, non-blocking send progress and the
+  request status DFA of \srcrefr{request.h}{43}{46} refine the atomic
+  \rn{Recv} and \rn{Serve} rules by \ref{f:delivery}.
+
+\item[Session communicators.] \code{dstm\_start} duplicates a private
+  communicator per \gls{session}, which makes $\Net$ per-session. $\Lom$ models one
+  session, so this is exactly the assumption that $\Net$ starts empty.
+\end{description}

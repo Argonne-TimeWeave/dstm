@@ -1,0 +1,515 @@
+\chapter{APIs}
+\label{ch:apis}
+
+This chapter presents the public interface in terms of the objects and rules
+of \crefrange{ch:definitions}{ch:semantics}: for each entry point, a
+signature, a contract, and which $\Lom$ rules the call fires.
+
+The contracts use a fixed vocabulary:
+
+\begin{description}[leftmargin=1.9cm,style=nextline,font=\normalfont\bfseries]
+  \item[Requires] what must hold on entry. Split by \emph{enforcement}:
+    \textsc{chk} is verified and reported through the return value,
+    \textsc{ast} is verified and aborts on failure, and \textsc{res} is an
+    unverified program restriction from \cref{sec:l0-restrictions}.
+  \item[Ensures] the postcondition, in terms of $\StoreH$ or the
+    configuration.
+  \item[Frame] the components of \cref{def:configuration} the call may
+    modify.
+  \item[Blocks] whether the call may wait, and on what.
+\end{description}
+
+The \textsc{res} rows are the ones to read carefully. They are the price of
+the memory model of \cref{sec:memory-model}, and none is currently checked
+\devmark{dev:lookahead-uncheck}.
+
+% ===========================================================================
+\section{Session lifecycle}
+\label{sec:api-session}
+
+\begin{lstlisting}
+int  dstm_init(int *argc, char **argv[]);
+int  dstm_init_comm(int *argc, char **argv[], MPI_Comm comm);
+int  dstm_start(dstm_distance_t *dist);
+int  dstm_start_custom(dstm_distance_t *dist, dstm_opts_t opts);
+int  dstm_fini(dstm_time_t last_time);
+int  dstm_barrier(dstm_time_t last_time);
+int  dstm_finalize(void);
+\end{lstlisting}
+
+\code{dstm\_init} establishes the process-wide communicator but begins no
+\gls{session}; \code{dstm\_start} begins one, fixing $\cgraph$ and allocating
+every region. Before the first \code{dstm\_start} there is no region, so no
+versioned memory exists.
+
+\begin{table}[htbp]
+\centering\small
+\begin{tabularx}{\textwidth}{@{}l l >{\raggedright\arraybackslash}X@{}}
+\toprule
+\multicolumn{3}{@{}l}{\code{dstm\_start(dist)} --- open a session} \\
+\midrule
+Requires & \textsc{chk} & \code{dist} non-\code{NULL}, of size $\worldsize$;
+  region size $\ge$ 64 bytes \\
+         & \textsc{res} & $\Dmat$ encodes a well-formed \gls{comm-graph}
+  (\cref{def:metric-closure}). Only the diagonal and $\Dmat_{ij} \ge -1$ are
+  checked \devmark{dev:zero-distance} \devmark{dev:asymmetric} \\
+         & \textsc{res} & collective: all processes call it, in the same order
+  (\cref{res:collective}) \\
+Ensures  & & $\clk{p} = 0$, $\kn{p}{q} = 0$, $\Vers{p} = \emptyset$,
+  $\Pend{p} = \emptyset$, $\Net = \emptyset$; i.e.\ $\Cfg_0$ of
+  \cref{def:configuration} \\
+Frame    & & the whole configuration \\
+Blocks   & & no \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\begin{table}[htbp]
+\centering\small
+\begin{tabularx}{\textwidth}{@{}l l >{\raggedright\arraybackslash}X@{}}
+\toprule
+\multicolumn{3}{@{}l}{\code{dstm\_barrier(last\_time)} --- establish quiescence} \\
+\midrule
+Requires & \textsc{res} & $\ell \ge \max_{o} \opeff{o}$ over \emph{all} processes,
+  and identical on every process (\cref{res:terminate})
+  \devmark{dev:clock-conflation} \\
+         & \textsc{res} & collective (\cref{res:collective}) \\
+Ensures  & & quiescence (\cref{def:quiescence}): $\Pend{p} = \emptyset$ at
+  every process and no data message in $\Net$
+  (\cref{thm:barrier-correct}) \\
+Frame    & & $\Pend{p}$, $\Vers{p}$, $\Net$, $\mathit{drained}_p$ \\
+Blocks   & & yes, until the three-round ring completes
+  (\rn{Bar-One}, \rn{Bar-Two}, \rn{Bar-Exit}) \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+Passing too small an $\ell$ is the commonest way to hang a DSTM program: the
+second round relies on $\mathit{drained}_p$ to let the final \glspl{version}
+publish, so a process still expecting an \gls{effective-time} beyond $\ell$
+never resolves its pending get. \code{dstm\_fini} is \code{dstm\_barrier} plus
+teardown of the region, graph and \gls{session} communicator, and inherits the
+restriction.
+
+% ===========================================================================
+\section{Distance matrices}
+\label{sec:api-distance}
+
+\begin{lstlisting}
+int dstm_distance_create_ring(dstm_distance_t **ret, size_t size);
+int dstm_distance_create_complete(dstm_distance_t **ret, size_t size);
+int dstm_distance_create_torus(dstm_distance_t **ret, size_t size);
+/* ... star, line, mesh, tree, hypercube, dragonfly ... */
+int dstm_distance_create_from_matrix(dstm_distance_t **ret, size_t size,
+                                     const int *matrix);
+int dstm_distance_get(dstm_distance_t *dst, int i, int j);
+void dstm_distance_destroy(dstm_distance_t **dist);
+\end{lstlisting}
+
+\alsoterm{distance-matrix}%
+A \code{dstm\_distance\_t} is the API-level encoding of a
+\gls{comm-graph}: $\Dmat_{ij} = \ew{i}{j}$ when a channel joins the two
+processes, $\Dmat_{ii} = 0$, and $-1$ where there is no channel. Note that
+$-1$ encodes \emph{absence of a channel}, not infinite distance --- the two
+processes may well be at finite distance through a path
+(\cref{rem:adjacency-vs-distance}).
+
+The named constructors assign equal weight to every channel, so they are
+metrically closed by construction and (G1)--(G3) hold.
+\code{dstm\_distance\_create\_from\_matrix} is the escape hatch for
+application-derived topologies and is the only place where a malformed graph
+can enter the system.
+
+\begin{table}[htbp]
+\centering\small
+\begin{tabularx}{\textwidth}{@{}l l >{\raggedright\arraybackslash}X@{}}
+\toprule
+\multicolumn{3}{@{}l}{\code{dstm\_distance\_create\_from\_matrix(ret, n, m)}} \\
+\midrule
+Requires & \textsc{chk} & $m_{ii} = 0$; $m_{ij} \ge -1$ \\
+         & \textsc{res} & $m_{ij} = m_{ji}$ (G2) --- not checked
+  \devmark{dev:asymmetric} \\
+         & \textsc{res} & $m_{ij} \ne 0$ for $i \ne j$, i.e.\ (M2) --- not
+  checked, and $0$ is silently reinterpreted as absence of a channel
+  \devmark{dev:zero-distance} \\
+         & \textsc{res} & metrically closed (\cref{def:metric-closure}):
+  no entry exceeds the total weight of a detour --- not checked \\
+Ensures  & & $\cgraph$ is fixed for the session; $\nbr{p}$ follows by
+  \cref{def:neighbourhood} and $d$ by \cref{def:distance} \\
+Blocks   & & no; purely local \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\begin{remark}[Choosing the weights]
+A channel weight is a modelling decision, not a tuning parameter:
+$\dist{p}{q}$ must be a sound lower bound on the simulated latency of every
+interaction between the two processes. If anything in the model can cross
+faster, the program cannot express it legally without violating
+\cref{res:lookahead}. Subject to soundness, larger is better:
+\cref{cor:space-drift} shows memory grows with $\diam_p$, but
+\cref{thm:pipeline-depth} shows the tolerable drift grows with it too.
+\end{remark}
+
+% ===========================================================================
+\section{The kernel operations}
+\label{sec:api-kernel}
+
+\begin{lstlisting}
+int dstm_put(int rank, int region_id, dstm_time_t time, dstm_time_t delta,
+             dstm_ptr_t dst, void *src, size_t size);
+int dstm_get(int rank, int region_id, dstm_time_t time, dstm_time_t delta,
+             void *dst, dstm_ptr_t src, size_t size);
+int dstm_get_or_default(int rank, int region_id, dstm_time_t time,
+                        dstm_time_t delta, void *dst, dstm_ptr_t src,
+                        size_t size, const void *default_value);
+\end{lstlisting}
+
+These are the only \glspl{operation} touching the \gls{store}; everything in
+\cref{sec:api-darray,sec:api-dgraph} reduces to them.
+
+\begin{table}[htbp]
+\centering\small
+\begin{tabularx}{\textwidth}{@{}l l >{\raggedright\arraybackslash}X@{}}
+\toprule
+\multicolumn{3}{@{}l}{\code{dstm\_put(q, q, t, delta, dst, src, size)}
+  $\;\equiv\; \Put{p}{q}{t}{\delta}{a}{v}$} \\
+\midrule
+Requires & \textsc{ast} & \code{rank == region\_id == dst.region}
+  (\cref{def:pointer}) \\
+         & \textsc{chk} & \code{src} non-\code{NULL}; $\delta \ge 0$;
+  if $\delta = 0$ then $q = p$ \\
+         & \textsc{res} & $\delta \ge \dist{p}{q}$ (\cref{res:lookahead})
+  \devmark{dev:lookahead-uncheck} \\
+         & \textsc{res} & $t \ge \clk{p}$ (\cref{res:monotone})
+  \devmark{dev:monotone-origin} \\
+         & \textsc{res} & no other put targets any cell of
+  $\{q\}\times\{t{+}\delta\}\times[a, a{+}\mathit{size})$
+  (\cref{res:write-disjoint}) \devmark{dev:write-disjoint} \\
+         & \textsc{res} & no get on $(q, t{+}\delta)$ was issued earlier by
+  $p$ (\cref{res:phase}) \\
+Ensures  & & $\StoreH$ maps the target cells to the bytes of \code{src};
+  \code{src} may be reused immediately \\
+Frame    & & $\clk{p}$, $\Pend{p}$, $\Net$; and $\Vers{q}$ eventually \\
+Blocks   & & no \\
+Rules    & & \textsc{Tick}; then \textsc{Put-Local} or \textsc{Put-Remote};
+  later \textsc{Apply} \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\begin{table}[htbp]
+\centering\small
+\begin{tabularx}{\textwidth}{@{}l l >{\raggedright\arraybackslash}X@{}}
+\toprule
+\multicolumn{3}{@{}l}{\code{dstm\_get(q, q, t, delta, dst, src, size)}
+  $\;\equiv\; \Get{p}{q}{t}{\delta}{a}{\ell}$} \\
+\midrule
+Requires & \textsc{ast} & \code{rank == region\_id == src.region} \\
+         & \textsc{chk} & \code{dst} non-\code{NULL}; $\delta \le 0$;
+  if $\delta = 0$ then $q = p$ \\
+         & \textsc{res} & $|\delta| \le \dist{p}{q}$ (\cref{res:staleness})
+  \devmark{dev:lookahead-uncheck} \\
+         & \textsc{res} & $t \ge \clk{p}$ (\cref{res:monotone}) \\
+Ensures  & & \code{dst} holds
+  $\StoreH(\cell{q}{t+\delta}{a}) \dots$ (\cref{def:read-result}),
+  by \cref{thm:read-soundness} \\
+Frame    & & $\clk{p}$, $\Pend{p}$, $\Net$, \code{dst} \\
+Blocks   & & \textbf{yes}, until $\Vst{q}{t+\delta} = \Rd$; drives the
+  progress engine meanwhile \\
+Rules    & & \textsc{Tick}; \textsc{Get-Local}/\textsc{Get-Remote};
+  \textsc{Serve-Local}/\textsc{Serve-Remote} \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\begin{remark}[Failure modes and how they present]
+\label{rem:failure-modes}
+The three restrictions fail in visibly different ways, worth knowing when
+debugging.
+\begin{itemize}[leftmargin=1.4em,itemsep=1pt]
+  \item Violating \cref{res:lookahead} or \cref{res:phase} usually reaches
+    \rn{Apply-Violation} and \textbf{aborts}, naming the
+    \gls{effective-time}. This is the good case: it is loud.
+  \item Violating \cref{res:staleness} targets an evicted \gls{version}.
+    \rn{Serve} never fires and the program \textbf{hangs} inside
+    \code{dstm\_get}, with no diagnostic.
+  \item Violating \cref{res:write-disjoint} \textbf{silently} returns
+    whichever value arrived last. Nothing detects it, and the result varies
+    between runs.
+\end{itemize}
+\end{remark}
+
+\code{dstm\_get\_or\_default} differs in exactly one respect: if
+$t + \delta < 0$ it copies the supplied default and returns without contacting
+the owner (\cref{def:get-or-default}). It exists so the first ticks of a
+simulation need no special case. Note that on the default path it performs no
+bounds or sign checking at all, so a positive $\delta$ paired with a
+sufficiently negative $t$ silently succeeds where \code{dstm\_get} would
+reject.
+
+% ===========================================================================
+\section{Distributed arrays}
+\label{sec:api-darray}
+
+\begin{lstlisting}
+int dstm_darray_create(dstm_darray_t **ret, size_t element_size,
+                       size_t local_elements);
+int dstm_darray_create_equal(dstm_darray_t **ret, size_t element_size,
+                             size_t total_elements);
+int dstm_darray_put(dstm_darray_t *a, size_t i, void *src,
+                    dstm_time_t time, dstm_time_t delta);
+int dstm_darray_get(dstm_darray_t *a, size_t i, void *dst,
+                    dstm_time_t time, dstm_time_t delta);
+int dstm_darray_put_range (dstm_darray_t *a, const size_t *idx, size_t n,
+                           const void *src, dstm_time_t t, dstm_time_t d);
+int dstm_darray_get_range (dstm_darray_t *a, const size_t *idx, size_t n,
+                           void *dst, dstm_time_t t, dstm_time_t d);
+int dstm_darray_allgatherv(dstm_darray_t *a, void *src, void *dst,
+                           dstm_time_t time, const dstm_time_t *deltas);
+\end{lstlisting}
+
+A darray adds addressing, not semantics: \code{dstm\_darray\_put(a, g, \dots)}
+is \code{dstm\_put} applied to $\mathit{res}(g)$ of \cref{def:darray},
+inheriting every restriction of \cref{sec:api-kernel}.
+
+\begin{table}[htbp]
+\centering\small
+\begin{tabularx}{\textwidth}{@{}l l >{\raggedright\arraybackslash}X@{}}
+\toprule
+\multicolumn{3}{@{}l}{\code{dstm\_darray\_create(ret, z, m\_p)}} \\
+\midrule
+Requires & \textsc{chk} & $z \ge 1$, $m_p \ge 1$; a session is open \\
+         & \textsc{res} & collective (\cref{res:collective}); no consensus
+  guard, so a local allocation failure hangs the job
+  \devmark{dev:noncollective} \\
+         & \textsc{res} & destroyed collectively, and only once quiescent
+  \devmark{dev:destroy-lifetime} \\
+Ensures  & & an \gls{allocation} of $z\,m_p$ bytes on each process, plus the
+  \gls{partition} of \cref{def:partition} with $b_p$ published by all-gather;
+  $\beta_p$ is that allocation's base, chosen locally and exchanged \\
+Errors   & & \code{-DSTM\_ENOMEM} iff no free interval of $z\,m_p$ bytes
+  exists (\cref{def:alloc-ops}) \\
+Blocks   & & yes, two all-gathers \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\begin{table}[htbp]
+\centering\small
+\begin{tabularx}{\textwidth}{@{}l l >{\raggedright\arraybackslash}X@{}}
+\toprule
+\multicolumn{3}{@{}l}{\code{dstm\_darray\_get/put(a, i, buf, t, delta)}} \\
+\midrule
+Requires & \textsc{res} & $i < \sum_p m_p$ --- \emph{not checked}; an
+  out-of-range index resolves into the last process's region and corrupts
+  a neighbouring allocation \devmark{dev:darray-bounds} \\
+         & & all restrictions of \code{dstm\_put}/\code{dstm\_get} with
+  $q = \mathit{own}(i)$ \\
+Ensures  & & operates on the $z$ bytes at $\mathit{res}(i)$
+  (\cref{def:darray}) \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection*{The collective read--write}
+
+\code{dstm\_darray\_allgatherv} is the one composite \gls{operation}, with an
+unusually strict contract: $\mathit{deltas}[p] > 0$ for the caller's own slot
+and $\mathit{deltas}[r] < 0$ for every other, zero rejected everywhere.
+
+The reason is \cref{res:phase}. The call publishes the caller's slice then
+reads everyone else's. Forcing the local \gls{delta} strictly positive and
+remote ones strictly negative places the written and read \glspl{version} at
+provably distinct \glspl{effective-time}, so the write-phase/read-phase
+discipline cannot be violated by the composite --- \cref{res:phase} enforced
+by typing.
+
+\begin{table}[htbp]
+\centering\small
+\begin{tabularx}{\textwidth}{@{}l l >{\raggedright\arraybackslash}X@{}}
+\toprule
+\multicolumn{3}{@{}l}{\code{dstm\_darray\_allgatherv(a, src, dst, t, deltas)}} \\
+\midrule
+Requires & \textsc{chk} & $\mathit{deltas}[p] > 0$;
+  $\mathit{deltas}[r] < 0$ for $r \ne p$ \\
+         & \textsc{res} & $|\mathit{deltas}|=\worldsize$; identical $t$ on
+  every process; $\mathit{deltas}[p] \ge \dist{p}{r}$ and
+  $|\mathit{deltas}[r]| \le \dist{p}{r}$ \\
+Ensures  & & $\mathit{dst}$ holds every process's slice \emph{except the
+  caller's own}, which is never written \\
+Blocks   & & yes, once per remote element \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+That the caller's own slice is left untouched in \code{dst} follows from the
+design, not oversight: reading it back would need a local get at the same
+\gls{effective-time} as the local put, which \cref{res:phase} forbids.
+
+% ===========================================================================
+\section{Distributed graphs}
+\label{sec:api-dgraph}
+
+\begin{lstlisting}
+int dstm_dgraph_create(dstm_dgraph_t **ret, size_t vertex_state_size,
+                       size_t edge_state_size, size_t local_vertices,
+                       const size_t *local_out_degrees,
+                       const size_t *local_edge_dsts,
+                       const void *local_vertex_states,
+                       const void *local_edge_states);
+int dstm_dgraph_vertex_get(dstm_dgraph_t *g, size_t v, void *dst,
+                           dstm_time_t time, dstm_time_t delta);
+int dstm_dgraph_edge_put  (dstm_dgraph_t *g, size_t u, size_t v, void *src,
+                           dstm_time_t time, dstm_time_t delta);
+int dstm_dgraph_neighbors_get(dstm_dgraph_t *g, size_t u,
+                              size_t *out, size_t *io_count);
+int dstm_dgraph_derive_distance(dstm_dgraph_t *g, dstm_distance_t **ret,
+                                int default_delta);
+\end{lstlisting}
+
+A \glslink{dgraph}{dgraph} holds \emph{two} kinds of state, and keeping them apart is the key to
+using the API.
+
+\begin{description}[leftmargin=1.3cm,style=nextline,font=\normalfont\bfseries]
+\item[Topology] --- the vertex set, the edge set and the adjacency structure.
+  Frozen at construction, held by every neighbouring \gls{process} as a
+  \gls{topology-replica}, and \emph{not versioned}. Queries such as \code{neighbors\_get} and
+  \code{degree\_get} therefore carry no $(t, \delta)$ and involve no
+  communication and no blocking.
+\item[State] --- the per-vertex and per-edge payloads. Versioned exactly like
+  darray elements, with identical restrictions.
+\end{description}
+
+\begin{remark}[Edges are owned by their source]\label{rem:edge-ownership}
+The state of edge $(u,v)$ lives on the owner of $u$, which makes the natural
+idiom legal: reading edge $(u,v)$ with $u$ local is a local get at $\delta =
+0$, writing edge $(v,u)$ with $v$ remote is a remote put at $\delta =
++\dist{}{}$. Reading $(x,y)$ as ``the inbox at $x$ for traffic from $y$'' puts
+every \gls{operation} on the legal side of the ownership boundary and gives
+each \gls{cell} one writer, discharging \cref{res:write-disjoint} structurally
+--- the \glslink{mailbox}{mailbox pattern} in graph form.
+\end{remark}
+
+\begin{table}[htbp]
+\centering\small
+\begin{tabularx}{\textwidth}{@{}l l >{\raggedright\arraybackslash}X@{}}
+\toprule
+\multicolumn{3}{@{}l}{\code{dstm\_dgraph\_edge\_get/put(g, u, v, buf, t, delta)}} \\
+\midrule
+Requires & \textsc{chk} & $u, v <$ total vertices; edge $(u,v)$ declared,
+  else \code{-DSTM\_ENOTFOUND} \\
+         & \textsc{chk} & the owner of $u$ is the local process or a topology
+  neighbour, else \code{-DSTM\_ENOTLOCAL} \\
+         & \textsc{res} & the restrictions of \code{dstm\_put}/\code{dstm\_get}
+  with $q = \mathit{own}(u)$ \\
+Ensures  & & operates on the edge-state slot of $(u,v)$ \\
+Blocks   & & get: yes. put: no. Resolution of $(u,v)$ itself: never \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\code{-DSTM\_ENOTLOCAL} is a genuine partiality, not an error: a vertex owned
+by a non-neighbouring process is a valid global identifier whose adjacency
+this process does not replicate.
+
+\begin{table}[htbp]
+\centering\small
+\begin{tabularx}{\textwidth}{@{}l l >{\raggedright\arraybackslash}X@{}}
+\toprule
+\multicolumn{3}{@{}l}{\code{dstm\_dgraph\_derive\_distance(g, ret, d)}} \\
+\midrule
+Requires & \textsc{chk} & $d > 0$; collective \\
+Ensures  & & $\Dmat_{ii} = 0$; $\Dmat_{ij} = d$ if some edge joins a vertex of
+  $i$ to one of $j$ \emph{in either direction}; no channel otherwise \\
+         & & the result is a well-formed \gls{comm-graph}
+  (\cref{prop:derive-wf}) \\
+Blocks   & & yes, one all-gather \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\begin{proposition}[Derived matrices are well formed]
+\label{prop:derive-wf}
+The graph encoded by \code{dstm\_dgraph\_derive\_distance} satisfies
+(G1)--(G3) and is metrically closed.
+\end{proposition}
+
+\begin{proof}
+(G1) holds because the diagonal is written unconditionally to $0$,
+independently of any edge data, so intra-process edges cannot perturb it.
+(G2) holds because the adjacency predicate is the symmetric closure
+$\mathit{touch}(i,j) \vee \mathit{touch}(j,i)$ of the ``some edge crosses''
+relation, and the assigned weight is the same $d$ on both sides. (G3) holds
+because $d > 0$ is checked and every channel weighs exactly $d$.
+
+For metric closure, every channel has the same weight $d$, so any detour
+around a channel uses at least two channels and costs at least $2d > d$. The
+direct channel is therefore always a shortest path, and $\ew{i}{j} =
+\dist{i}{j}$.
+\end{proof}
+
+\Cref{prop:derive-wf} is why the dgraph path has never exhibited
+\cref{dev:zero-distance} or \cref{dev:asymmetric}: it cannot construct a graph
+that triggers them. Only the hand-written \code{create\_from\_matrix} path
+can.
+
+% ===========================================================================
+\section{Legal idioms}
+\label{sec:api-idioms}
+
+The restrictions are easiest to discharge by construction. Three patterns do
+so.
+
+\subsection*{Push}
+
+\begin{lstlisting}
+for (t = 0; t < T; t++) {
+        /* consume: own inbox at the current tick */
+        for (s in neighbours) dstm_darray_get(a, cell(me, s), &in[s], t, 0);
+        compute();
+        /* produce: neighbour inboxes, one distance ahead */
+        for (d in neighbours) dstm_darray_put(a, cell(d, me), &out[d], t, D(me,d));
+}
+\end{lstlisting}
+
+Discharges \cref{res:lookahead} ($\delta = \dist{}{}$ exactly),
+\cref{res:staleness} (local reads have $\delta = 0$),
+\cref{res:write-disjoint} (cell $(d, \mathit{me})$ has $\mathit{me}$ as its
+only writer) and \cref{res:phase} (all \glspl{get} precede all \glspl{put} at each tick, and
+they target different \glspl{effective-time} anyway). Consumer tick is
+$t + \dist{}{}$ by \cref{thm:pipeline-depth}. One message per edge per tick.
+
+\subsection*{Pull}
+
+\begin{lstlisting}
+for (t = 0; t < T; t++) {
+        /* produce: own region at the current tick */
+        dstm_darray_put(a, cell(me, me), &out, t, 0);
+        /* consume: neighbours' regions, one distance behind */
+        for (s in neighbours) dstm_darray_get(a, cell(s, s), &in[s], t, -D(me,s));
+        compute();
+}
+\end{lstlisting}
+
+Same discharge, with the put and the get exchanging roles. Note the put must
+precede the gets in \gls{program-order} at each tick: they are at different
+effective times so \cref{res:phase} is not strictly at issue, but a \gls{process} that
+reads before publishing stalls its neighbours for a full round trip.
+
+\subsection*{Mailbox indexing}
+
+Both idioms index the shared structure by \emph{(destination, source)}. This
+is what makes \cref{res:write-disjoint} structural rather than a proof
+restriction: cell $(d,s)$ is written only by $s$ and read only by $d$, so no
+two writers can ever meet. Any application that can be phrased this way gets
+determinism for free, and this is the recommended default.
+
+\begin{remark}[Publish every tick, including empties]\label{rem:publish-empty}
+Under \cref{conv:no-inherit} an unwritten \gls{version} still exists,
+zero-filled, and a reader will observe it. The subtle failure is the opposite:
+a producer skipping a tick because it has nothing to send leaves its consumer
+reading zeroes, usually the intended meaning of ``nothing arrived''.
+Publishing every outbound direction every tick also guarantees one writer per
+edge version, the cleanest way to satisfy \cref{res:write-disjoint}.
+\end{remark}

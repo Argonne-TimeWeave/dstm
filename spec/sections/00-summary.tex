@@ -1,0 +1,170 @@
+\chapter*{Summary}
+\addcontentsline{toc}{chapter}{Summary}
+\markboth{Summary}{Summary}
+
+\section*{What this document is}
+
+DSTM \cite{dstm2026} is a distributed programming model for parallel
+discrete-event and agent-based simulation. It provides a partitioned
+distributed array versioned over simulation time, so producers and consumers
+can reference the same state at different points on a shared timeline.
+\Glspl{process} are thereby free to \gls{drift} out of lockstep without
+rollback or global \glspl{barrier}.
+
+The published description is high-level. This document supplies the ground
+underneath it: what the objects are, what a program must guarantee, what the
+runtime guarantees in return, and what follows from the combination.
+
+It is \emph{prescriptive}: it specifies the model DSTM is meant to realise,
+and records every departure of the current implementation in
+\cref{ch:deviations}. Fourteen are recorded, six affecting soundness.
+
+\section*{The central idea, in one sentence}
+
+\begin{center}
+\begin{minipage}{0.9\textwidth}
+\itshape
+DSTM is dynamic single assignment over the index space
+$\Ranks \times \Time \times \Addr$, in which the time coordinate acts as a
+renaming dimension that eliminates every anti- and output-dependence across
+timesteps, and the \gls{comm-graph} supplies the per-channel \gls{lookahead} that makes
+the residual flow-dependence graph acyclic --- and therefore schedulable
+without rollback and without \glspl{barrier}.
+\end{minipage}
+\end{center}
+
+Each mechanism then has a standard counterpart in dependence theory and
+scheduling, and the properties follow from familiar results.
+\Cref{tab:sync-dictionary} gives the dictionary; the essentials are that
+versioning is renaming (\cref{thm:renaming}), a \gls{delta} is an edge weight
+(\cref{lem:edge-span}), \gls{drift} is slack (\cref{def:slack}), and the
+absence of a per-tick \gls{barrier} makes the cost a critical path rather than
+a sum of per-tick maxima (\cref{thm:makespan}).
+
+\section*{Structure}
+
+\Cref{ch:definitions} fixes the vocabulary, separating the four quantities
+called ``time'' --- origin, delta, effective, clock --- and the three called
+``memory'' --- region, version, cell. The memory model
+(\cref{sec:memory-model}) and execution model (\cref{sec:execution-model})
+follow.
+
+\Cref{ch:semantics} gives the semantics in three layers. $\Lzm$
+(\cref{sec:l0}) is axiomatic: eight restrictions and one equation defining the
+store. $\Lom$ (\cref{sec:l1}) is operational, its rules annotated with the
+source lines implementing them. \Cref{sec:sync} recasts the system as a
+dependence graph and derives the scheduling and memory results.
+
+\Cref{ch:apis} presents the public interface against those objects, one
+contract per entry point, separating checked preconditions from unchecked
+program restrictions.
+
+\section*{The restrictions}
+
+DSTM offers an unusually strong memory model --- a read returns exactly the
+byte written, with no coherence protocol, fences or visibility ordering. That
+is paid for by eight restrictions on the program. Two carry most of the weight
+and appear nowhere in the existing documentation or source:
+
+\begin{center}
+\begin{minipage}{0.88\textwidth}
+\itshape
+The distance $\dist{p}{q}$ is a lower bound on how long a write takes to
+become visible (\cref{res:lookahead}: $\delta \ge \dist{p}{q}$), and an upper
+bound on how far back a read may look (\cref{res:staleness}:
+$|\delta| \le \dist{p}{q}$).
+\end{minipage}
+\end{center}
+
+This duality makes the paper's \glslink{pull-model}{pull} and
+\glslink{push-model}{push} idioms both legal, and --- perhaps surprisingly ---
+the same schedule (\cref{thm:pipeline-depth}). \Cref{ch:restrictions} lists
+all eight with proposed checks; seven cost $O(1)$ per \gls{operation}.
+
+\section*{Results}
+
+\begin{table}[htbp]
+\centering
+\small
+\begin{tabularx}{\textwidth}{@{}l >{\raggedright\arraybackslash}X l@{}}
+\toprule
+& \textbf{Result} & \textbf{Where} \\
+\midrule
+Safety & A published version is complete: no legal operation can still write
+  to it & \cref{thm:write-closure} \\
+       & Published contents never change & \cref{thm:immutability} \\
+       & A retired version can never be legally read again
+  & \cref{thm:discard-safety} \\
+       & Every read returns exactly $\StoreH$ ($\Lom \refines \Lzm$)
+  & \cref{thm:read-soundness} \\
+\midrule
+Determinacy & The result is independent of scheduling, message order and drift
+  & \cref{thm:determinism} \\
+            & \textbf{A DSTM execution computes exactly what the
+  barrier-synchronised execution would} & \cref{thm:bsp} \\
+\midrule
+Liveness & Every read completes; deadlock freedom is equivalent to the absence
+  of a zero-weight cycle in the \gls{comm-graph} & \cref{thm:deadlock-freedom} \\
+         & The ring barrier establishes quiescence, and three rounds are
+  necessary & \cref{thm:barrier-correct}, \cref{thm:barrier-three-rounds} \\
+\midrule
+Structure & Operations at distinct effective times are Bernstein-independent
+  & \cref{thm:renaming} \\
+          & Only flow dependences survive; the execution is in DSA form
+  & \cref{cor:dsa} \\
+          & The dependence graph is acyclic & \cref{thm:acyclic} \\
+\midrule
+Cost & Makespan is the critical path, versus a sum of per-tick maxima for BSP
+  & \cref{thm:makespan} \\
+     & Live versions are linear in drift and independent of run length
+  & \cref{cor:space-drift} \\
+     & Push and pull yield the same pipeline depth
+  & \cref{thm:pipeline-depth} \\
+\bottomrule
+\end{tabularx}
+\caption{The results proved in this document.}
+\label{tab:results}
+\end{table}
+
+\Cref{thm:bsp} licenses the whole design. Removing the per-tick \gls{barrier}
+and letting \glspl{process} \gls{drift} changes when work happens and how much
+memory is live, provably not what is computed. Unlike optimistic simulation
+nothing is ever discarded, because nothing is ever wrong.
+
+\section*{Principal findings about the implementation}
+
+Three findings are worth reading first.
+
+\begin{enumerate}[leftmargin=1.5em,itemsep=4pt]
+
+\item \textbf{The \gls{delta}/distance contract is undocumented and unchecked}
+  (\cref{dev:lookahead-uncheck}). \Cref{res:lookahead,res:staleness} are the
+  assumptions that make both promotion guards sound, yet they appear in no
+  header, comment or paper. Violating the first aborts; violating the second
+  hangs, silently, inside a \gls{get}.
+
+\item \textbf{A distance of zero is unsound, not merely unoptimised}
+  (\cref{dev:zero-distance}). The paper states that ``a distance of 0 between
+  all \glspl{rank} is a correct setup''. The implementation accepts such a matrix and
+  then treats those pairs as \emph{unreachable}, suppressing all \glspl{heartbeat}
+  and all visibility checks between them. Under the intended reading the
+  configuration deadlocks (\cref{rem:zero-cycle}); as implemented it silently
+  loses updates. The intended meaning --- all-to-all synchronisation every
+  tick --- is expressed by a distance of one.
+
+\item \textbf{\Glspl{version} do not inherit} (\cref{dev:non-inheriting}). Describing
+  versioning as retaining ``a \gls{history} of state'' invites the reading that
+  version $\eff$ is a snapshot of an evolving array. It is not: each version
+  is zero-filled and independent (\cref{conv:no-inherit}). A program that
+  writes at $\eff$ and reads the same address at $\eff+1$ without rewriting it
+  reads zero. This is the most likely first-use error and it is documented
+  nowhere.
+
+\end{enumerate}
+
+The remaining ten entries of \cref{ch:deviations} cover an unenforced
+write-disjointness rule, which is the one violation that silently destroys
+reproducibility (\cref{dev:write-disjoint}); asymmetric \glspl{distance-matrix} that
+are only half-checked (\cref{dev:asymmetric}); two integer-width defects; a
+missing bounds check; a non-collective error path; and three documentation
+mismatches.

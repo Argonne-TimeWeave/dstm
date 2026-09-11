@@ -1,0 +1,591 @@
+\section{Glossary}
+\label{sec:glossary}
+
+Each entry reads informally first, then formally. The formal definitions are
+normative.
+
+\begin{notationx}[Metavariables]\label{not:vars}
+$P, Q$ range over processes; $p, q, r$ over ranks; $g$ over global element
+indices; $a$ over addresses; $t$ over origin times, $\delta$ over deltas,
+$\eff$ over effective times. Processes and ranks are never identified.
+\end{notationx}
+
+% ===========================================================================
+\subsection{Identity and structure}
+\label{sec:gloss-identity}
+
+\term{process}{Process}
+A process is one participant in a distributed simulation: a running instance
+of the program, in practice one MPI process. Processes are the entities that
+act --- they own memory, advance along the timeline and issue operations.
+Their number is fixed for a run: DSTM performs no load balancing, spawning or
+migration.
+
+\term{rank}{Rank}
+A rank is not a participant but a name for one: an integer identifying a
+process uniquely. Ranks, being integers, can be ordered, indexed and arranged
+in a ring; a process as such cannot. Every structure in this document is
+indexed by rank.
+
+\begin{definition}[Processes and ranks]\label{def:process}
+Let $\worldsize \in \Nat$, $\worldsize \ge 1$, be the number of processes,
+fixed for a \gls{session}. The \emph{rank set} is
+\[
+  \Ranks \defeq \{0, 1, \dots, \worldsize - 1\} \subset \Nat ,
+\]
+totally ordered, with \emph{ring successor} $\succr{p} \defeq (p+1) \bmod
+\worldsize$. The \emph{processes} are the family
+$(\proc{i})_{0 \le i < \worldsize}$ of pairwise distinct entities, with
+$\Procs \defeq \{\proc{i} : i \in \Ranks\}$. The map
+$\rankof{\proc{i}} \defeq i$ is a bijection $\Procs \to \Ranks$.
+\end{definition}
+
+\begin{remark}[The bijection is an assumption of this model]
+\label{rem:rank-process}
+$\rankof{\cdot}$ is bijective only because DSTM fixes the assignment for a
+whole \gls{session}: no process is created, destroyed, migrated or
+renumbered. A model admitting spawning, failure, migration, or several ranks
+per process would need $\rankof{\cdot}$ partial, time-dependent or
+non-injective, and every rank-indexed structure below would have to be
+re-attached to processes. That generality --- logical processes, virtual
+agents, load balancing --- is the extension \cite{dstm2026} defers, and
+\cref{def:process} is where it would be made.
+\end{remark}
+
+\term{session}{Session}
+A session is one interval of DSTM activity, opened by \code{dstm\_start} and
+closed by \code{dstm\_fini}. Within it the \gls{comm-graph} and every region
+size are fixed; changing either means closing the session and opening
+another. A process runs sessions in sequence, never two at once.
+
+\begin{definition}[Session]\label{def:session}
+A \emph{session} is a maximal interval of execution during which $\cgraph$ and
+every $S_p$ are constant. All processes enter and leave it collectively.
+\end{definition}
+
+\term{region}{Region}
+\alsoterm{address-space}
+A region is the flat, byte-addressable memory owned by one process, sized at
+session start. Each process owns exactly one, named by that process's rank:
+region identifiers and rank identifiers are the same numbers.
+
+\begin{definition}[Region and address space]\label{def:region}
+The process $\proc{p}$ owns a \emph{region} of $S_p > 0$ bytes with
+\emph{address space} $\Addrof{p} \defeq \{0, \dots, S_p - 1\}$. The global
+address space is
+\[
+  \Addr \defeq \biguplus_{p \in \Ranks} \Addrof{p}.
+\]
+\end{definition}
+
+\term{allocation}{Allocation}
+Data structures carve reserved extents out of a region. An allocation is one
+such reservation: a contiguous run of addresses set aside for one structure
+and, while it lives, off limits to every other.
+
+Two points are easy to get wrong. An allocation is a property of
+\emph{addresses}, not \glspl{cell}: it does not vary with time, and an
+allocated address is allocated in every \gls{version} alike. And what is
+specified is the \emph{contract} an allocator meets, never the algorithm;
+which addresses come back is deliberately open.
+
+\begin{definition}[Allocation]\label{def:allocation}
+Fix a set $\Handles$ of \emph{handles}. The allocation state of rank $p$ is a
+partial function
+\[
+  \allocof{p} \;:\; \Addrof{p} \rightharpoonup \Handles ,
+\]
+mapping each reserved address to the handle reserving it. Write
+$\live{p} \defeq \operatorname{dom}(\allocof{p})$ for the \emph{allocated}
+addresses and $\extent{p}{h} \defeq \allocof{p}^{-1}(h)$ for the \emph{extent}
+of a live handle. The state is well formed when every extent is a contiguous
+interval of $\Addrof{p}$.
+\end{definition}
+
+Being a function, not a predicate, is what does the work: no address carries
+two handles, so \emph{distinct allocations are disjoint automatically}. That
+is what derived structures rely on, and why a handle-valued map beats a
+boolean.
+
+\begin{definition}[Allocation operations]\label{def:alloc-ops}
+$\mathsf{alloc}_p(n)$ yields a fresh handle $h$ and an interval
+$I \subseteq \Addrof{p}$ of length $n$ disjoint from $\live{p}$, extending
+$\allocof{p}$ by $I \mapsto h$; it fails if no such interval exists.
+$\mathsf{free}_p(h)$ removes $\extent{p}{h}$ from the domain. Between the two,
+$\extent{p}{h}$ is constant: allocations never move or resize.
+\end{definition}
+
+\begin{remark}[The policy is not specified]\label{rem:alloc-policy}
+\Cref{def:alloc-ops} says which intervals are admissible, not which is
+returned. First fit, best fit, a bump pointer and block splitting all satisfy
+it. The choice determines which addresses a structure occupies, never what a
+\gls{cell} contains, so an allocation algorithm is not a semantic object.
+\end{remark}
+
+\term{pointer}{Pointer}
+A pointer names a location in some region: which region, and how far into it.
+Because region identifiers are ranks, a pointer says both where the bytes live
+and which process is responsible for them --- an invariant the implementation
+asserts on every operation.
+
+\begin{definition}[Pointer]\label{def:pointer}
+A \emph{pointer} is a pair $\pi = (p, o) \in \Ranks \times \Int$, well formed
+when $o \in \Addrof{p}$. Write $\mathit{owner}(\pi) \defeq p$ and
+$\mathit{off}(\pi) \defeq o$.
+\end{definition}
+
+% ===========================================================================
+\subsection{Time}
+\label{sec:gloss-time}
+
+Four quantities are informally called ``time''. Separating them is the most
+useful thing this document does.
+
+\term{logical-time}{Logical time}
+Logical time is simulation time: the timeline the simulated model advances
+along, unrelated to wall-clock time or MPI progress. All processes share one
+timeline and sit at their own points on it --- which is the entire purpose of
+the design.
+
+\begin{definition}[Logical time]\label{def:logical-time}
+$\Time \defeq \Int$, ordered as usual. Times $\eff < 0$ are
+\emph{pre-history}: no \gls{version} exists there, and a read directed at one
+is answered from a caller-supplied default (\cref{def:get-or-default}).
+\end{definition}
+
+\term{origin-time}{Origin time}
+The origin time of an operation is where the issuing process sits on the
+timeline. It is supplied by the program, not inferred: supplying it is how a
+process reports its position.
+
+\term{delta}{Delta}
+The delta is a signed displacement separating when an operation happens from
+when its effect is visible. Writes carry $\delta \ge 0$, reads $\delta \le 0$.
+It is the model's unit of latency, in simulated time.
+
+\term{effective-time}{Effective time}
+The effective time is the \gls{version} an operation actually touches: origin
+plus delta. The memory model is indexed by it; origin time only tracks clocks.
+
+\begin{definition}[Origin time, delta, effective time]\label{def:times}
+An operation carries an \emph{origin time} $t \in \Time$ and a \emph{delta}
+$\delta \in \Time$; its \emph{effective time} is $\eff \defeq t + \delta$.
+Writes require $\delta \ge 0$, reads $\delta \le 0$.
+\end{definition}
+
+\term{local-clock}{Local clock}
+A process's local clock is the furthest along the timeline it has declared
+itself to be. It moves only forward, and only when the program issues an
+operation with a larger origin time. It is what the process publishes to its
+neighbours.
+
+\begin{definition}[Local clock]\label{def:local-clock}
+The \emph{local clock} $\clk{p} \in \Time$ of the process $\proc{p}$ is the
+supremum of the origin times $\proc{p}$ has issued so far in the current
+\gls{session}, or $0$ if none. It is nondecreasing.
+\devmark{dev:clock-width}
+\end{definition}
+
+\term{known-time}{Known time}
+A process cannot see its neighbours' clocks; it learns of them from messages.
+The known time is its current belief about a neighbour --- always a
+\emph{lower} bound, never an overestimate. That one-sidedness is what makes
+the visibility rules safe.
+
+\begin{definition}[Known time]\label{def:known-time}
+For $p, q \in \Ranks$, the \emph{known time} $\kn{p}{q} \in \Time$ is
+$\proc{p}$'s estimate of $\clk{q}$, initially $0$, updated only by
+$\kn{p}{q} \mathrel{{:}{=}} \max(\kn{p}{q}, t)$ on receipt of a message from
+$\proc{q}$ stamped $t$. It is nondecreasing.
+\end{definition}
+
+\begin{invariant}[Clock soundness]\label{inv:clock-soundness}
+$\kn{p}{q} \le \clk{q}$ for all $p, q \in \Ranks$, always.
+\end{invariant}
+
+\term{drift}{Drift}
+Drift is the clock skew between two processes. Tolerating it without rollback
+is the point of the design; bounding it is what the \gls{comm-graph} does.
+
+\begin{definition}[Drift]\label{def:drift}
+$\drift{p}{q} \defeq \clk{p} - \clk{q}$.
+\end{definition}
+
+\term{mvt}{Minimum virtual time}
+The oldest version a process still holds. A memory-management quantity, not a
+semantic one: it says how far back the runtime is still paying to remember.
+
+\begin{definition}[Minimum virtual time]\label{def:mvt}
+$\mvt{p} \defeq \min \{\, \eff : \Vst{p}{\eff} \ne \Absent \,\}$, and
+$\clk{p}$ when rank $p$ holds no version.
+\end{definition}
+
+% ===========================================================================
+\subsection{Locality}
+\label{sec:gloss-locality}
+
+\term{comm-graph}{Communication graph}
+The communication graph is how a program declares the shape of its simulation:
+which pairs of ranks may ever exchange operations, and how long, in simulated
+time, an interaction across such a pair takes to become visible. Supplied once
+per \gls{session} and never changed, it is the source of every optimisation
+DSTM performs --- the only reason a process can conclude that another can no
+longer affect it.
+
+\begin{definition}[Communication graph]\label{def:comm-graph}
+A \emph{communication graph} is a triple $\cgraph = (\Ranks, \edges, w)$ with
+$\edges \subseteq \Ranks \times \Ranks$ the \emph{channel} relation, subject
+to
+\begin{description}[leftmargin=2.9cm,style=nextline,font=\normalfont\bfseries]
+  \item[\textnormal{(G1) Irreflexivity}] $(p,p) \notin \edges$.
+  \item[\textnormal{(G2) Symmetry}] $(p,q) \in \edges \iff (q,p) \in \edges$,
+    and $\ew{p}{q} = \ew{q}{p}$. \devmark{dev:asymmetric}
+  \item[\textnormal{(G3) Positive integer weights}]
+    $w : \edges \to \Nat_{>0}$. \devmark{dev:zero-distance}
+\end{description}
+\end{definition}
+
+\term{distance}{Distance}
+The distance between two ranks is the least total weight of a chain of
+channels joining them. It is a distance in the ordinary mathematical sense,
+which is what licenses reasoning about it geometrically.
+
+\begin{definition}[Distance]\label{def:distance}
+A \emph{path} from $p$ to $q$ is a sequence $p = z_0, \dots, z_k = q$ with
+$(z_{m-1}, z_m) \in \edges$ for each $m$, of \emph{length}
+$\sum_{m} \ew{z_{m-1}}{z_m}$. The \emph{distance}
+$d : \Ranks \times \Ranks \to \Nat \cup \{\infty\}$ is the least length of
+such a path, with $\dist{p}{p} = 0$ (empty path) and $\infty$ when no path
+exists.
+\end{definition}
+
+\begin{proposition}[$d$ is an extended metric]\label{prop:metric}
+For all $p, q, r \in \Ranks$:
+\begin{description}[leftmargin=3.4cm,style=nextline,font=\normalfont\bfseries]
+  \item[\textnormal{(M1) Non-negativity}] $\dist{p}{q} \ge 0$.
+  \item[\textnormal{(M2) Identity of indiscernibles}]
+    $\dist{p}{q} = 0 \iff p = q$.
+  \item[\textnormal{(M3) Symmetry}] $\dist{p}{q} = \dist{q}{p}$.
+  \item[\textnormal{(M4) Triangle inequality}]
+    $\dist{p}{r} \le \dist{p}{q} + \dist{q}{r}$.
+\end{description}
+\end{proposition}
+
+\begin{proof}
+(M1) Path lengths are sums of positive weights; the empty path has length $0$.
+
+(M2) If $p = q$ the empty path gives $0$. If $p \ne q$, every path uses at
+least one channel, each weighing at least $1$ by (G3), so $\dist{p}{q} \ge 1$.
+
+(M3) By (G2) a path reverses to one of equal length, so the minima coincide.
+
+(M4) Vacuous if a right-hand term is $\infty$, under $\infty + a = \infty$.
+Otherwise concatenating shortest paths $p \to q$ and $q \to r$ gives a path
+$p \to r$ of length $\dist{p}{q} + \dist{q}{r}$, and $\dist{p}{r}$ minimises
+over a set containing it.
+\end{proof}
+
+The value $\infty$ makes $d$ an \emph{extended} metric; its finiteness classes
+are the connected components of $\cgraph$. Only (M2) and (M3) are used later.
+
+\begin{remark}[(M2) is the load-bearing axiom]\label{rem:m2}
+Since $d$ is integer-valued, (M2) says exactly that distinct ranks are at
+distance at least one. That is what makes every cycle in $\cgraph$ carry
+positive weight, hence the dependence graph acyclic (\cref{thm:acyclic}) and
+the system deadlock-free (\cref{thm:deadlock-freedom}). A configuration with
+$\dist{p}{q} = 0$ for $p \ne q$ is not a metric space, and DSTM's guarantees
+do not apply to it \devmark{dev:zero-distance}.
+\end{remark}
+
+\term{reachability}{Adjacency, neighbourhood and metric closure}
+\alsoterm{neighbourhood}
+Two ranks are \emph{neighbours} when a channel joins them directly.
+Non-neighbours exchange no messages and neither constrains the other's
+progress. This sparsity is what makes DSTM scale: synchronisation cost depends
+on neighbourhood size, not on $\worldsize$.
+
+\begin{definition}[Neighbourhood]\label{def:neighbourhood}
+\[
+  \nbr{p} \defeq \{\, q \in \Ranks : (p, q) \in \edges \,\},
+  \qquad
+  \diam_p \defeq \max_{q \in \nbr{p}} \dist{p}{q}
+\]
+with $\diam_p \defeq 0$ when $\nbr{p} = \emptyset$.
+\end{definition}
+
+\begin{remark}[Adjacency is not finite distance]\label{rem:adjacency-vs-distance}
+Conflating them is the mistake the old ``distance matrix with $-1$'' notation
+invited. Two ranks at opposite corners of a mesh are at finite distance ---
+a path exists --- but are not neighbours, exchange no heartbeats and never
+appear in each other's guards. Requiring $d$ to be a genuine metric therefore
+costs no sparsity: (M4) constrains the metric, while $\edges$ stays as sparse
+as the application makes it.
+\end{remark}
+
+\begin{definition}[Metric closure]\label{def:metric-closure}
+$\cgraph$ is \emph{metrically closed} when $\ew{p}{q} = \dist{p}{q}$ for every
+$(p,q) \in \edges$ --- no channel costs more than a detour around it. It is
+\emph{well formed} when it satisfies (G1)--(G3) and is metrically closed.
+\end{definition}
+
+Without it a channel could weigh $10$ while a two-hop detour costs $2$, and
+``the distance from $p$ to $q$'' would mean one thing to the metric and
+another to the guard consulting the channel. Closure collapses the two.
+
+It costs nothing in practice: every library constructor weighs channels
+equally, so a $k$-hop detour costs $k$ times a direct channel; likewise for a
+graph-derived matrix (\cref{prop:derive-wf}). A hand-built graph violating it
+models a system where relayed information outruns the direct channel --- a
+modelling error, not a runtime one. No theorem in \cref{ch:semantics} appeals
+to (M4).
+
+\term{lookahead}{Lookahead}
+Lookahead is the guarantee the \gls{comm-graph} buys: nothing $\proc{q}$ does
+now can affect $\proc{p}$'s state earlier than $\dist{p}{q}$ into the future.
+It is the same quantity conservative PDES calls lookahead \cite{chandy1979},
+playing the same role --- what lets a process declare state final without
+asking anyone.
+
+\term{heartbeat}{Heartbeat}
+A heartbeat carries only ``my clock has advanced to $t$''. Processes broadcast
+one to their neighbours whenever their clock moves. It targets no address and
+carries no data; it exists so neighbours can raise their known times and make
+progress.
+
+\begin{definition}[Heartbeat]\label{def:heartbeat}
+A \emph{heartbeat} from $\proc{p}$ is a message $\langle p, t\rangle$ with
+$t = \clk{p}$, delivered to every $q \in \nbr{p}$, whose sole effect is
+$\kn{q}{p} \mathrel{{:}{=}} \max(\kn{q}{p}, t)$.
+\end{definition}
+
+Every message, not only a heartbeat, carries its sender's stamp and raises the
+receiver's known time. A heartbeat is the degenerate message carrying nothing
+else.
+
+% ===========================================================================
+\subsection{State}
+\label{sec:gloss-state}
+
+\term{cell}{Cell}
+A cell is the smallest addressable unit of DSTM state, indexed by
+\emph{three} coordinates: a rank, a time, and an offset. Time is part of the
+location's identity, not metadata attached to it. Two writes to the same
+offset at different effective times do not touch the same cell.
+
+\begin{definition}[Cell]\label{def:cell}
+A \emph{cell} is a triple $\cell{p}{\eff}{a}$ with $p \in \Ranks$,
+$\eff \in \Time$, $a \in \Addrof{p}$; and
+$\Cells \defeq \{\, \cell{p}{\eff}{a} \,\}$ is the set of all cells.
+\end{definition}
+
+\term{version}{Version}
+\alsoterm{publication}
+A version is the whole of one region at one \gls{effective-time} --- the cells
+sharing a rank and a time. It is the unit the runtime allocates, tracks and
+reclaims, created on demand by the first write targeting it, and filled with
+zeroes: it does \emph{not} inherit its predecessor's contents.
+
+\begin{definition}[Version]\label{def:version}
+The \emph{version} $\ver{p}{\eff}$ is the family
+$\{\, \cell{p}{\eff}{a} : a \in \Addrof{p} \,\}$ with content
+$\Vbuf{p}{\eff} : \Addrof{p} \to \Bytes$ and status $\Vst{p}{\eff}$.
+\end{definition}
+
+\begin{convention}[Versions are independent, not incremental]
+\label{conv:no-inherit}
+$\Vbuf{p}{\eff}$ is initialised to all zeroes on creation, regardless of
+$\Vbuf{p}{\eff'}$ for $\eff' < \eff$. Versions are independent snapshots
+indexed by time, not deltas against an evolving state.
+\devmark{dev:non-inheriting}
+\end{convention}
+
+This is the most consequential modelling decision in DSTM and the most easily
+misread; \cref{sec:memory-model} takes it up.
+
+\term{version-status}{Version status}
+Every version passes through the same three stages. It is first
+\emph{writable}, accepting writes and refusing reads; becomes \emph{readable}
+once no further write can target it, freezing its contents; becomes
+\emph{discardable} once no further read can target it, and is reclaimed. The
+progression is one-way.
+
+\begin{definition}[Status lattice]\label{def:status}
+$\Status \defeq \{\Absent, \Wr, \Rd, \Dc\}$, totally ordered
+$\Absent < \Wr < \Rd < \Dc$. A version's status is nondecreasing in it.
+\end{definition}
+
+\term{store}{Versioned store}
+The total picture: which byte sits in every cell. This is what the memory
+model is about and what an implementation must reproduce.
+
+\begin{definition}[Versioned store]\label{def:store}
+A \emph{versioned store} is a total function $\Store : \Cells \to \Bytes$.
+\end{definition}
+
+% ===========================================================================
+\subsection{Operations}
+\label{sec:gloss-ops}
+
+\term{operation}{Operation}
+\alsoterm{put}\alsoterm{get}
+DSTM exposes exactly two data operations, a write and a read, both one-sided:
+the issuing process drives it, and the target executes no application code on
+its behalf. Each names a target rank, address, origin time and delta.
+
+\begin{definition}[Operations]\label{def:operation}
+An \emph{operation} is
+\[
+  \Put{p}{q}{t}{\delta}{a}{v}
+  \qquad\text{or}\qquad
+  \Get{p}{q}{t}{\delta}{a}{\ell},
+\]
+with $p \in \Ranks$ the \emph{issuer}, $q \in \Ranks$ the \emph{target},
+$a \in \Addrof{q}$ the address, $v \in \Values$ the written value and
+$\ell = |v| \ge 1$. We write $\opsrc{o}, \optgt{o}, \optime{o}, \opdelta{o}$
+and $\opeff{o} = \optime{o} + \opdelta{o}$.
+\end{definition}
+
+\term{footprint}{Footprint}
+The set of cells an operation touches. Because cells carry a time coordinate,
+footprints do too --- which is why operations at different effective times can
+never conflict however much their addresses overlap. \Cref{sec:sync} builds
+the dependence analysis on this.
+
+\begin{definition}[Footprint]\label{def:footprint}
+For $o$ targeting rank $q$ at address $a$ with length $\ell$ and effective
+time $\eff$,
+\[
+  \fp{o} \defeq \{\, \cell{q}{\eff}{a'} : a \le a' < a + \ell \,\}.
+\]
+$\fpw{o} \defeq \fp{o}$ if $o$ is a put and $\emptyset$ otherwise;
+$\fpr{o}$ dually for gets. Operations are \emph{footprint-disjoint},
+$o_1 \disjoint o_2$, when $\fp{o_1} \cap \fp{o_2} = \emptyset$.
+\end{definition}
+
+\term{issue}{Issue and completion}
+\alsoterm{completion}
+An operation is \emph{issued} when the program calls the API and
+\emph{completes} when its effect is settled. The gap differs by operation: a
+put returns immediately and completes later; a get does not return until it
+completes. This is why a put carries no result and a get does.
+
+\begin{definition}[Issue, completion]\label{def:issue-complete}
+The \emph{issue} of $o$ is the instant its API call is made; its
+\emph{completion} the instant its effect on the store (put) or its result
+(get) is determined. Puts are \emph{asynchronous}, gets \emph{synchronous}.
+\end{definition}
+
+\term{history}{History and program order}
+\alsoterm{program-order}
+A history records everything a program did. Each process being
+single-threaded, its own operations are totally ordered; operations of
+different processes are not ordered a priori.
+
+\begin{definition}[History, program order]\label{def:history}
+A \emph{history} is a set $\Hist$ of operations with, for each $p \in \Ranks$,
+a total order $\po$ on $\{\, o \in \Hist : \opsrc{o} = p \,\}$. Operations
+issued by distinct ranks are unordered by $\po$.
+\end{definition}
+
+% ===========================================================================
+\subsection{Coordination}
+\label{sec:gloss-coord}
+
+\term{quiescence}{Quiescence}
+A system is quiescent when nothing is in flight and no process will issue
+more. Detecting this is harder than detecting that every process has
+\emph{finished issuing}, because an operation may still be travelling after
+its issuer stopped; DSTM therefore detects the two conditions in sequence.
+
+\begin{definition}[Quiescence]\label{def:quiescence}
+A configuration is \emph{quiescent} when no message is in flight, no process
+holds an incomplete operation, and none will issue another this
+\gls{session}.
+\end{definition}
+
+\term{barrier}{Barrier}
+DSTM's only collective inside the simulation loop, expected once at the end.
+It establishes quiescence by circulating a token around the rank ring in three
+rounds: the first establishes that every process has stopped issuing, the
+second that every process has finished serving, the third releases everybody.
+Two rounds are provably insufficient (\cref{thm:barrier-three-rounds}).
+
+\term{termination}{Termination}
+Quiescence plus teardown: after the barrier every pending-operation list is
+empty and every region may be destroyed safely.
+
+% ===========================================================================
+\subsection{Derived structures}
+\label{sec:gloss-derived}
+
+The concepts above are the DSTM \emph{kernel}. Applications use a distributed
+data structure layered on it; those layers add addressing discipline, not new
+semantics.
+
+\term{darray}{Distributed array (darray)}
+\alsoterm{partition}
+A one-dimensional array of fixed-size elements cut into contiguous slices, one
+per rank. It supplies the map from a global element index to a
+(rank, address) pair; reads and writes then go through the kernel unchanged.
+
+\begin{definition}[Partition]\label{def:partition}
+A \emph{partition} of $m$ elements is a vector
+$(m_0, \dots, m_{\worldsize-1})$ of positive integers summing to $m$, with
+\emph{offsets} $b_p \defeq \sum_{q < p} m_q$. The \emph{owner} of a global
+index $g \in \{0, \dots, m-1\}$ is the unique rank $p$ with
+$b_p \le g < b_p + m_p$, written $\mathit{own}(g)$.
+\devmark{dev:darray-bounds}
+\end{definition}
+
+\begin{definition}[Distributed array]\label{def:darray}
+A \emph{darray} is $(z, (m_p)_p, (\beta_p)_p)$ with element size $z \ge 1$, a
+partition $(m_p)_p$, and $\beta_p \in \Addrof{p}$ the base of an
+\gls{allocation} whose extent covers $[\beta_p, \beta_p + z\,m_p)$. Index $g$
+resolves to
+\[
+  \mathit{res}(g) \defeq \bigl(\mathit{own}(g),\ \beta_{\mathit{own}(g)}
+    + (g - b_{\mathit{own}(g)}) \cdot z\bigr).
+\]
+\end{definition}
+
+The $\beta_p$ are chosen independently by each process and exchanged
+collectively; the model must not assume they agree.
+
+\term{dgraph}{Distributed graph (dgraph)}
+A static directed graph with versioned state on vertices and edges. Topology
+is frozen at construction; only state is versioned. An edge is owned by the
+owner of its \emph{source} vertex, which puts the common ``consume my inbox
+locally, produce into a neighbour's inbox'' pattern on the legal side of every
+ownership boundary.
+
+\term{topology-replica}{Topology replica}
+Resolving an edge $(u,v)$ to an address requires the source rank's adjacency,
+so each process keeps a copy of every neighbouring rank's topology. This
+replica is static, unversioned and exchanged once at construction --- a second
+class of memory, and the only one outside the versioned store, which is sound
+because it is immutable.
+
+% ===========================================================================
+\subsection{Idioms}
+\label{sec:gloss-idioms}
+
+Two communication patterns recur and the API is shaped around them. They look
+like opposites and are the same schedule (\cref{thm:pipeline-depth}).
+
+\term{pull-model}{Pull model}
+Each process publishes into its \emph{own} region at its current time
+($\delta = 0$, local); consumers reach across into that region's \emph{past}
+($\delta = -\dist{p}{q}$). Data sits still; readers reach back.
+
+\term{push-model}{Push model}
+Each process writes into its \emph{neighbours'} regions at a point in their
+\emph{future} ($\delta = +\dist{p}{q}$); every process reads only its own
+region at its current time ($\delta = 0$, local). Data moves; readers stay
+home.
+
+\term{mailbox}{Mailbox pattern}
+Index the shared structure by \emph{(destination, source)}, so cell $(d,s)$ is
+written only by $\proc{s}$ and read only by $\proc{d}$. Each cell then has
+exactly one writer per effective time --- precisely the write-disjointness
+determinism requires (\cref{res:write-disjoint}). Both benchmark applications
+in \cite{dstm2026} use it.

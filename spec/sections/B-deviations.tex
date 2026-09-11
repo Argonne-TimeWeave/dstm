@@ -1,0 +1,410 @@
+\chapter{Deviation Register}
+\label{ch:deviations}
+
+This specification is prescriptive. This appendix records every point at which
+the implementation, or the published description \cite{dstm2026}, departs from
+it.
+
+Each entry carries a class:
+
+\begin{description}[leftmargin=2.4cm,style=nextline,font=\normalfont\bfseries]
+  \item[\textnormal{\textbf{soundness}}] a legal program can obtain a wrong
+    answer, or an restriction that the correctness argument relies on is
+    neither enforced nor documented.
+  \item[\textnormal{\textbf{liveness}}] a legal program can fail to make
+    progress.
+  \item[\textnormal{\textbf{latent}}] a defect not reachable under current
+    usage but reachable under documented usage.
+  \item[\textnormal{\textbf{robustness}}] misuse produces silent corruption or
+    a hang rather than a diagnostic.
+  \item[\textnormal{\textbf{documentation}}] the code is correct; a comment,
+    header or the paper is not.
+\end{description}
+
+\begin{table}[htbp]
+\centering
+\small
+\begin{tabularx}{\textwidth}{@{}l l >{\raggedright\arraybackslash}X l@{}}
+\toprule
+\textbf{ID} & \textbf{Class} & \textbf{Summary} & \textbf{Affects} \\
+\midrule
+\ref{dev:zero-distance}    & soundness     & $\dist{p}{q}=0$ off-diagonal accepted but treated as absence of a channel & \cref{prop:metric} \\
+\ref{dev:asymmetric}       & soundness     & asymmetric matrices accepted, only one row consulted & \cref{def:comm-graph} \\
+\ref{dev:monotone-origin}  & soundness     & monotone origin time never enforced & \cref{res:monotone} \\
+\ref{dev:write-disjoint}   & soundness     & write-disjointness never enforced & \cref{thm:determinism} \\
+\ref{dev:lookahead-uncheck}& soundness     & $\delta$/distance contract unstated and unchecked & \crefrange{thm:write-closure}{thm:discard-safety} \\
+\ref{dev:destroy-lifetime} & soundness     & destroy frees a recycled extent, non-collectively, while peers hold pointers & \cref{def:addressability} \\
+\ref{dev:clock-width}      & latent        & clock stored as \code{int}, compared against \code{int64\_t} & \cref{def:local-clock} \\
+\ref{dev:cmp-truncation}   & latent        & \code{int64\_t} difference truncated to \code{int} in comparator & --- \\
+\ref{dev:darray-bounds}    & robustness    & no bounds check on darray global index & \cref{def:addressability} \\
+\ref{dev:noncollective}    & robustness    & \code{darray} creation has no consensus guard & \cref{res:collective} \\
+\ref{dev:non-inheriting}   & documentation & ``version history'' suggests inheritance; versions are zero-filled & \cref{def:independence} \\
+\ref{dev:phase-strictness} & documentation & publish guard is $\clk{p}\ge\eff$, comment claims $>$ & \cref{res:phase} \\
+\ref{dev:clock-conflation} & documentation & \code{last\_time} documented as $\max(t+\delta)$, clock tracks $t$ & \cref{res:terminate} \\
+\ref{dev:barrier-doc}      & documentation & header says two-pass ring, implementation is three-round & \cref{thm:barrier-three-rounds} \\
+\bottomrule
+\end{tabularx}
+\caption{Deviation register at a glance.}
+\label{tab:deviations}
+\end{table}
+
+\clearpage
+
+% ===========================================================================
+\section{Soundness}
+
+\begin{deviation}[Zero distance means unreachable]\label{dev:zero-distance}
+\textbf{Class:} soundness.
+
+\textbf{Statement.} (M2) of \cref{prop:metric} requires
+$\dist{p}{q}\ge 1$ for reachable $p \ne q$. The implementation accepts
+$\dist{p}{q}=0$ from the public constructor and then treats such a pair as
+\emph{unreachable}: every loop that scans the \gls{neighbourhood} skips entries with
+$\dist{p}{q} \le 0$.
+
+\textbf{Evidence.} \srcref{distance.c}{655}--\srcref{distance.c}{662} validates
+only $\Dmat_{ii}=0$ and $\Dmat_{ij}\ge-1$, so a zero off-diagonal passes. The
+consumers then discard it: \srcref{ops.c}{42} (heartbeat broadcast),
+\srcref{ops.c}{90} (publish guard), \srcref{ops.c}{154} (retire guard) all
+\code{continue} on \code{dist <= 0}. The header documents the input as
+``non-negative integers'' (\srcref{dstm.h}{261}) while the code also accepts
+$-1$.
+
+\textbf{Consequence.} Such a pair exchanges no \glspl{heartbeat} and imposes
+no constraint on either side's promotions, so \glspl{version} publish on the
+local clock alone and a remote put can land on a published one --- the abort
+path of \cref{thm:write-closure} at best, a lost update at worst. The claim in
+\cite{dstm2026} that ``a distance of 0 between all \glspl{rank} is a correct
+setup'' is therefore false as implemented: that configuration is unsound, not
+merely unoptimised. The intended reading --- all-to-all synchronisation every
+timestep --- is $\dist{p}{q}=1$, which \code{dstm\_distance\_create\_complete}
+already produces.
+
+\textbf{Fix.} Reject $\dist{p}{q}=0$ for $p \ne q$ in
+\code{dstm\_distance\_create\_from\_matrix}, and align the header text with
+the $-1$ sentinel.
+
+\textbf{Test.} \code{create\_from\_matrix} with a zero off-diagonal returns
+\code{-DSTM\_EINVAL}.
+\end{deviation}
+
+\begin{deviation}[Asymmetric matrices are half-checked]\label{dev:asymmetric}
+\textbf{Class:} soundness.
+
+\textbf{Statement.} (G2) of \cref{def:comm-graph} requires symmetry. The
+implementation neither enforces nor requires it at construction, but consults
+only row \code{self} when evaluating promotion guards, so the two directions
+of an asymmetric pair are never reconciled.
+
+\textbf{Evidence.} \code{dstm\_distance\_create\_from\_matrix} performs no
+symmetry check; \srcref{dstm.h}{251} explicitly states entries ``do not need
+to be symmetric''. Both guards read $\dist{\text{self}}{i}$ only:
+\srcref{ops.c}{89} and \srcref{ops.c}{152}. \cite{dstm2026} states
+``distances are assumed symmetrical''.
+
+\textbf{Consequence.} With $\dist{p}{q} < \dist{q}{p}$, $\proc{q}$ retires
+\glspl{version} on its own larger distance while $\proc{p}$ may still read
+further back, so a legal get can target an evicted version and
+\cref{thm:discard-safety} fails. \code{dstm\_dgraph\_derive\_distance}
+symmetrises explicitly, which is why the dgraph path has not exposed this.
+
+\textbf{Fix.} Enforce symmetry at construction, or replace both guard lookups
+with $\max(\dist{p}{q}, \dist{q}{p})$ and drop (G2).
+
+\textbf{Test.} \code{create\_from\_matrix} with an asymmetric pair returns
+\code{-DSTM\_EINVAL}.
+\end{deviation}
+
+\begin{deviation}[Monotone origin time is not enforced]\label{dev:monotone-origin}
+\textbf{Class:} soundness.
+
+\textbf{Statement.} \Cref{res:monotone} requires each process to issue \glspl{operation}
+with nondecreasing \gls{origin-time}. Nothing checks it.
+
+\textbf{Evidence.} The clock update is guarded by
+\code{if (region->local\_heartbeat\_time < time)}
+(\srcref{ops.c}{603}, \srcref{ops.c}{672}), so an operation with a smaller
+origin time is accepted silently and simply fails to move the clock.
+\cite{dstm2026} states the rule --- ``a process is only allowed to issue
+operations with a monotonically increasing originating time'' --- as a
+property of the system rather than as a program restriction.
+
+\textbf{Consequence.} \Cref{thm:write-closure} argues that a process whose
+clock has passed $\eff$ can no longer produce a put at $\eff$. A program going
+backwards in origin time invalidates that directly, and can write to a
+published \gls{version}.
+
+\textbf{Fix.} Reject $t < \clk{p}$ with \code{-DSTM\_EDOM}, or assert under a
+debug build.
+\end{deviation}
+
+\begin{deviation}[Write-disjointness is not enforced]\label{dev:write-disjoint}
+\textbf{Class:} soundness.
+
+\textbf{Statement.} \Cref{res:write-disjoint} requires that no two writes
+target the same \gls{cell}. Nothing checks it, and the model has no fallback rule
+for when it is violated.
+
+\textbf{Evidence.} \cite{dstm2026} states ``as a simplification, overlapping
+writes are ignored (not a conflict)''. The apply path
+(\srcref{ops.c}{254}, \srcref{ops.c}{311}) is an unconditional \code{memcpy}
+into the version buffer, so the surviving value is whichever write the
+progress loop applies last --- a function of message arrival order.
+
+\textbf{Consequence.} \Cref{thm:determinism} fails: the same program on the
+same input can produce different results on different runs. This is the one
+deviation that silently breaks reproducibility --- for a simulation framework,
+the property users are least willing to lose.
+
+\textbf{Fix.} Under a debug build, record the written byte ranges per version
+and abort on overlap. The cost is proportional to the number of \glspl{put} per
+version and is acceptable outside production builds. Note that the mailbox
+idiom (\cref{sec:gloss-idioms}) discharges the restriction structurally, so
+conforming applications pay nothing in release builds.
+\end{deviation}
+
+\begin{deviation}[The delta/distance contract is unstated]\label{dev:lookahead-uncheck}
+\textbf{Class:} soundness.
+
+\textbf{Statement.} \Cref{res:lookahead} ($\delta \ge \dist{p}{q}$ for remote
+puts) and \cref{res:staleness} ($|\delta| \le \dist{p}{q}$ for remote \glspl{get})
+are the assumptions that make both promotion guards sound. Neither appears in
+the header documentation, in the source comments, or in \cite{dstm2026}, and
+neither is checked.
+
+\textbf{Evidence.} The only \gls{delta} validation is the sign test:
+$\delta \ge 0$ for put (\srcref{ops.c}{592}), $\delta \le 0$ for get
+(\srcref{ops.c}{661}), plus the local-process rule for $\delta = 0$
+(\srcref{ops.c}{598}, \srcref{ops.c}{667}). The guards that depend on the
+contract are \srcref{ops.c}{99} and \srcref{ops.c}{163}.
+
+\textbf{Consequence.} Violating \cref{res:lookahead} lets a put arrive at a
+published \gls{version}. Violating \cref{res:staleness} targets an evicted
+one, which does not fail: the version lookup returns nothing, the request
+never completes, and the caller blocks forever inside \code{dstm\_get}. A
+\gls{delta} smaller than the \gls{distance} therefore hangs with no
+diagnostic.
+
+\textbf{Fix.} Document both bounds in \code{dstm.h}; check them in
+\code{dstm\_put} and \code{dstm\_get}, returning \code{-DSTM\_EDOM}. The check
+is two comparisons against a matrix lookup already performed nearby.
+
+\textbf{Test.} A remote put with $0 < \delta < \dist{p}{q}$ and a remote get
+with $|\delta| > \dist{p}{q}$ both return \code{-DSTM\_EDOM}.
+\end{deviation}
+
+\begin{deviation}[Destruction frees a recycled extent, non-collectively]
+\label{dev:destroy-lifetime}
+\textbf{Class:} soundness.
+
+\textbf{Statement.} Destroying a derived structure releases its extent
+immediately and purely locally, while every peer still holds the base offset
+that was published at creation. Since freed extents are recycled, a subsequent
+structure can occupy the same addresses, and a peer reading through the old
+base offset then observes the new structure's bytes.
+
+\textbf{Evidence.} \code{dstm\_darray\_destroy} calls
+\code{dstm\_region\_free} on the local slice (\srcref{darray.c}{186}), as does
+\code{dstm\_dgraph\_destroy} (\srcref{dgraph.c}{884}). Neither is collective,
+and neither is documented as such --- contrast the creation paths, which are
+collective and exchange the base offsets by all-gather
+(\srcrefr{darray.c}{128}{129}). Freed extents return to the free list and are
+reused (\srcref{region.c}{632}).
+
+\textbf{Consequence.} Existing \glspl{version} are insulated, because each is
+an independent snapshot (\cref{conv:no-inherit}) and retains the old
+structure's bytes. The hazard needs a version written \emph{after}
+reallocation, which the ordinary sequence ``destroy $A$, create $B$, keep
+ticking'' produces: a peer that has not destroyed its own handle for $A$, and
+reads at an effective time past $B$'s first write, resolves through $A$'s
+stale base offset into $B$'s extent. The read is addressable
+(\cref{def:addressability}) and returns a well-defined byte --- of the wrong
+structure. Nothing detects it.
+
+\textbf{Fix.} State the lifetime condition in \code{dstm.h}: destruction is
+collective, and may only occur once the structure is quiescent, which in
+practice means after \code{dstm\_barrier}. Optionally, withhold freed extents
+from reuse until the next barrier, which makes the safe case cheap and the
+unsafe case a deterministic failure rather than silent corruption.
+
+\textbf{Test.} Create $A$, barrier, destroy $A$ on all processes, create $B$,
+and check that a peer's stale handle for $A$ is rejected rather than resolving
+into $B$.
+\end{deviation}
+
+% ===========================================================================
+\section{Latent defects}
+
+\begin{deviation}[Clock stored at the wrong width]\label{dev:clock-width}
+\textbf{Class:} latent.
+
+\textbf{Statement.} The \gls{local-clock} is declared \code{int} but holds a
+\code{dstm\_time\_t}, which is \code{int64\_t}.
+
+\textbf{Evidence.} \code{int local\_heartbeat\_time;} at
+\srcref{region.h}{158}, compared against and assigned from
+\code{dstm\_time\_t} at \srcref{ops.c}{603}--\srcref{ops.c}{605} and
+\srcref{ops.c}{672}--\srcref{ops.c}{674}.
+
+\textbf{Consequence.} Truncation beyond $2^{31}$: the clock appears to move
+backwards, \glspl{heartbeat} stop, and neighbours stall --- a liveness failure
+presenting as a hang after a long run.
+
+\textbf{Fix.} Change the field to \code{dstm\_time\_t}.
+\end{deviation}
+
+\begin{deviation}[Comparator truncates a 64-bit difference]\label{dev:cmp-truncation}
+\textbf{Class:} latent.
+
+\textbf{Statement.} \code{dstm\_request\_cmp\_departure} computes a
+\code{dstm\_time\_t} difference and returns it as \code{int}.
+
+\textbf{Evidence.} \code{ta = a->time - b->time; if (ta) return ta;} in
+\code{src/request.c}, with return type \code{int}.
+
+\textbf{Consequence.} For differences whose low 32 bits are zero the
+comparator reports equality, and otherwise can report the wrong sign,
+mis-ordering the pending-request list. Ordering is a scheduling heuristic, not
+a correctness requirement, which is why this is latent.
+
+\textbf{Fix.} Return a width-safe three-way comparison, and likewise for the
+\gls{delta} tiebreak:
+\begin{lstlisting}
+return (a->time > b->time) - (a->time < b->time);
+\end{lstlisting}
+\end{deviation}
+
+% ===========================================================================
+\section{Robustness}
+
+\begin{deviation}[Unchecked darray indices and partitions]\label{dev:darray-bounds}
+\textbf{Class:} robustness.
+
+\textbf{Statement.} \code{dstm\_darray\_get} and \code{dstm\_darray\_put}
+never validate \code{global\_index} against the total element count, and
+\code{dstm\_darray\_create\_equal} can produce a \gls{partition} that diverges
+across \glspl{process}.
+
+\textbf{Evidence.} The owner search clamps to $[0, \worldsize-1]$
+(\srcrefr{darray.c}{38}{51}) so an out-of-range index resolves to the last
+process at an offset past the end of its slice, with no error. Separately, when
+\code{total\_elements < world\_size} the tail processes compute
+\code{local\_elements == 0} and return \code{-DSTM\_EINVAL} at
+\srcref{darray.c}{73}, \emph{before} the \code{MPI\_Allgather} at
+\srcref{darray.c}{120} that the other processes have already entered.
+
+\textbf{Consequence.} The resolved offset lies outside the darray's extent, so
+the operation is not addressable (\cref{def:addressability}). Nothing faults:
+a \gls{region} is one contiguous \gls{address-space}, so the offset simply
+lands in some other handle's extent and reads or corrupts another structure's
+data. The partition case is a hang.
+
+\textbf{Fix.} Bounds-check against \code{total\_elements}; reject
+\code{total\_elements < world\_size} uniformly on all processes.
+\end{deviation}
+
+\begin{deviation}[Non-collective error paths in darray creation]\label{dev:noncollective}
+\textbf{Class:} robustness.
+
+\textbf{Statement.} \code{dstm\_darray\_create} contains early returns on
+allocation failure that are not agreed across processes, so one process's local
+failure desynchronises the collective.
+
+\textbf{Evidence.} Failure returns at \srcref{darray.c}{85},
+\srcref{darray.c}{90}, \srcref{darray.c}{96}, \srcref{darray.c}{102} and
+\srcref{darray.c}{112} all precede or interleave with the two
+\code{MPI\_Allgather} calls. Contrast \code{dstm\_dgraph\_create}, which
+guards every collective with \code{dstm\_msg\_consensus}
+(\srcref{dgraph.c}{537} and following) precisely to avoid this.
+
+\textbf{Consequence.} A single out-of-memory process leaves every other process
+blocked in \code{MPI\_Allgather}.
+
+\textbf{Fix.} Apply the \code{dstm\_msg\_consensus} pattern already used by
+dgraph.
+\end{deviation}
+
+% ===========================================================================
+\section{Documentation}
+
+\begin{deviation}[Versions do not inherit]\label{dev:non-inheriting}
+\textbf{Class:} documentation.
+
+\textbf{Statement.} \cite{dstm2026} describes versioning as ``each \gls{rank}
+retains several \glspl{version} (i.e.\ a \gls{history}) of its state'', which suggests a
+version is a snapshot of evolving state. It is not: a new version is
+zero-filled and inherits nothing (\cref{def:independence}).
+
+\textbf{Evidence.} \code{dstm\_region\_version\_find\_or\_create} allocates
+with \code{calloc(1, region->size)} and does not copy any predecessor; the
+accompanying comment states the zero-fill is relied upon by the
+``publish only what you change'' pattern.
+
+\textbf{Consequence.} No implementation defect. The risk is user-facing: a
+program that writes a value at $\eff$ and reads the same address at $\eff+1$
+without rewriting it silently reads zero. This is the single most likely
+first-use error, and it is not documented anywhere in \code{dstm.h}.
+
+\textbf{Fix.} State the semantics in the header, next to
+\code{dstm\_darray\_put}. See \cref{rem:republish}.
+\end{deviation}
+
+\begin{deviation}[Publish guard is non-strict]\label{dev:phase-strictness}
+\textbf{Class:} documentation.
+
+\textbf{Statement.} The comment above the local-clock clause of the publish
+guard argues that a version must stay writable ``until our own clock has moved
+strictly past \code{v->time}''. The code implements $\clk{p} \ge \eff$, not
+$\clk{p} > \eff$.
+
+\textbf{Evidence.} Comment at \srcrefr{ops.c}{103}{111}; the test at
+\srcref{ops.c}{112} is \code{if (region->local\_heartbeat\_time < v->time)}.
+
+\textbf{Consequence.} None: the code is right and the comment wrong, but for a
+reason worth recording. The non-strict guard leaves exactly one gap --- a
+local put with $\delta = 0$ at $t = \clk{p}$, still legal after publication.
+\Cref{prop:phase-minimality} shows this is the only gap and that
+\cref{res:phase} closes precisely it. Strengthening the guard to $\clk{p} >
+\eff$ would make \cref{res:phase} unnecessary but also make it impossible for
+a process to read its own current tick --- the whole \glslink{push-model}{push
+idiom}.
+
+\textbf{Fix.} Replace the comment with a reference to \cref{res:phase}.
+\end{deviation}
+
+\begin{deviation}[Clock tracks origin, documentation says effective]
+\label{dev:clock-conflation}
+\textbf{Class:} documentation.
+
+\textbf{Statement.} \code{dstm\_fini} and \code{dstm\_barrier} document their
+\code{last\_time} argument as ``the highest effective timestep submitted by
+this process, i.e.\ $\max(\mathit{time} + \mathit{delta})$''. The clock that the
+version state machine actually consults advances to $\mathit{time}$ only.
+
+\textbf{Evidence.} \srcref{dstm.h}{337} and \srcref{dstm.h}{359} for the
+documented meaning; \srcref{ops.c}{603}--\srcref{ops.c}{605} for the update,
+which uses \code{time} and not \code{time + delta}.
+
+\textbf{Consequence.} None for a conforming program, because the \gls{barrier}'s
+drained flag bypasses the guards that would care. But the two quantities are
+genuinely different --- they differ by up to the largest \gls{delta} in use --- and
+conflating them in the documentation makes \cref{res:terminate} hard to
+discharge correctly. The restriction as stated here uses the \gls{effective-time},
+matching the header rather than the clock.
+
+\textbf{Fix.} Name the two quantities distinctly in the header.
+\end{deviation}
+
+\begin{deviation}[Barrier documented as two-pass]\label{dev:barrier-doc}
+\textbf{Class:} documentation.
+
+\textbf{Statement.} \code{dstm\_barrier} is documented as ``a two-pass ring
+token algorithm''. The implementation is a three-round protocol, and
+\cref{thm:barrier-three-rounds} shows three rounds are necessary.
+
+\textbf{Evidence.} \srcref{dstm.h}{348} says two-pass; the protocol comment at
+\srcrefr{barrier.c}{19}{56} and the state machine at
+\srcrefr{barrier.c}{113}{225} implement a first round, a second round and an exit round.
+
+\textbf{Fix.} Correct the header; cite the necessity argument.
+\end{deviation}

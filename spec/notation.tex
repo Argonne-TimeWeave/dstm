@@ -1,0 +1,178 @@
+% ============================================================================
+%  Notation: every mathematical symbol used in this document is defined here
+%  and nowhere else.
+%
+%  Rationale: the specification is meant to be revised. Renaming a symbol must
+%  be a one-line edit in this file, never a search-and-replace across a dozen
+%  section files. Section files should contain no raw \mathcal, \mathsf or
+%  \mathit -- if you need a new symbol, add a macro here first.
+% ============================================================================
+
+% ---------------------------------------------------------------------------
+%  Generic mathematical furniture
+% ---------------------------------------------------------------------------
+\newcommand{\defeq}{\triangleq}                  % definitional equality
+\newcommand{\pto}{\rightharpoonup}               % partial function
+\newcommand{\Nat}{\mathbb{N}}
+\newcommand{\Int}{\mathbb{Z}}
+\newcommand{\powerset}[1]{\mathcal{P}(#1)}
+\newcommand{\restrict}[2]{#1\!\restriction_{#2}}
+\newcommand{\sem}[1]{\llbracket #1 \rrbracket}   % semantic brackets
+\newcommand{\disjoint}{\mathbin{\#}}             % footprint disjointness
+\DeclareMathOperator*{\argmin}{arg\,min}
+\DeclareMathOperator*{\argmax}{arg\,max}
+
+% ---------------------------------------------------------------------------
+%  Processes and ranks
+%
+%  A *process* is an entity: one running instance of the program. A *rank* is
+%  an integer naming it. They are never identified.
+%
+%  Convention, used without exception:
+%    UPPERCASE  P, Q, ...   range over processes
+%    lowercase  p, q, ...   range over ranks
+%
+%  Every structure is indexed by rank, distances included; a process appears
+%  only where an entity acts.
+% ---------------------------------------------------------------------------
+\newcommand{\worldsize}{n}                       % number of processes
+\newcommand{\Ranks}{\mathcal{R}}                 % the rank set, {0,...,n-1}
+\newcommand{\Procs}{\mathcal{P}}                 % the set of processes
+\newcommand{\proc}[1]{P_{#1}}                    % the process of rank #1
+\newcommand{\rankof}[1]{\mathrm{rank}(#1)}       % the rank of a process
+\newcommand{\succr}[1]{#1 \oplus 1}              % ring successor of a rank
+
+% ---------------------------------------------------------------------------
+%  Other base sets
+% ---------------------------------------------------------------------------
+\newcommand{\Time}{\mathbb{T}}                   % logical (simulation) time
+\newcommand{\Addr}{\mathcal{A}}                  % address space
+\newcommand{\Addrof}[1]{\Addr_{#1}}              % address space of rank #1
+\newcommand{\Handles}{\mathcal{H}}               % allocation handles
+\newcommand{\allocof}[1]{\mathit{alloc}_{#1}}    % rank #1's allocation map
+\newcommand{\extent}[2]{\mathit{ext}_{#1}(#2)}   % addresses held by a handle
+\newcommand{\live}[1]{\mathit{Live}_{#1}}        % the allocated addresses
+\newcommand{\Bytes}{\mathbb{B}}                  % bytes
+\newcommand{\Values}{\mathbb{V}}                 % byte strings
+\newcommand{\Ptrs}{\mathit{Ptr}}                 % pointers
+\newcommand{\Cells}{\mathit{Cell}}               % versioned cells
+\newcommand{\Ops}{\mathcal{O}}                   % operations
+\newcommand{\Msgs}{\mathcal{M}}                  % messages
+
+% ---------------------------------------------------------------------------
+%  Communication graph and the induced distance, both on ranks
+%
+%    * the graph (R,E,w) says which ranks may exchange operations and what
+%      each channel costs. E is sparse; DSTM exploits that.
+%    * d is the extended metric E induces. It is total and is *not*
+%      adjacency: two ranks may be at finite distance sharing no channel.
+% ---------------------------------------------------------------------------
+\newcommand{\cgraph}{\mathcal{G}}                % the communication graph
+\newcommand{\edges}{E}                           % its edge set
+\newcommand{\ew}[2]{w(#1,#2)}                    % channel weight on an edge
+\newcommand{\dist}[2]{d(#1,#2)}                  % the induced distance
+\newcommand{\Dmat}{\mathbf{D}}                   % API-level matrix encoding
+\newcommand{\noedge}{\bot}                       % absence of an edge
+\newcommand{\nbr}[1]{N(#1)}                      % neighbourhood (adjacency)
+\newcommand{\diam}{\Delta}                       % max distance in a neighbourhood
+
+% ---------------------------------------------------------------------------
+%  Time: clocks, origin/delta/effective time, drift
+% ---------------------------------------------------------------------------
+\newcommand{\clk}[1]{C_{#1}}                     % local logical clock of a rank
+\newcommand{\kn}[2]{K_{#1}[#2]}                  % #1's last-known time for #2
+\newcommand{\drift}[2]{\partial(#1,#2)}          % clock skew between two ranks
+\newcommand{\eff}{\tau}                          % an effective time
+\newcommand{\efft}[2]{#1 + #2}                   % effective time from t, delta
+\newcommand{\mvt}[1]{\underline{C}_{#1}}         % minimum virtual time of a rank
+
+% ---------------------------------------------------------------------------
+%  Versions and the versioned store
+% ---------------------------------------------------------------------------
+\newcommand{\ver}[2]{\nu(#1,#2)}                 % the version (rank, time)
+\newcommand{\Vst}[2]{\mathit{st}_{#1}(#2)}       % status of a version
+\newcommand{\Vbuf}[2]{\mathit{buf}_{#1}(#2)}     % byte content of a version
+
+% Status lattice constants.
+\newcommand{\Absent}{\varnothing}
+\newcommand{\Wr}{\mathsf{W}}                     % writable
+\newcommand{\Rd}{\mathsf{R}}                     % readable
+\newcommand{\Dc}{\mathsf{X}}                     % discardable
+\newcommand{\Status}{\mathcal{S}}                % {absent, W, R, X}
+
+% The abstract store.
+\newcommand{\Store}{\Sigma}
+\newcommand{\StoreH}{\Sigma_{H}}
+\newcommand{\cell}[3]{\langle #1, #2, #3\rangle} % a versioned cell
+
+% ---------------------------------------------------------------------------
+%  Operations
+% ---------------------------------------------------------------------------
+\newcommand{\opput}{\mathsf{put}}
+\newcommand{\opget}{\mathsf{get}}
+\newcommand{\optick}{\mathsf{tick}}
+\newcommand{\opbar}{\mathsf{barrier}}
+
+\newcommand{\Put}[6]{\opput(#1\!\to\!#2,\,#3,\,#4,\,#5,\,#6)}
+\newcommand{\Get}[6]{\opget(#1\!\to\!#2,\,#3,\,#4,\,#5,\,#6)}
+\newcommand{\Tick}[2]{\optick(#1,\,#2)}
+
+% Field accessors on an operation.
+\newcommand{\opsrc}[1]{\mathit{iss}(#1)}         % issuing rank
+\newcommand{\optgt}[1]{\mathit{tgt}(#1)}         % target rank
+\newcommand{\optime}[1]{\mathit{t}(#1)}          % origin time
+\newcommand{\opdelta}[1]{\delta(#1)}             % delta
+\newcommand{\opeff}[1]{\tau(#1)}                 % effective time
+\newcommand{\opkind}[1]{\mathit{kind}(#1)}
+
+% Footprints.
+\newcommand{\fp}[1]{\mathit{fp}(#1)}             % full footprint
+\newcommand{\fpw}[1]{\mathit{W}(#1)}             % write footprint
+\newcommand{\fpr}[1]{\mathit{R}(#1)}             % read footprint
+
+% ---------------------------------------------------------------------------
+%  Histories, orders and relations
+% ---------------------------------------------------------------------------
+\newcommand{\Hist}{H}                            % a history
+\newcommand{\Legal}[1]{\mathrm{Legal}(#1)}
+\newcommand{\po}{\xrightarrow{\;\mathrm{po}\;}}  % program order
+\newcommand{\rf}{\xrightarrow{\;\mathrm{rf}\;}}  % reads-from
+\newcommand{\dep}{\xrightarrow{\;\mathrm{dep}\;}}% dependence
+\newcommand{\vis}{\xrightarrow{\;\mathrm{vis}\;}}% visibility
+\newcommand{\obs}[1]{\mathrm{obs}(#1)}           % observable outcome
+
+% ---------------------------------------------------------------------------
+%  Transition systems
+% ---------------------------------------------------------------------------
+\newcommand{\TS}[1]{\mathcal{T}_{#1}}            % a named transition system
+\newcommand{\States}{S}
+\newcommand{\Init}{s_0}
+\newcommand{\Labels}{L}
+\newcommand{\steps}{\longrightarrow}
+\newcommand{\stepl}[1]{\xrightarrow{\;#1\;}}     % labelled transition
+\newcommand{\stepsstar}{\longrightarrow^{*}}
+\newcommand{\Cfg}{\mathcal{K}}                   % a global configuration
+\newcommand{\Net}{M}                             % in-flight message multiset
+\newcommand{\Pend}[1]{Q_{#1}}                    % pending request queue
+\newcommand{\Vers}[1]{V_{#1}}                    % version map of a rank
+
+% ---------------------------------------------------------------------------
+%  Dependence graph and scheduling
+% ---------------------------------------------------------------------------
+\newcommand{\task}[2]{\langle #1, #2\rangle}     % the (rank, tick) task node
+\newcommand{\depgraph}{G_{\mathrm{dep}}}
+\newcommand{\cpath}{\mathrm{CP}}                 % critical path length
+\newcommand{\makespan}{\mathrm{MS}}
+\newcommand{\slack}[2]{\mathrm{slack}(#1,#2)}
+\newcommand{\work}[2]{w(#1,#2)}                  % work of a task
+
+% ---------------------------------------------------------------------------
+%  Layer names
+% ---------------------------------------------------------------------------
+\newcommand{\Lz}{$\mathcal{L}_0$}                % axiomatic layer
+\newcommand{\Lo}{$\mathcal{L}_1$}                % operational layer
+\newcommand{\Li}{$\mathcal{L}_2$}                % implementation layer
+\newcommand{\Lzm}{\mathcal{L}_0}                 % math-mode variants
+\newcommand{\Lom}{\mathcal{L}_1}
+\newcommand{\Lim}{\mathcal{L}_2}
+\newcommand{\refines}{\sqsubseteq}

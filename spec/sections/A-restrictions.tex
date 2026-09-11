@@ -1,0 +1,143 @@
+\chapter{Restriction Reference}
+\label{ch:restrictions}
+
+A one-page summary of \cref{sec:l0-restrictions}, for use while writing or
+reviewing DSTM code. The statements here are abbreviations; the normative
+\glspl{version} are \crefrange{res:monotone}{res:terminate}.
+
+Throughout, $p$ is the issuing \gls{rank}, $q$ the target \gls{rank}, $t$ the \gls{origin-time},
+$\delta$ the \gls{delta} and $\eff = t + \delta$ the \gls{effective-time}.
+
+\begin{table}[htbp]
+\centering
+\small
+\renewcommand{\arraystretch}{1.35}
+\begin{tabularx}{\textwidth}{@{}l >{\raggedright\arraybackslash}p{4.3cm}
+                                 >{\raggedright\arraybackslash}X@{}}
+\toprule
+\textbf{ID} & \textbf{Condition} & \textbf{Why it exists} \\
+\midrule
+
+\cref{res:monotone}
+ & $t$ nondecreasing along $\po$ within each process
+ & The clock is a lower bound on all future origin times. Both promotion
+   guards conclude ``$p$ can no longer produce this'' from ``$p$'s clock has
+   passed it''. \\
+
+\cref{res:lookahead}
+ & put: $\delta \ge \dist{p}{q}$
+ & Makes \textsc{Publish} sound: a neighbour known to be at $\kn{p}{q}$ cannot
+   write earlier than $\kn{p}{q} + \dist{p}{q}$. \\
+
+\cref{res:staleness}
+ & get: $|\delta| \le \dist{p}{q}$
+ & Makes \textsc{Retire} sound: a neighbour cannot read further back than
+   $\kn{p}{q} - \dist{p}{q}$. \\
+
+\cref{res:phase}
+ & within a process, every put on $(q,\eff)$ precedes every get on $(q,\eff)$
+ & Closes the single gap left by the non-strict clock clause $\clk{p} \ge
+   \eff$: a local zero-delta write at the current tick. \\
+
+\cref{res:write-disjoint}
+ & no two puts share a cell
+ & Makes $\StoreH$ single-valued. Without it the semantics does not exist,
+   and results vary between runs. \\
+
+\cref{res:horizon}
+ & $\delta \le \Theta_{\max}$ for puts
+ & Bounds live versions. Affects no value, only memory. \\
+
+\cref{res:collective}
+ & collectives called by all processes in the same order
+ & Session, barrier and structure creation are collective. \\
+
+\cref{res:terminate}
+ & $\ell \ge \max_o \opeff{o}$ globally, identical on all processes
+ & The barrier must outlast the furthest effective time in play. \\
+
+\bottomrule
+\end{tabularx}
+\caption{The eight restrictions.}
+\label{tab:restrictions}
+\end{table}
+
+\section{Enforcement status and proposed checks}
+
+None of the eight is enforced today. The table below proposes a check for each
+and estimates its cost, on the assumption that they would be compiled in under
+a debug configuration and out of production builds.
+
+\begin{table}[htbp]
+\centering
+\small
+\begin{tabularx}{\textwidth}{@{}l >{\raggedright\arraybackslash}p{2.5cm}
+                                >{\raggedright\arraybackslash}X
+                                >{\raggedright\arraybackslash}p{1.9cm}@{}}
+\toprule
+\textbf{ID} & \textbf{Now} & \textbf{Proposed check} & \textbf{Cost} \\
+\midrule
+\cref{res:monotone}       & none & reject $t < \clk{p}$ in put/get
+  & $O(1)$ \\
+\cref{res:lookahead}      & none & reject $\delta < \dist{p}{q}$; the matrix
+  lookup is already performed nearby & $O(1)$ \\
+\cref{res:staleness}      & none & reject $|\delta| > \dist{p}{q}$
+  & $O(1)$ \\
+\cref{res:phase}          & partial: \code{abort()} on apply to a
+  non-writable version, which detects it late and only sometimes
+  & keep, and document that the abort indicates this restriction
+  & --- \\
+\cref{res:write-disjoint} & none & per-version interval set of written byte
+  ranges; abort on overlap & $O(\log w)$ per put \\
+\cref{res:horizon}        & none & optional session-level cap on $\delta$
+  & $O(1)$ \\
+\cref{res:collective}     & partial: dgraph uses
+  \code{dstm\_msg\_consensus}, darray does not & extend the consensus pattern
+  to darray & one all-reduce \\
+\cref{res:terminate}      & none & all-reduce $\max \eff$ inside the barrier
+  and compare against $\ell$ & one all-reduce \\
+\bottomrule
+\end{tabularx}
+\caption{Proposed enforcement. Only \cref{res:write-disjoint} costs more than
+a constant per operation, and it is the one whose violation is otherwise
+undetectable.}
+\label{tab:enforcement}
+\end{table}
+
+\section{Which results depend on which restriction}
+
+\begin{table}[htbp]
+\centering
+\small
+\begin{tabularx}{\textwidth}{@{}>{\raggedright\arraybackslash}p{5.2cm}
+                                >{\raggedright\arraybackslash}X@{}}
+\toprule
+\textbf{Result} & \textbf{Consumes} \\
+\midrule
+\cref{lem:store-welldef} (store is well defined)
+ & \cref{res:write-disjoint} \\
+\cref{thm:write-closure} (write closure)
+ & \cref{res:monotone}, \cref{res:lookahead}, \cref{res:phase}; (M2), (M3) \\
+\cref{thm:immutability} (immutability)
+ & via \cref{thm:write-closure} \\
+\cref{thm:discard-safety} (discard safety)
+ & \cref{res:monotone}, \cref{res:staleness}; (M3) \\
+\cref{thm:read-soundness} (reads match $\StoreH$)
+ & \cref{thm:write-closure}, \cref{res:write-disjoint} \\
+\cref{thm:determinism} (determinacy)
+ & all of the mechanical group, plus \cref{res:write-disjoint} \\
+\cref{thm:deadlock-freedom} (no deadlock)
+ \& (M2); fairness \ref{f:delivery}--\ref{f:clock} \\
+\cref{thm:barrier-correct} (termination)
+ & \cref{res:collective}, \cref{res:terminate} \\
+\cref{thm:acyclic} (schedulability)
+ & \cref{res:lookahead}, \cref{res:phase}; (M2) \\
+\cref{thm:space-bound} (memory bound)
+ & \cref{res:horizon}, \cref{thm:discard-safety} \\
+\bottomrule
+\end{tabularx}
+\caption{Dependency of the results on the restrictions. (M2) --- every
+reachable distance is at least one --- appears in three separate results and
+is the single most load-bearing well-formedness condition.}
+\label{tab:result-deps}
+\end{table}
