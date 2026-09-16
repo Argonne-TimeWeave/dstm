@@ -26,6 +26,16 @@ struct car {
         int32_t depart_tick;
         int32_t hops;
         int32_t ready_tick;     /* may depart when tick >= ready_tick   */
+
+        /* Set at the first routing decision. NAN means that the car has
+         * not made a routing decision yet. This excludes tie_jitter: the
+         * jitter chooses between otherwise similar routes but is not a
+         * travel-time prediction. */
+        float routed_tt;
+
+        /* Physical path length accumulated over completed edge
+         * traversals. */
+        float distance_m;
 };
 
 struct car_pool {

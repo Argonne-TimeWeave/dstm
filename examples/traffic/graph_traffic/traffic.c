@@ -57,6 +57,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "dstm.h"
 
@@ -246,6 +247,44 @@ struct rank_stats {
         uint64_t bytes_out;
 };
 
+enum trip_event_kind {
+        TRIP_EVENT_SPAWN = 1,
+        TRIP_EVENT_ROUTE,
+        TRIP_EVENT_ARRIVE,
+};
+
+/* Events are retained locally and gathered to rank zero after the run.
+ * This avoids adding MPI collectives or point-to-point operations to the
+ * simulation tick. */
+struct trip_event {
+        int32_t kind;
+        int32_t trip_id;
+        int32_t origin;
+        int32_t dest;
+        int32_t depart_tick;
+        int32_t arrival_tick;
+        int32_t hops;
+        int32_t reserved;
+        float   free_flow_tt;
+        float   routed_tt;
+        float   distance_m;
+};
+
+struct trip_row {
+        int32_t trip_id;
+        int32_t origin;
+        int32_t dest;
+        int32_t depart_tick;
+        int32_t arrival_tick;
+        int32_t hops;
+        int     spawned;
+        int     routed;
+        int     arrived;
+        float   free_flow_tt;
+        float   routed_tt;
+        float   distance_m;
+};
+
 struct sim {
         int rank;
         int world_size;
@@ -308,6 +347,12 @@ struct sim {
          * routed to. sp_tick[d] == -1 means "not yet computed". */
         float        **sp;      /* nv pointers, each nv floats          */
         int32_t       *sp_tick; /* nv                                   */
+
+        /* Free-flow cost-to-go trees. Unlike sp, these never expire
+         * because topology and ff_ticks are immutable. */
+        float        **ff_sp;
+        unsigned char *ff_sp_valid;
+
         struct pqheap  h;
 
         /* Oracle mode only. Owned edges are the contiguous global range
@@ -317,8 +362,14 @@ struct sim {
         int *ag_counts;
         int *ag_displs;
 
-        int spawn_rate;         /* cars per rank per tick */
+        int spawn_rate;         /* global cars spawned per tick */
         int next_car_id;        /* persistent across calls */
+
+        /* Trip-level output. */
+        struct trip_event *events;
+        size_t             nevents;
+        size_t             events_cap;
+        const char        *trip_output;
 
         /* Number of initial timestamps included in the routing-metric
          * cohort. A car is included when:
@@ -326,7 +377,7 @@ struct sim {
          *     0 <= depart_tick < metric_depart_limit
          *
          * Since timestamps are 0..t_end inclusive, this is
-         * ceil((t_end + 1) / 10). */
+         * ceil((t_end + 1) / 2). */
         int32_t metric_depart_limit; 
 
         struct rank_stats st;
@@ -344,6 +395,73 @@ static int routing_metric_member(int32_t depart_tick)
 {
         return depart_tick >= 0 &&
                depart_tick < S.metric_depart_limit;
+}
+
+static void trip_event_push(struct trip_event event)
+{
+        /* Do not retain trip events outside the routing-metric cohort. */
+        //if (!routing_metric_member(event.depart_tick))
+         //       return;
+
+        if (S.nevents == S.events_cap) {
+                size_t new_cap = S.events_cap ? S.events_cap * 2 : 1024;
+                struct trip_event *new_events =
+                        realloc(S.events, new_cap * sizeof(*new_events));
+
+                assert(new_events != NULL);
+                S.events = new_events;
+                S.events_cap = new_cap;
+        }
+
+        S.events[S.nevents++] = event;
+}
+
+static void record_trip_spawn(const struct car *c)
+{
+        trip_event_push((struct trip_event) {
+                .kind         = TRIP_EVENT_SPAWN,
+                .trip_id      = c->id,
+                .origin       = c->origin,
+                .dest         = c->dest,
+                .depart_tick  = c->depart_tick,
+                .arrival_tick = -1,
+                .hops         = 0,
+                .free_flow_tt = NAN,
+                .routed_tt    = NAN,
+                .distance_m   = 0.0f,
+        });
+}
+
+static void record_trip_route(const struct car *c, float free_flow_tt)
+{
+        trip_event_push((struct trip_event) {
+                .kind         = TRIP_EVENT_ROUTE,
+                .trip_id      = c->id,
+                .origin       = c->origin,
+                .dest         = c->dest,
+                .depart_tick  = c->depart_tick,
+                .arrival_tick = -1,
+                .hops         = c->hops,
+                .free_flow_tt = free_flow_tt,
+                .routed_tt    = c->routed_tt,
+                .distance_m   = c->distance_m,
+        });
+}
+
+static void record_trip_arrival(const struct car_rec *r, int32_t t)
+{
+        trip_event_push((struct trip_event) {
+                .kind         = TRIP_EVENT_ARRIVE,
+                .trip_id      = r->id,
+                .origin       = r->origin,
+                .dest         = r->dest,
+                .depart_tick  = r->depart_tick,
+                .arrival_tick = t,
+                .hops         = r->hops + 1,
+                .free_flow_tt = NAN,
+                .routed_tt    = r->routed_tt,
+                .distance_m   = r->distance_m,
+        });
 }
 
 /* Per-vertex state published every tick. Its only job today is to create
@@ -395,6 +513,7 @@ static void inject_car(const struct car_rec *r, int32_t t)
 
         if ((size_t)r->dest == at) {
                 S.st.arrived++;
+                record_trip_arrival(r, t);
 
                 if (routing_metric_member(r->depart_tick)) {
                         S.st.metric_arrived++;
@@ -414,6 +533,8 @@ static void inject_car(const struct car_rec *r, int32_t t)
                 .depart_tick = r->depart_tick,
                 .hops        = r->hops + 1,
                 .ready_tick  = t + DWELL_TICKS,
+                .routed_tt   = r->routed_tt,
+                .distance_m  = r->distance_m,
         };
         car_pool_insert(&S.pool, c);
         S.vqueue[at - S.v_lo]++;
@@ -617,29 +738,78 @@ static const float *shortest_path_tree(size_t dest, int32_t t)
         return d;
 }
 
-static size_t route_pick(size_t i_local, int32_t dest, int32_t t, int32_t car_id)
+/* Free-flow cost-to-go from every vertex to dest. The result is immutable
+ * and can be reused for the remainder of the run. */
+static const float *free_flow_shortest_path_tree(size_t dest)
+{
+        if (S.ff_sp_valid[dest])
+                return S.ff_sp[dest];
+
+        float *d = S.ff_sp[dest];
+        if (d == NULL) {
+                d = malloc(S.city.nv * sizeof(*d));
+                assert(d != NULL);
+                S.ff_sp[dest] = d;
+        }
+
+        for (size_t v = 0; v < S.city.nv; v++)
+                d[v] = INFINITY;
+        d[dest] = 0.0f;
+
+        heap_clear(&S.h);
+        heap_push(&S.h, dest, 0.0f);
+
+        size_t v;
+        float dv;
+
+        while (heap_pop(&S.h, &v, &dv)) {
+                if (dv > d[v])
+                        continue;
+
+                for (size_t k = S.rrow[v]; k < S.rrow[v + 1]; k++) {
+                        size_t e = S.redge[k];
+                        size_t u = S.city.esrc[e];
+                        float nd = dv + (float)S.city.ff_ticks[e];
+
+                        if (nd < d[u]) {
+                                d[u] = nd;
+                                heap_push(&S.h, u, nd);
+                        }
+                }
+        }
+
+        S.ff_sp_valid[dest] = 1;
+        return d;
+}
+
+static size_t route_pick(size_t i_local, int32_t dest, int32_t t,
+                         int32_t car_id, float *routed_tt)
 {
         const float *d = shortest_path_tree((size_t)dest, t);
         size_t best = (size_t)-1;
         float  best_score = 0.0f;
+        float  best_prediction = INFINITY;
 
-        for (size_t ls = S.lrow_ptr[i_local]; ls < S.lrow_ptr[i_local+1]; ls++) {
+        for (size_t ls = S.lrow_ptr[i_local];
+             ls < S.lrow_ptr[i_local + 1]; ls++) {
                 size_t v  = S.ldst[ls];
                 size_t ge = S.gslot_base + ls;
 
-                if (v == (size_t)dest)
-                       return ls;
                 if (!isfinite(d[v]))
                         continue;
 
-                float score = edge_cost(ge, t) + d[v]
-                            + tie_jitter(car_id, t, ge);
+                float prediction = edge_cost(ge, t) + d[v];
+                float score = prediction + tie_jitter(car_id, t, ge);
 
                 if (best == (size_t)-1 || score < best_score) {
                         best_score = score;
+                        best_prediction = prediction;
                         best = ls;
                 }
         }
+
+        if (routed_tt != NULL)
+                *routed_tt = best_prediction;
         return best;
 }
 
@@ -663,17 +833,31 @@ static void route_and_stage(int32_t t)
                 if (t < c->ready_tick)
                         continue;               /* still dwelling */
 
-                size_t i_local = (size_t)c->at - S.v_lo;
-                size_t ls      = route_pick(i_local, c->dest, t, c->id);
+                                size_t i_local = (size_t)c->at - S.v_lo;
+                float prediction = INFINITY;
+                size_t ls = route_pick(i_local, c->dest, t, c->id,
+                                       &prediction);
 
                 if (ls == (size_t)-1)
                         continue;               /* isolated vertex */
+
+                /* The first routing decision defines routed_tt. Record it
+                 * even if the car is denied by the edge cap this tick. */
+                if (isnan(c->routed_tt)) {
+                        const float *ff =
+                                free_flow_shortest_path_tree((size_t)c->dest);
+
+                        c->routed_tt = prediction;
+                        record_trip_route(c, ff[(size_t)c->at]);
+                }
 
                 if (S.stage_count[ls] >= S.Lcar.cap) {
                         S.load_block[ls] += 1.0f;
                         S.st.blocked++;
                         continue;
                 }
+
+                size_t ge = S.gslot_base + ls;
 
                 struct car_rec r = {
                         .id          = c->id,
@@ -682,6 +866,9 @@ static void route_and_stage(int32_t t)
                         .dst_vertex  = (int32_t)S.ldst[ls],
                         .depart_tick = c->depart_tick,
                         .hops        = c->hops,
+                        .routed_tt   = c->routed_tt,
+                        .distance_m  = c->distance_m +
+                                       S.city.length_m[ge],
                 };
 
                 S.stage[ls * S.Lcar.cap + S.stage_count[ls]] = r;
@@ -828,31 +1015,59 @@ static void send_state(int32_t t)
  * Spawn
  ******************************************************************************/
 
-static void spawn_cars(int n, int s)
+static unsigned int trip_rng_seed(int seed, int32_t trip_id)
 {
-        if (S.nlocal == 0)
+        uint32_t x = (uint32_t)seed ^ ((uint32_t)trip_id * 0x9e3779b9u);
+
+        x ^= x >> 16;
+        x *= 0x7feb352du;
+        x ^= x >> 15;
+        x *= 0x846ca68bu;
+        x ^= x >> 16;
+
+        return x ? x : 1u;
+}
+
+static void spawn_cars(int n)
+{
+        if (n <= 0)
                 return;
 
-        int per_rank_n = n / s;
+        int32_t first_id = S.next_car_id;
+        S.next_car_id += n;
 
-        for (int k = 0; k < per_rank_n; k++) {
-                size_t origin = S.v_lo + (size_t)(xrand(&S.rng) %
-                                                  (unsigned int)S.nlocal);
-                size_t dest   = city_pick_destination(&S.city, origin, &S.rng);
+        /* Every rank generates the same global demand records. Only the
+         * owner of the generated origin creates the local car. This makes
+         * trip_id, origin, destination, and departure tick independent of
+         * rank count and replica mode. */
+        for (int k = 0; k < n; k++) {
+                int32_t trip_id = first_id + k;
+                unsigned int rng = trip_rng_seed(S.seed, trip_id);
+
+                size_t origin =
+                        (size_t)(xrand(&rng) % (unsigned int)S.city.nv);
+                size_t dest =
+                        city_pick_destination(&S.city, origin, &rng);
+
+                if (city_owner(&S.city, origin) != S.rank)
+                        continue;
 
                 struct car c = {
-                        .id          = S.next_car_id++,
+                        .id          = trip_id,
                         .origin      = (int32_t)origin,
                         .dest        = (int32_t)dest,
                         .at          = (int32_t)origin,
                         .depart_tick = (int32_t)S.t,
                         .hops        = 0,
                         .ready_tick  = 0,
+                        .routed_tt   = NAN,
+                        .distance_m  = 0.0f,
                 };
 
                 car_pool_insert(&S.pool, c);
                 S.vqueue[origin - S.v_lo]++;
                 S.st.spawned++;
+                record_trip_spawn(&c);
 
                 if (routing_metric_member(c.depart_tick))
                         S.st.metric_spawned++;
@@ -863,7 +1078,7 @@ static void spawn_cars(int n, int s)
  * Tick
  ******************************************************************************/
 
-static void run_step(int32_t t, int s)
+static void run_step(int32_t t)
 {
         /* Only STALE diffuses congestion edge-by-edge, and only on its
          * cadence. BLIND never touches the replica. ORACLE replaces
@@ -872,7 +1087,7 @@ static void run_step(int32_t t, int s)
                             (t % S.stale_delay == 0);
 
         if (S.spawn_rate > 0)
-            spawn_cars(S.spawn_rate, s);
+            spawn_cars(S.spawn_rate);
         publish_vertices(t);    /* creates local version t (both graphs) */
 
         recv_cars(t);           /* every tick, every mode */
@@ -1130,15 +1345,20 @@ static int setup(const char *dir, int steps, unsigned int cap)
         /* sp_tick MUST start at -1, not 0: tick 0 is a legitimate tick,
          * so a calloc'd 0 would falsely report a cache hit on the very
          * first routing call and hand out an uninitialised tree. */
-        S.sp      = calloc(S.city.nv, sizeof(*S.sp));
-        S.sp_tick = malloc(S.city.nv * sizeof(*S.sp_tick));
-        if (S.sp == NULL || S.sp_tick == NULL) {
+        S.sp          = calloc(S.city.nv, sizeof(*S.sp));
+        S.sp_tick     = malloc(S.city.nv * sizeof(*S.sp_tick));
+        S.ff_sp       = calloc(S.city.nv, sizeof(*S.ff_sp));
+        S.ff_sp_valid = calloc(S.city.nv, sizeof(*S.ff_sp_valid));
+
+        if (S.sp == NULL || S.sp_tick == NULL ||
+            S.ff_sp == NULL || S.ff_sp_valid == NULL) {
                 fprintf(stderr, "rank %d: out of memory in setup\n", S.rank);
                 return -1;
         }
+
         for (size_t i = 0; i < S.city.nv; i++)
                 S.sp_tick[i] = -1;
-
+        
         /* Oracle-mode allgatherv descriptors, in BYTES. Built
          * unconditionally: two int arrays of length world_size cost
          * nothing and keeping them mode-independent avoids a second code
@@ -1194,13 +1414,20 @@ static int setup(const char *dir, int steps, unsigned int cap)
         S.t     = 0;
         S.t_end = steps;
 
-        S.metric_depart_limit = 1 + steps / 10;
+        // first 2%
+        S.metric_depart_limit = 1 + steps / 50;
 
         S.rng   = (unsigned int)(S.seed * 7919u + (unsigned int)S.rank * 31u
                                  + 1u);
 
-        /* Disjoint id ranges per rank so ids stay unique on the wire. */
-        S.next_car_id = S.rank * 1000000;
+        /* Every rank generates the same deterministic global demand
+         * records and only instantiates records whose origin it owns.
+         * Therefore every rank must begin from the same global trip ID.
+         *
+         * Do not use rank-prefixed ID ranges here: doing so causes each
+         * rank to generate a different demand set and prevents trip rows
+         * from being paired across ranks, modes, and rank counts. */
+        S.next_car_id = 0;
 
         return 0;
 }
@@ -1241,7 +1468,16 @@ static void teardown_local(void)
                         free(S.sp[i]);
                 free(S.sp);
         }
+
+        if (S.ff_sp != NULL) {
+                for (size_t i = 0; i < S.city.nv; i++)
+                        free(S.ff_sp[i]);
+                free(S.ff_sp);
+        }
+
         free(S.sp_tick);
+        free(S.ff_sp_valid);
+        free(S.events);
         free(S.h.v);
         free(S.h.k);
 
@@ -1254,6 +1490,189 @@ static void teardown_local(void)
 /*******************************************************************************
  * Stats
  ******************************************************************************/
+static void write_trip_table(void)
+{
+        int local_bytes;
+        int *recv_counts = NULL;
+        int *recv_displs = NULL;
+        struct trip_event *all_events = NULL;
+
+        assert(S.nevents <= (size_t)INT32_MAX /
+                            sizeof(struct trip_event));
+        local_bytes = (int)(S.nevents * sizeof(struct trip_event));
+
+        if (S.rank == 0) {
+                recv_counts = malloc((size_t)S.world_size *
+                                     sizeof(*recv_counts));
+                recv_displs = malloc((size_t)S.world_size *
+                                     sizeof(*recv_displs));
+                assert(recv_counts != NULL && recv_displs != NULL);
+        }
+
+        MPI_Gather(&local_bytes, 1, MPI_INT,
+                   recv_counts, 1, MPI_INT, 0, MPI_COMM_WORLD);
+
+        int total_bytes = 0;
+        if (S.rank == 0) {
+                for (int r = 0; r < S.world_size; r++) {
+                        recv_displs[r] = total_bytes;
+                        total_bytes += recv_counts[r];
+                }
+
+                all_events = malloc(total_bytes > 0
+                        ? (size_t)total_bytes : 1);
+                assert(all_events != NULL);
+        }
+
+        MPI_Gatherv(S.events, local_bytes, MPI_BYTE,
+                    all_events, recv_counts, recv_displs, MPI_BYTE,
+                    0, MPI_COMM_WORLD);
+
+        if (S.rank != 0)
+                return;
+
+        size_t ntrips = (size_t)S.next_car_id;
+        struct trip_row *rows =
+                calloc(ntrips ? ntrips : 1, sizeof(*rows));
+        assert(rows != NULL);
+
+        for (size_t i = 0; i < ntrips; i++) {
+                rows[i].trip_id = (int32_t)i;
+                rows[i].origin = -1;
+                rows[i].dest = -1;
+                rows[i].depart_tick = -1;
+                rows[i].arrival_tick = -1;
+                rows[i].hops = -1;
+                rows[i].free_flow_tt = NAN;
+                rows[i].routed_tt = NAN;
+                rows[i].distance_m = NAN;
+        }
+
+        size_t nevents = (size_t)total_bytes / sizeof(*all_events);
+
+        for (size_t i = 0; i < nevents; i++) {
+                const struct trip_event *e = &all_events[i];
+
+                if (e->trip_id < 0 ||
+                    (size_t)e->trip_id >= ntrips)
+                        continue;
+
+                struct trip_row *row = &rows[e->trip_id];
+
+                if (e->kind == TRIP_EVENT_SPAWN) {
+                        row->spawned = 1;
+                        row->origin = e->origin;
+                        row->dest = e->dest;
+                        row->depart_tick = e->depart_tick;
+                } else if (e->kind == TRIP_EVENT_ROUTE) {
+                        row->routed = 1;
+                        row->free_flow_tt = e->free_flow_tt;
+                        row->routed_tt = e->routed_tt;
+                } else if (e->kind == TRIP_EVENT_ARRIVE) {
+                        row->arrived = 1;
+                        row->arrival_tick = e->arrival_tick;
+                        row->hops = e->hops;
+                        row->distance_m = e->distance_m;
+
+                        /* The routed estimate also travels with the car,
+                         * so retain it as a fallback if the route event is
+                         * unexpectedly absent. */
+                        if (!isfinite(row->routed_tt))
+                                row->routed_tt = e->routed_tt;
+                }
+        }
+
+        char automatic_path[4096];
+        const char *path = S.trip_output;
+
+        if (path == NULL) {
+                snprintf(automatic_path, sizeof(automatic_path),
+                         "trips-%s-d%d-seed%d-pid%ld.csv",
+                         replica_mode_name(S.mode),
+                         S.stale_delay, S.seed, (long)getpid());
+                path = automatic_path;
+        }
+
+        FILE *f = fopen(path, "w");
+        if (f == NULL) {
+                perror(path);
+                free(rows);
+                free(all_events);
+                free(recv_counts);
+                free(recv_displs);
+                return;
+        }
+
+        fprintf(f,
+                "trip_id,mode,stale_delay,seed,origin,destination,"
+                "depart_tick,arrival_tick,arrived,free_flow_tt,"
+                "routed_tt,experienced_tt,prediction_gap,"
+                "absolute_gap,hops,distance_m,vmt,vht\n");
+
+        const double metres_per_mile = 1609.344;
+        const double hours_per_tick = SECONDS_PER_TICK / 3600.0;
+
+        for (size_t i = 0; i < ntrips; i++) {
+                const struct trip_row *row = &rows[i];
+
+                if (!row->spawned /*||
+                    !routing_metric_member(row->depart_tick)*/)
+                        continue;
+
+                double experienced_tt = NAN;
+                double prediction_gap = NAN;
+                double absolute_gap = NAN;
+                double distance_m = NAN;
+                double vmt = NAN;
+                double vht = NAN;
+
+                if (row->arrived) {
+                        experienced_tt =
+                                (double)(row->arrival_tick -
+                                         row->depart_tick);
+                        distance_m = row->distance_m;
+                        vmt = distance_m / metres_per_mile;
+                        vht = experienced_tt * hours_per_tick;
+
+                        if (isfinite(row->routed_tt)) {
+                                prediction_gap =
+                                        experienced_tt - row->routed_tt;
+                                absolute_gap = fabs(prediction_gap);
+                        }
+                }
+
+                fprintf(f,
+                        "%d,%s,%d,%d,%d,%d,%d,%d,%d,"
+                        "%.9g,%.9g,%.9g,%.9g,%.9g,%d,"
+                        "%.9g,%.9g,%.9g\n",
+                        row->trip_id,
+                        replica_mode_name(S.mode),
+                        S.stale_delay,
+                        S.seed,
+                        row->origin,
+                        row->dest,
+                        row->depart_tick,
+                        row->arrival_tick,
+                        row->arrived,
+                        row->free_flow_tt,
+                        row->routed_tt,
+                        experienced_tt,
+                        prediction_gap,
+                        absolute_gap,
+                        row->hops,
+                        distance_m,
+                        vmt,
+                        vht);
+        }
+
+        fclose(f);
+        printf("trip table: %s\n", path);
+
+        free(rows);
+        free(all_events);
+        free(recv_counts);
+        free(recv_displs);
+}
 
 static void collect_and_print_stats(void)
 {
@@ -1406,16 +1825,17 @@ static void usage(const char *prog)
         fprintf(stderr,
                 "usage: %s --data DIR [--steps N] [--cars M] [--rate R]\n"
                 "          [--cap C] [--seed S] [--replica-mode M]\n"
-                "          [--verbose] [--quiet]\n"
+                "          [--trip-output FILE] [--verbose] [--quiet]\n"
                 "\n"
                 "  --data  DIR path to a dir with node.csv and link.csv\n"
                 "  --steps N   simulation ticks, t=0..N   (default 60)\n"
-                "  --cars  M   agents spawned per rank    (default 64)\n"
-                "  --rate  R   agents per rank per tick   (default 0)\n"
+                "  --cars  M   global initial trip count    (default 64)\n"
+                "  --rate  R   global trips spawned/tick   (default 0)\n"
                 "  --cap   C   max cars per edge per tick (default 8)\n"
                 "  --seed  S   RNG seed                   (default 42)\n"
                 "  --stale-delay D merge replica every D ticks (default 1)\n"
                 "  --quiet     silence DSTM logging (default level: debug)\n"
+                "  --trip-output FILE  per-trip CSV output path\n"
                 "  --replica-mode stale|oracle|blind      (default stale)\n"
                 "        stale   diffusion by relay (the real model)\n"
                 "        oracle  replica synced globally each tick\n"
@@ -1455,6 +1875,8 @@ int main(int argc, char *argv[])
                         S.seed = atoi(argv[++i]);
                 else if (!strcmp(argv[i], "--stale-delay") && i + 1 < argc)
                         S.stale_delay = atoi(argv[++i]);
+                else if (!strcmp(argv[i], "--trip-output") && i + 1 < argc)
+                        S.trip_output = argv[++i];
                 else if (!strcmp(argv[i], "--rate") && i + 1 < argc)
                         S.spawn_rate = atoi(argv[++i]);
                 else if (!strcmp(argv[i], "--replica-mode") && i + 1 < argc) {
@@ -1515,15 +1937,12 @@ int main(int argc, char *argv[])
                 return 1;
         }
     
-        int s; 
-        MPI_Comm_size(MPI_COMM_WORLD, &s);
-
-        spawn_cars(cars, s);
+        spawn_cars(cars);
 
         double start = MPI_Wtime();
 
         for (S.t = 0; S.t <= S.t_end; S.t++)
-                run_step((int32_t)S.t, s);
+                run_step((int32_t)S.t);
 
         /* Cars: last put at t_end with delta up to MAX*ff_max. State: last
          * put at the final state tick with delta stale_delay. Drain past
@@ -1540,6 +1959,7 @@ int main(int argc, char *argv[])
         if (r == 0) 
             printf("total run time: %.5f\n\n", end - start);
 
+        write_trip_table();
         collect_and_print_stats();
 
         teardown_local();

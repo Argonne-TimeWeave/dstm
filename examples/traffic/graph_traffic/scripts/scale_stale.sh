@@ -27,9 +27,15 @@
 #   ./scale_stale.sh --dry-run
 #
 # OUTPUT
-#   results/<stamp>/runs.csv      one row per run
-#   results/<stamp>/raw/*.log     full stdout+stderr per run
-#   results/<stamp>/config.txt    what was launched
+#   stale-results/<stamp>/runs.csv    one aggregate row per run
+#   stale-results/<stamp>/raw/*.log   full stdout+stderr per run
+#   stale-results/<stamp>/trips/*.csv one row per simulated trip
+#   stale-results/<stamp>/config.txt  what was launched
+#
+# Trip tables contain the fixed trip ID, initial routed travel-time
+# estimate, experienced travel time, prediction gap, distance, VMT, and
+# VHT. Matching trip IDs can be compared across stale delays and against
+# the oracle/blind baselines.
 set -uo pipefail
 
 # --------------------------------------------------------------------------
@@ -62,7 +68,7 @@ ORACLE_BASELINE="${ORACLE_BASELINE:-1}"      # also run oracle REPS times as an
 BLIND_BASELINE="${BLIND_BASELINE:-1}"        # also run blind REPS times as a
                                              # never-merge lower-bound baseline
 
-STEPS="${STEPS:-1024}"
+STEPS="${STEPS:-2048}"
 CARS="${CARS:-256}"
 RATE="${RATE:-256}"
 CAP="${CAP:-32}"
@@ -191,9 +197,13 @@ place_for() {
 # Output tree.
 # --------------------------------------------------------------------------
 STAMP="$(date +%Y%m%d-%H%M%S)"
-OUTDIR="${OUTROOT}/${STAMP}"; RAWDIR="${OUTDIR}/raw"
-CSV="${OUTDIR}/runs.csv"; CONFIG="${OUTDIR}/config.txt"
-mkdir -p "${RAWDIR}"
+OUTDIR="${OUTROOT}/${STAMP}"
+RAWDIR="${OUTDIR}/raw"
+TRIPDIR="${OUTDIR}/trips"
+CSV="${OUTDIR}/runs.csv"
+CONFIG="${OUTDIR}/config.txt"
+
+mkdir -p "${RAWDIR}" "${TRIPDIR}"
 
 # Resolve placement once: rank count is fixed for the whole sweep.
 read -r NODES PPN < <(place_for "${RANKS}")
@@ -211,24 +221,25 @@ fi
         echo "nodefile:     ${ALLOC_NODEFILE:-<none>}"
         echo "exe:          ${EXE}"
         echo "data:         ${DATA}"
+        echo "trip tables:  ${TRIPDIR}"
         echo "mpi prefix:   ${MPI_PREFIX:-<unset>}   forwarded: ${MPI_ENV_VARS}"
         echo "ranks:        ${RANKS}  (${NODES}x${PPN})   mode: ${MODE}"
         echo "stale delays: ${STALE_DELAYS}"
         echo "oracle base:  $([[ ${ORACLE_BASELINE} -eq 1 ]] && echo "yes (REPS=${REPS})" || echo "no")"
         echo "blind base:   $([[ ${BLIND_BASELINE} -eq 1 ]] && echo "yes (REPS=${REPS})" || echo "no")"
-        echo "steps:        ${STEPS}   cars: ${CARS}   rate: ${RATE}   cap: ${CAP}   seed: ${SEED}"
+        echo "steps:        ${STEPS}   global cars: ${CARS}   global rate: ${RATE}   cap: ${CAP}   seed: ${SEED}"
         echo "reps:         ${REPS}    timeout: ${TIMEOUT_S}s   max ppn: ${MAX_PPN}"
 } | tee "${CONFIG}"
 echo
 
-echo "ranks,mode,stale_delay,rep,status,mean_dur,mean_hops,arrived_pct,cohort_arrived,cohort_spawned,arrived,mean_age,stale_max,run_time,mib_tick_total,mib_tick_per_rank" > "${CSV}"
+echo "ranks,mode,stale_delay,rep,status,mean_dur,mean_hops,arrived_pct,cohort_arrived,cohort_spawned,arrived,mean_age,stale_max,run_time,mib_tick_total,mib_tick_per_rank,trip_table" > "${CSV}"
 
 # --------------------------------------------------------------------------
 # One run.
 # --------------------------------------------------------------------------
 run_one() {
         local np="$1" nodes="$2" ppn="$3" mode="$4" sd="$5" rep="$6"
-        local tag log launch=() cmd=() rc status
+        local tag log trip_file launch=() cmd=() rc status
         local sd_csv sd_arg
 
         # Oracle and blind ignore --stale-delay: record "na" in the CSV
@@ -242,6 +253,8 @@ run_one() {
 
         tag="np${np}-n${nodes}x${ppn}-${mode}-sd${sd_csv}-r${rep}"
         log="${RAWDIR}/${tag}.log"
+        trip_file="${TRIPDIR}/${tag}.csv"
+
 
         # Batch allocation -> full recipe; interactive single node -> plain -n.
         if [[ "${ALLOC_SRC}" != "localhost" ]]; then
@@ -257,7 +270,8 @@ run_one() {
         cmd=("${launch[@]}" ${MPI_EXTRA} "${EXE}"
              --data "${DATA}" --steps "${STEPS}" --cars "${CARS}"
              --rate "${RATE}" --cap "${CAP}" --seed "${SEED}"
-             --replica-mode "${mode}" --stale-delay "${sd_arg}" ${VERBOSITY})
+             --replica-mode "${mode}" --stale-delay "${sd_arg}"
+             --trip-output "${trip_file}" ${VERBOSITY})
 
         printf '  np=%-4s %sx%-3s %-7s sd=%-3s rep=%s ... ' "${np}" "${nodes}" "${ppn}" "${mode}" "${sd_csv}" "${rep}"
 
@@ -340,12 +354,20 @@ run_one() {
                 status="parse_fail"
         fi
 
+        # The per-trip table is now part of every successful result. A
+        # nonempty file must contain at least its CSV header. Mark the run
+        # separately from an aggregate-output parse failure when it is
+        # absent.
+        if [[ "${status}" == ok && ! -s "${trip_file}" ]]; then
+                status="trip_output_missing"
+        fi
+
         : "${dur:=nan}" "${hops:=nan}" "${arrived_pct:=nan}"
         : "${cohort_arr:=-1}" "${cohort_spawn:=-1}" "${arr:=-1}"
         : "${age:=nan}" "${smax:=-1}" "${rt:=nan}"
         : "${mibt:=nan}" "${mibt_pr:=nan}"
 
-        echo "${np},${mode},${sd_csv},${rep},${status},${dur},${hops},${arrived_pct},${cohort_arr},${cohort_spawn},${arr},${age},${smax},${rt},${mibt},${mibt_pr}" >> "${CSV}"
+        echo "${np},${mode},${sd_csv},${rep},${status},${dur},${hops},${arrived_pct},${cohort_arr},${cohort_spawn},${arr},${age},${smax},${rt},${mibt},${mibt_pr},trips/${tag}.csv" >> "${CSV}"
 
         if [[ "${status}" == ok ]]; then
                 printf 'dur=%-8s hops=%-7s cohort=%s/%s (%s%%) age=%-6s stale_mx=%-3s rt=%-8s MiB/tick=%-8s per_rank=%s\n' \
@@ -353,7 +375,10 @@ run_one() {
                        "${cohort_arr}" "${cohort_spawn}" "${arrived_pct}" \
                        "${age}" "${smax}" "${rt}" "${mibt}" "${mibt_pr}"
         else
-                printf '%s (%s)\n' "${status}" "$(basename "${log}")"
+                printf '%s (log=%s trips=%s)\n' \
+                       "${status}" \
+                       "$(basename "${log}")" \
+                       "$(basename "${trip_file}")"
         fi
 }
 
@@ -392,6 +417,7 @@ fi
 
 echo "csv:  ${CSV}"
 echo "logs: ${RAWDIR}"
+echo "trips: ${TRIPDIR}"
 echo
 echo "quick median-of-reps view (early-departure cohort by stale delay):"
 awk -F, 'NR > 1 && $5 == "ok" {
