@@ -1,0 +1,75 @@
+host:         cascade10
+date:         2026-08-13T18:43:48+00:00
+job id:       991820
+alloc source: COBALT_NODEFILE  (8 nodes, using <= 8)
+nodefile:     /var/tmp/cobalt.991820
+nodes:        cascade07 cascade08 cascade09 cascade10 cascade12 cascade13 cascade14 cascade15
+launcher:     mpirun [openmpi] 
+mpi prefix:   /soft/libraries/mpi/openmpi/4.1.1
+forwarded:    LD_LIBRARY_PATH PATH
+placement:    pack   max ppn 32
+darray exe:   /home/ncassarino/dstm/examples/airport_sim/simple_dstm/airports
+dgraph exe:   /home/ncassarino/dstm/examples/airport_sim/graph_dstm/airports
+modes:        weak strong
+impls:        darray graph    variants: base
+weak ladder:  4:1:4 16:1:16 64:2:32 256:8:32
+strong ladr:  4:1:4 16:1:16 32:1:32 64:2:32 128:4:32 256:8:32
+na/rank:      64 (weak)   total: 4096 (strong)
+planes:       4    timesteps: 4096    reps: 2
+cap/edge:     8  (GATE_CAPACITY = cap * na)
+sampler:      20 ms, comm 'airports', warmup 0.5s
+retry mult:   8x timesteps if ranks are missed
+timeout:      900s
+
+===== weak scaling: peak memory (median of 2 reps) =====
+impl     variant     ranks   layout      na    total     gate     edge    rss/rank     rss max   rss total    B/airport
+--------------------------------------------------------------------------------------------------------------------------
+darray   base            4      1x4      64      256      512        8    330.0 MB    354.4 MB   1320.0 MB    5406638 B
+darray   base           16     1x16      64     1024      512        8    549.2 MB    735.0 MB   8787.9 MB    8998830 B
+darray   base           64     2x32      64     4096      512        8   1315.4 MB   2261.3 MB  84185.0 MB   21551352 B
+darray   base          256     8x32      64    16384      512        8   3595.8 MB   8433.1 MB 920528.6 MB   58913833 B
+
+graph    base            4      1x4      64      256      512        8     15.8 MB     16.5 MB     63.1 MB     258376 B
+graph    base           16     1x16      64     1024      512        8     16.1 MB     17.2 MB    258.4 MB     264556 B
+graph    base           64     2x32      64     4096      512        8     16.5 MB     18.0 MB   1058.2 MB     270903 B
+graph    base          256     8x32      64    16384      512        8     17.2 MB     19.0 MB   4396.7 MB     281389 B
+
+  head to head (peak RSS per rank; > 1.00 means dgraph uses more)
+   ranks   layout       darray       dgraph      ratio     delta/rank
+       4      1x4     330.0 MB      15.8 MB      0.05x      -314.2 MB
+      16     1x16     549.2 MB      16.1 MB      0.03x      -533.1 MB
+      64     2x32    1315.4 MB      16.5 MB      0.01x     -1298.9 MB
+     256     8x32    3595.8 MB      17.2 MB      0.00x     -3578.6 MB
+
+===== strong scaling: peak memory (median of 2 reps) =====
+impl     variant     ranks   layout      na    total     gate     edge    rss/rank     rss max   rss total    B/airport
+--------------------------------------------------------------------------------------------------------------------------
+darray   base            4      1x4    1024     4096     8192        8   3795.1 MB   4026.2 MB  15180.3 MB    3886168 B
+darray   base           16     1x16     256     4096     2048        8   1884.0 MB   2619.5 MB  30144.4 MB    7716968 B
+darray   base           32     1x32     128     4096     1024        8   1508.7 MB   2381.4 MB  48279.7 MB   12359593 B
+darray   base           64     2x32      64     4096      512        8   1315.4 MB   2261.4 MB  84185.3 MB   21551432 B
+darray   base          128     4x32      32     4096      256        8   1279.3 MB   2234.6 MB 163748.9 MB   41919721 B
+darray   base          256     8x32      16     4096      128        8   1256.7 MB   2228.7 MB 321723.0 MB   82361097 B
+
+graph    base            4      1x4    1024     4096     8192        8     27.0 MB     27.8 MB    107.8 MB      27599 B
+graph    base           16     1x16     256     4096     2048        8     18.3 MB     19.2 MB    293.4 MB      75098 B
+graph    base           32     1x32     128     4096     1024        8     16.8 MB     17.8 MB    536.7 MB     137405 B
+graph    base           64     2x32      64     4096      512        8     16.6 MB     18.1 MB   1060.7 MB     271530 B
+graph    base          128     4x32      32     4096      256        8     15.7 MB     17.0 MB   2009.3 MB     514372 B
+graph    base          256     8x32      16     4096      128        8     16.1 MB     17.5 MB   4132.0 MB    1057786 B
+
+  head to head (peak RSS per rank; > 1.00 means dgraph uses more)
+   ranks   layout       darray       dgraph      ratio     delta/rank
+       4      1x4    3795.1 MB      27.0 MB      0.01x     -3768.1 MB
+      16     1x16    1884.0 MB      18.3 MB      0.01x     -1865.7 MB
+      32     1x32    1508.7 MB      16.8 MB      0.01x     -1492.0 MB
+      64     2x32    1315.4 MB      16.6 MB      0.01x     -1298.8 MB
+     128     4x32    1279.3 MB      15.7 MB      0.01x     -1263.6 MB
+     256     8x32    1256.7 MB      16.1 MB      0.01x     -1240.6 MB
+
+runs recorded:      40
+failed:             2  (timeouts: 0, launcher: 0, undersampled: 0)
+
+non-ok runs:
+  darray base       weak   np=256  8x32  na=64     -> overcount_269of256
+  darray base       strong np=128  4x32  na=32     -> overcount_131of128

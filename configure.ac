@@ -103,6 +103,24 @@ AC_CONFIG_HEADERS([src/config.h])
 AC_CONFIG_FILES([Makefile
 		 bindings/python/Makefile
 		 dstm.pc
+		 examples/Makefile
+		 examples/traffic/Makefile
+         examples/traffic/arr_traffic/Makefile
+         examples/traffic/graph_traffic/Makefile
+		 examples/minimal/Makefile
+         examples/minimal/ring_mini/Makefile
+         examples/minimal/variable_mini/Makefile
+         examples/airport_sim/Makefile
+         examples/airport_sim/simple_dstm/Makefile
+         examples/airport_sim/graph_dstm/Makefile
+         examples/zombies/Makefile
+         examples/zombies/dstm_zombies/Makefile
+         examples/zombies/mpi_zombies/Makefile
+         examples/zombies/dstm_fixed/Makefile
+         examples/simple_ABMS_z/Makefile
+         examples/phold/Makefile
+         examples/phold/complete/Makefile
+         examples/phold/local-neighbors/Makefile
 		 include/dstm/version.h
 		 tests/mpi/bats-driver.sh
 		 tests/mpi/Makefile])
