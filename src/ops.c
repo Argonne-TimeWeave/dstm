@@ -44,7 +44,7 @@ static int dstm_region_send_heartbeat_to_all(dstm_time_t time)
 
 		dstm_msg_t m;
 		dstm_msg_fill_hdr(&m, DSTM_MSG_TYPE_HEARTBEAT, time, 0, i,
-		                  dstm_global_context.rank);
+		                  dstm_global_context.rank, 0);
 
 		int tag = dstm_request_new_tag();
 		dstm_msg_send(&m, tag);
@@ -54,17 +54,18 @@ static int dstm_region_send_heartbeat_to_all(dstm_time_t time)
 
 /* Check whether a WRITABLE version can transition to READABLE.
  * Returns 1 if the transition should happen, 0 otherwise. */
-static int dstm_version_can_become_readable(dstm_region_version_t *v)
-{
-	dstm_region_t *region = dstm_global_context.region;
-
-	/* Check for pending PUT requests targeting this version's time. */
+static int dstm_version_can_become_readable(dstm_region_t *region, int region_id,
+                                            dstm_region_version_t *v)
+{	
+    /* Check for pending PUT requests targeting this version's time. */
 	dstm_request_t *it;
 	DL_FOREACH(requests, it)
 	{
 		dstm_time_t target = it->time + it->delta;
 		if (target != v->time)
 			continue;
+
+        if (it->region_id != region_id) continue; /* other region: unrelated */
 
 		if (it->type == DSTM_REQUEST_TYPE_LOCAL_PUT &&
 		    it->status != DSTM_REQUEST_STATUS_DONE)
@@ -82,7 +83,7 @@ static int dstm_version_can_become_readable(dstm_region_version_t *v)
 	 * Barrier optimization: after barrier round 1 completes, all ranks
 	 * have finished their outgoing work.  No new PUT messages will
 	 * arrive, so skip all neighbor distance checks. */
-	if (!region->barrier_all_drained) {
+	if (!dstm_global_context.barrier_all_drained) {
 		for (int i = 0; i < dstm_global_context.world_size; i++) {
 			int dist =
 			        dstm_distance_get(dstm_global_context.distances,
@@ -91,11 +92,11 @@ static int dstm_version_can_become_readable(dstm_region_version_t *v)
 				continue;
 
 			dstm_time_t nt;
-			dstm_region_get_ninfo(region, i, &nt);
+			dstm_ninfo_get(i, region_id, &nt);
 
-			dstm_log_debug("checkr v%" PRId64 ": nt=%" PRId64
+			dstm_log_debug("checkr r%d v%" PRId64 ": nt=%" PRId64
 			               " dist=%d\n",
-			               v->time, nt, dist);
+			               region_id, v->time, nt, dist);
 			if (nt + dist <= v->time)
 				return 0;
 		}
@@ -109,7 +110,7 @@ static int dstm_version_can_become_readable(dstm_region_version_t *v)
          * Also gated by barrier_all_drained: after barrier round 1,
          * no rank (including this one) will issue more puts.
          */
-        if (region->local_heartbeat_time < v->time)
+        if (dstm_global_context.local_heartbeat_time < v->time)
             return 0;
 	}
 
@@ -118,10 +119,9 @@ static int dstm_version_can_become_readable(dstm_region_version_t *v)
 
 /* Check whether a READABLE version can transition to DISCARDABLE.
  * Returns 1 if the transition should happen, 0 otherwise. */
-static int dstm_version_can_become_discardable(dstm_region_version_t *v)
+static int dstm_version_can_become_discardable(dstm_region_t *region, int region_id,
+                                               dstm_region_version_t *v)
 {
-	dstm_region_t *region = dstm_global_context.region;
-
 	/* Check for pending GET requests targeting this version's time. */
 	dstm_request_t *it;
 	DL_FOREACH(requests, it)
@@ -129,6 +129,8 @@ static int dstm_version_can_become_discardable(dstm_region_version_t *v)
 		dstm_time_t target = it->time + it->delta;
 		if (target != v->time)
 			continue;
+
+        if (it->region_id != region_id) continue; /* other region: unrelated */
 
 		if (it->type == DSTM_REQUEST_TYPE_LOCAL_GET &&
 		    it->status != DSTM_REQUEST_STATUS_DONE)
@@ -146,25 +148,25 @@ static int dstm_version_can_become_discardable(dstm_region_version_t *v)
 	 *
 	 * Barrier optimization: after barrier round 1 completes, no new
 	 * GET messages will arrive, so skip all neighbor distance checks. */
-	if (!region->barrier_all_drained) {
+	if (!dstm_global_context.barrier_all_drained) {
 		for (int i = 0; i < dstm_global_context.world_size; i++) {
 			int dist =
-			        dstm_distance_get(dstm_global_context.distances,
-			                          dstm_global_context.rank, i);
+			        dstm_distance_get_discard(dstm_global_context.distances,
+                                      dstm_global_context.rank, i);
 			if (dist <= 0)
 				continue;
 
 			dstm_time_t nt;
-			dstm_region_get_ninfo(region, i, &nt);
+			dstm_ninfo_get(i, region_id, &nt);
 
-			dstm_log_debug("checkd v%" PRId64 ": nt=%" PRId64
+			dstm_log_debug("checkd r%d v%" PRId64 ": nt=%" PRId64
 			               " dist=%d\n",
-			               v->time, nt, dist);
+			               region_id, v->time, nt, dist);
 			if (nt - dist <= v->time)
 				return 0;
 		}
 
-        if (region->local_heartbeat_time < v->time)
+        if (dstm_global_context.local_heartbeat_time < v->time)
             return 0;
 	}
 
@@ -173,46 +175,50 @@ static int dstm_version_can_become_discardable(dstm_region_version_t *v)
 
 static int dstm_region_status_update(dstm_time_t time)
 {
-	dstm_region_t *region = dstm_global_context.region;
-	dstm_region_version_t *v, *vtmp;
+    for (int rid = 0; rid < dstm_global_context.region_count; rid++) {
+        dstm_region_t *region = dstm_global_context.regions[rid];
+        if (region == NULL)
+            continue; 
 
-	DL_FOREACH_SAFE(region->versions, v, vtmp)
-	{
-		switch (v->status) {
-		case DSTM_REGION_STATUS_WRITABLE:
-			if (dstm_version_can_become_readable(v)) {
-				v->status = DSTM_REGION_STATUS_READABLE;
-				dstm_log_info("version readable, time: %" PRId64
-				              "\n",
-				              v->time);
-			}
-			break;
+        dstm_region_version_t *v, *vtmp;
 
-		case DSTM_REGION_STATUS_READABLE:
-			if (dstm_version_can_become_discardable(v)) {
-				v->status = DSTM_REGION_STATUS_DISCARDABLE;
-				dstm_log_info(
-				        "version discardable, time: %" PRId64
-				        "\n",
-				        v->time);
-			}
-			break;
+        DL_FOREACH_SAFE(region->versions, v, vtmp)
+        {
+            switch (v->status) {
+            case DSTM_REGION_STATUS_WRITABLE:
+                if (dstm_version_can_become_readable(region, rid, v)) {
+                    v->status = DSTM_REGION_STATUS_READABLE;
+                    dstm_log_info("version readable, time: %" PRId64
+                                  "\n",
+                                  v->time);
+                }
+                break;
 
-		case DSTM_REGION_STATUS_DISCARDABLE:
-			dstm_log_info("evicting version, time: %" PRId64 "\n",
-			              v->time);
-			dstm_region_version_destroy(region, v);
-			break;
-		}
-	}
+            case DSTM_REGION_STATUS_READABLE:
+                if (dstm_version_can_become_discardable(region, rid, v)) {
+                    v->status = DSTM_REGION_STATUS_DISCARDABLE;
+                    dstm_log_info(
+                            "version discardable, time: %" PRId64
+                            "\n",
+                            v->time);
+                }
+                break;
 
-	/* Update region->time to the minimum active version timestamp.
-	 * If no versions remain, advance to the caller's time. */
-	if (region->versions != NULL)
-		region->time = region->versions->time;
-	else
-		region->time = time;
+            case DSTM_REGION_STATUS_DISCARDABLE:
+                dstm_log_info("evicting version, time: %" PRId64 "\n",
+                              v->time);
+                dstm_region_version_destroy(region, v);
+                break;
+            }
+        }
 
+        /* Update region->time to the minimum active version timestamp.
+         * If no versions remain, advance to the caller's time. */
+        if (region->versions != NULL)
+            region->time = region->versions->time;
+        else
+            region->time = time;
+    }
 	return 0;
 }
 
@@ -235,7 +241,8 @@ static int dstm_request_progress_local_put(dstm_request_t *req)
 	 * We abort the program loudly rather than silently overwriting a
 	 * buffer that has already been observed.
 	 */
-	dstm_region_t *rg = dstm_get_local_region();
+	dstm_region_t *rg = dstm_get_local_region(req->region_id);
+    assert(rg != NULL);
 	assert(req->status == DSTM_REQUEST_STATUS_INIT);
 	dstm_time_t target = req->time + req->delta;
 	dstm_region_version_t *v =
@@ -266,7 +273,8 @@ static int dstm_request_progress_local_get(dstm_request_t *req)
 	 *
 	 * - completes when the target version exists and is READABLE.
 	 */
-	dstm_region_t *rg = dstm_get_local_region();
+	dstm_region_t *rg = dstm_get_local_region(req->region_id);
+    assert(rg != NULL);
 	assert(req->status == DSTM_REQUEST_STATUS_INIT);
 	dstm_time_t target = req->time + req->delta;
 	dstm_region_version_t *v = dstm_region_version_find(rg, target);
@@ -292,7 +300,13 @@ static int dstm_request_progress_in_put(dstm_request_t *req)
 	 * sender issued a put after a get had been observed against
 	 * this rank's region for that time.  Abort loudly.
 	 */
-	dstm_region_t *rg = dstm_get_local_region();
+	dstm_region_t *rg = dstm_get_local_region(req->region_id);
+    if (rg == NULL) {
+		dstm_log_error("incoming request for unknown local region %d "
+		               "on rank %d\n",
+		               req->region_id, dstm_global_context.rank);
+		abort();
+	}
 	assert(req->status == DSTM_REQUEST_STATUS_INIT);
 	dstm_time_t target = req->time + req->delta;
 	dstm_region_version_t *v =
@@ -322,11 +336,38 @@ static int dstm_request_progress_in_get(dstm_request_t *req)
 	 * - isend: reply buffered in req->buf and MPI_Isend posted.
 	 * - done: send completed.
 	 */
-	dstm_region_t *rg = dstm_get_local_region();
-	if (req->status == DSTM_REQUEST_STATUS_INIT) {
-		dstm_time_t target = req->time + req->delta;
-		dstm_region_version_t *v = dstm_region_version_find(rg, target);
-		if (v != NULL && v->status == DSTM_REGION_STATUS_READABLE) {
+	dstm_region_t *rg = dstm_get_local_region(req->region_id);
+    assert(rg != NULL);
+    if (req->status == DSTM_REQUEST_STATUS_INIT) {
+        dstm_time_t target = req->time + req->delta;
+        dstm_region_version_t *v = dstm_region_version_find(rg, target);
+
+        /* Distinguish "not created yet" from "already evicted".
+         *
+         * A GET for `target` can only ever be satisfied if the version
+         * for `target` still exists or has yet to be created.  If it is
+         * missing AND a strictly-newer version is already live, then the
+         * target slot was passed over and reclaimed: no future PUT can
+         * recreate an older version (puts only move the clock forward),
+         * so this GET can never complete.  That is the genuine
+         * premature-eviction bug; fail loudly rather than deadlock.
+         *
+         * Merely having target < rg->time is NOT sufficient: an empty
+         * version list advances rg->time to the caller's clock, which
+         * would false-positive on legitimate early/out-of-order GETs. */
+        if (v == NULL && rg->versions != NULL &&
+            rg->versions->time > target) {
+                dstm_log_error(
+                        "incoming GET for region %d target time %"
+                        PRId64 " on rank %d: version already evicted "
+                        "(oldest live version=%" PRId64 ").  Premature "
+                        "eviction / distance-check bug.\n",
+                        req->region_id, target,
+                        dstm_global_context.rank, rg->versions->time);
+                abort();
+        }
+
+        if (v != NULL && v->status == DSTM_REGION_STATUS_READABLE) {
 			void *sptr = (char *)v->buffer + req->src.offset;
 
 			/* Free the packbuf from the original received GET_REQ
@@ -341,7 +382,7 @@ static int dstm_request_progress_in_get(dstm_request_t *req)
 			dstm_ptr_t null_ptr = {DSTM_REGIONID_INVALID, 0};
 			dstm_msg_fill_hdr(&req->msg, DSTM_MSG_TYPE_GET_REP,
 			                  target, 0, req->rank,
-			                  dstm_global_context.rank);
+			                  dstm_global_context.rank, req->region_id);
 			dstm_msg_fill_payload(&req->msg, null_ptr, req->buf,
 			                      req->size);
 			dstm_msg_isend(&req->msg, req->tag);
@@ -375,9 +416,17 @@ static int dstm_request_progress_out_get(dstm_request_t *req)
 	 * - irecv: GET_REQ sent, reply received and buffered in req->buf.
 	 * - done: payload copied to caller's destination.
 	 */
-	dstm_region_t *rg = dstm_get_local_region();
+
+    /* req->region_id is the remote source region id. 
+     *   the source region id, may not exist localy when region ids
+     *   are asymmetric. */
+	dstm_region_t *region = 
+                    dstm_get_local_region(dstm_get_local_region_id());
+
 	if (req->status == DSTM_REQUEST_STATUS_IRECV) {
-		void *dptr = dstm_region_ptr_tovoid(rg, req->dst);
+		assert(req->dst.region == DSTM_REGIONID_LOCAL);
+		void *dptr = dstm_region_ptr_tovoid(region, req->dst);
+		assert(dptr != NULL);
 		dstm_log_debug("applying: %p %zu\n", dptr, req->size);
 		memcpy(dptr, req->buf, req->size);
 		req->status = DSTM_REQUEST_STATUS_DONE;
@@ -409,7 +458,7 @@ int dstm_request_progress(dstm_request_t *req)
 	assert(req != NULL);
 	assert(progress_sm[req->type].progress != NULL);
 	dstm_log_request(DSTM_LOG_DEBUG, "request", req);
-	dstm_log_region(DSTM_LOG_DEBUG, "region", dstm_get_local_region());
+	dstm_log_region(DSTM_LOG_DEBUG, "region", dstm_get_local_region(req->region_id));
 	return progress_sm[req->type].progress(req);
 }
 
@@ -430,10 +479,32 @@ static void dstm_handle_incoming_msg(MPI_Status status)
 
 	/* block until we receive the incoming message */
 	dstm_msg_recvany(status, &m);
-	dstm_region_set_ninfo(dstm_global_context.region, m.header.src_rank,
-	                      m.header.time);
 
-	dstm_log_msg(DSTM_LOG_DEBUG, "received", &m);
+	/* Update neighbor clocks.  PUT/GET/GET_REP pertain to a specific
+     * region and must only advance that region's neighbor time, so
+     * that traffic on one region cannot retire versions on another.
+     * HEARTBEAT announces a whole-rank clock advance and therefore
+     * fans out to every registered region.  BARRIER carries no region
+     * and does not participate in the distance-based checks. */
+    switch (m.header.type) {
+    case DSTM_MSG_TYPE_PUT:
+    case DSTM_MSG_TYPE_GET_REQ:
+    case DSTM_MSG_TYPE_GET_REP:
+            dstm_ninfo_set(m.header.src_rank, m.header.region_id,
+                           m.header.time);
+            break;
+    case DSTM_MSG_TYPE_HEARTBEAT:
+            for (int rid = 0; rid < dstm_global_context.region_count; rid++) {
+                    if (dstm_global_context.regions[rid] != NULL)
+                            dstm_ninfo_set(m.header.src_rank, rid,
+                                           m.header.time);
+            }
+            break;
+    default:
+            break;
+    }
+
+    dstm_log_msg(DSTM_LOG_DEBUG, "received", &m);
 
 	switch (m.header.type) {
 	case DSTM_MSG_TYPE_PUT:
@@ -443,7 +514,8 @@ static void dstm_handle_incoming_msg(MPI_Status status)
 		                    m.u.putget.ptr.offset};
 		dstm_request_create(&nr, DSTM_REQUEST_TYPE_IN_PUT,
 		                    status.MPI_TAG, m.header.time,
-		                    m.header.delta, m.header.dst_rank, dptr,
+		                    m.header.delta, m.header.dst_rank, 
+                            m.header.region_id, dptr,
 		                    (dstm_ptr_t){0, 0}, m.u.putget.size);
 		nr->buf = malloc(m.u.putget.size);
 		assert(nr->buf != NULL);
@@ -461,7 +533,7 @@ static void dstm_handle_incoming_msg(MPI_Status status)
 		                    m.u.putget.ptr.offset};
 		dstm_request_create(&nr, DSTM_REQUEST_TYPE_IN_GET,
 		                    status.MPI_TAG, m.header.time,
-		                    m.header.delta, m.header.src_rank,
+		                    m.header.delta, m.header.src_rank, m.header.region_id,
 		                    (dstm_ptr_t){0, 0}, sptr, m.u.putget.size);
 		nr->msg = m;
 		DL_INSERT_INORDER(requests, nr, dstm_request_cmp_departure);
@@ -494,7 +566,7 @@ static void dstm_handle_incoming_msg(MPI_Status status)
 		/* Increment the token count so the barrier DFA can
 		 * detect and consume this token on its next
 		 * progress iteration. */
-		dstm_global_context.region->barrier_token_count++;
+		dstm_global_context.barrier_token_count++;
 		dstm_log_info("barrier token received from rank %d, "
 		              "last_time: %" PRId64 "\n",
 		              m.header.src_rank, m.u.barrier.last_time);
@@ -516,9 +588,7 @@ static void dstm_handle_incoming_msg(MPI_Status status)
  */
 int dstm_do_progress(dstm_time_t time)
 {
-	dstm_log_debug("progress loop: reqtime: %" PRId64
-	               ", region time: %" PRId64 "\n",
-	               time, dstm_global_context.region->time);
+	dstm_log_debug("progress loop: reqtime: %" PRId64 "\n", time);
 
 	/* test if we have any message to deal with */
 	MPI_Status status;
@@ -582,11 +652,14 @@ int dstm_put(int rank,
 	              rank, region_id, time, delta, dst.region, dst.offset, src,
 	              size);
 
-	assert(rank == region_id);
-	assert(rank == dst.region);
+    if (region_id < 0 || region_id >= DSTM_MAX_REGIONS)
+        return -DSTM_EINVAL;
 
 	if (src == NULL)
 		return -DSTM_EINVAL;
+
+    if (region_id != dst.region)
+        return -DSTM_EINVAL;
 
 	/* no idea what the semantic of a put in the past would be for now */
 	if (delta < 0)
@@ -599,10 +672,10 @@ int dstm_put(int rank,
 		return -DSTM_EDOM;
 
 	/* did we increase our local time */
-	dstm_region_t *region = dstm_global_context.region;
-	if (region->local_heartbeat_time < time) {
+    /* rank-level heartbeat/clock (context, not region) */
+	if (dstm_global_context.local_heartbeat_time < time) {
 		dstm_region_send_heartbeat_to_all(time);
-		region->local_heartbeat_time = time;
+		dstm_global_context.local_heartbeat_time = time;
 	}
 
 	/* first, figure out if this is a local request or a remote one */
@@ -612,7 +685,7 @@ int dstm_put(int rank,
 		 * buffer can be reused or freed immediately.
 		 */
 		dstm_request_create(&req, DSTM_REQUEST_TYPE_LOCAL_PUT, -1, time,
-		                    delta, rank, dst, (dstm_ptr_t){0, 0}, size);
+		                    delta, rank, region_id, dst, (dstm_ptr_t){0, 0}, size);
 		req->buf = malloc(size);
 		assert(req->buf != NULL);
 		memcpy(req->buf, src, size);
@@ -622,13 +695,13 @@ int dstm_put(int rank,
 		 */
 		int tag = dstm_request_new_tag();
 		dstm_request_create(&req, DSTM_REQUEST_TYPE_OUT_PUT, tag, time,
-		                    delta, rank, dst, (dstm_ptr_t){0, 0}, size);
+		                    delta, rank, region_id, dst, (dstm_ptr_t){0, 0}, size);
 		req->buf = malloc(size);
 		assert(req->buf != NULL);
 		memcpy(req->buf, src, size);
 
 		dstm_msg_fill_hdr(&req->msg, DSTM_MSG_TYPE_PUT, time, delta,
-		                  rank, dstm_global_context.rank);
+		                  rank, dstm_global_context.rank, region_id);
 		dstm_msg_fill_payload(&req->msg, dst, req->buf, size);
 		dstm_msg_isend(&req->msg, tag);
 		req->status = DSTM_REQUEST_STATUS_ISEND;
@@ -651,11 +724,14 @@ int dstm_get(int rank,
 	              size);
 	dstm_ptr_t dptr;
 
-	assert(rank == region_id);
-	assert(rank == src.region);
+    if (region_id < 0 || region_id >= DSTM_MAX_REGIONS)
+        return -DSTM_EINVAL;
 
 	if (dst == NULL)
 		return -DSTM_EINVAL;
+
+    if (region_id != src.region)
+        return -DSTM_EINVAL;
 
 	/* no idea what the semantic of a get in the future would be for now */
 	if (delta > 0)
@@ -668,10 +744,10 @@ int dstm_get(int rank,
 		return -DSTM_EDOM;
 
 	/* did we increase our local time */
-	dstm_region_t *region = dstm_global_context.region;
-	if (region->local_heartbeat_time < time) {
+    /* rank-level heartbeat/clock (context, not region) */
+	if (dstm_global_context.local_heartbeat_time < time) {
 		dstm_region_send_heartbeat_to_all(time);
-		region->local_heartbeat_time = time;
+		dstm_global_context.local_heartbeat_time = time;
 	}
 
 	/* first, figure out if this is a local request or a remote one */
@@ -680,7 +756,7 @@ int dstm_get(int rank,
 		/* local get: we just enqueue it locally */
 		dptr = (dstm_ptr_t){DSTM_REGIONID_LOCAL, (intptr_t)dst};
 		dstm_request_create(&req, DSTM_REQUEST_TYPE_LOCAL_GET, -1, time,
-		                    delta, rank, dptr, src, size);
+		                    delta, rank, region_id, dptr, src, size);
 		req->caller_owned = 1;
 	} else {
 		/* outgoing get: enqueue for tracking, push to the
@@ -688,7 +764,7 @@ int dstm_get(int rank,
 		dptr = (dstm_ptr_t){DSTM_REGIONID_LOCAL, (intptr_t)dst};
 		int tag = dstm_request_new_tag();
 		dstm_request_create(&req, DSTM_REQUEST_TYPE_OUT_GET, tag, time,
-		                    delta, rank, dptr, src, size);
+		                    delta, rank, region_id, dptr, src, size);
 		req->caller_owned = 1;
 
 		/* this is the place where MPI RMA might make sense, if we could
@@ -712,7 +788,7 @@ int dstm_get(int rank,
 		 */
 
 		dstm_msg_fill_hdr(&req->msg, DSTM_MSG_TYPE_GET_REQ, time, delta,
-		                  rank, dstm_global_context.rank);
+		                  rank, dstm_global_context.rank, region_id);
 		dstm_msg_fill_payload(&req->msg, src, NULL, size);
 		dstm_msg_send(&req->msg, tag);
 		req->status = DSTM_REQUEST_STATUS_ISEND;

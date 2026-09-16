@@ -87,7 +87,7 @@ static void test_put_roundtrip(int rank)
 
 		int rc;
 		rc = dstm_msg_fill_hdr(&msg, DSTM_MSG_TYPE_PUT, 10, 2, RECEIVER,
-		                       SENDER);
+		                       SENDER, REGION);
 		assert(rc == 0);
 		/* fill_payload sets msg.data to src without copying; the
 		 * caller is responsible for keeping src alive until the send
@@ -118,6 +118,7 @@ static void test_put_roundtrip(int rank)
 		assert(msg.header.dst_rank == RECEIVER);
 		assert(msg.header.time == 10);
 		assert(msg.header.delta == 2);
+        assert(msg.header.region_id == REGION);
 
 		/* Verify PUT body */
 		assert(msg.u.putget.ptr.region == REGION);

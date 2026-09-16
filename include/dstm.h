@@ -175,6 +175,7 @@ typedef struct dstm_distance_s dstm_distance_t;
 
 int dstm_distance_create_copy(dstm_distance_t **dst, dstm_distance_t *src);
 int dstm_distance_get(dstm_distance_t *dst, int i, int j);
+int dstm_distance_get_discard(const dstm_distance_t *dst, int i, int j);
 size_t dstm_distance_size(dstm_distance_t *dst);
 
 /**
@@ -267,6 +268,52 @@ int dstm_distance_create_from_matrix(dstm_distance_t **ret, size_t size,
                                      const int *matrix);
 
 /**
+ * Combine multiple rank-indexed distance matrices into one session-global
+ * distance object covering the union of their communication.
+ *
+ * DSTM installs exactly one distance object for a session. When several
+ * data structures coexist, that object must account for every rank pair
+ * used by any of those structures.
+ *
+ * Two conservative bounds are retained internally for each rank pair:
+ *
+ *   - the minimum reachable distance is used by WRITABLE -> READABLE,
+ *     because the smallest delta determines when no more PUTs can arrive;
+ *
+ *   - the maximum reachable distance is used by READABLE -> DISCARDABLE,
+ *     because the largest look-back determines when no more GETs can
+ *     arrive.
+ *
+ * dstm_distance_get() returns the minimum/readability bound. The maximum
+ * discard bound is internal to the version state machine.
+ *
+ * The reduction is performed per cell (i, j) over the @p n inputs:
+ *
+ *   - diagonal entries are always 0;
+ *   - a pair is reachable if any input marks it reachable;
+ *   - the readable bound is the minimum non-negative reachable value;
+ *   - the discardable bound is the maximum non-negative reachable value;
+ *   - the pair is -1 (unreachable) only when every input is -1.
+ *
+ * Combining an already-combined matrix is supported and preserves both
+ * bounds.
+ *
+ * All inputs must share the same size. The inputs are only read; the caller
+ * retains ownership of @p mats and each matrix.
+ *
+ * @param[out] ret   distance matrix handle to populate (must be non-NULL)
+ * @param[in]  mats  array of @p n input matrix pointers (non-NULL, each
+ *                   entry non-NULL)
+ * @param[in]  n     number of input matrices (must be >= 1)
+ * @return DSTM_SUCCESS on success, -DSTM_EINVAL for NULL pointers,
+ *         n == 0, or size mismatch between inputs, -DSTM_ENOMEM for
+ *         allocation failures
+ */
+int dstm_distance_combine(dstm_distance_t **ret,
+                          const dstm_distance_t *const *mats,
+                          size_t n);
+
+/**
  * Destroy a distance matrix and free all associated resources.
  *
  * This function safely deallocates a distance matrix created by any of
@@ -320,6 +367,25 @@ int dstm_start_custom(dstm_distance_t *dist, dstm_opts_t opts);
  *
  * @param dist         Distance matrix defining the network topology.
  *                     Must have size equal to world_size.
+ *
+ *                     The matrix is session-global and singleton: it is
+ *                     the ONLY matrix consulted by the region version
+ *                     state machine for every region/data structure in
+ *                     the session.  It MUST therefore cover the union of
+ *                     all traffic of every data structure alive during
+ *                     the session.  If any structure communicates across
+ *                     a rank pair that the matrix marks unreachable (-1)
+ *                     — or uses a smaller delta than the matrix records —
+ *                     the version machine can conclude "no more PUTs/GETs
+ *                     can arrive" and prematurely evict a still-needed
+ *                     version.
+ *
+ *                     Recommended workflow when multiple structures
+ *                     coexist: derive each structure's matrix (e.g.
+ *                     dstm_dgraph_derive_distance /
+ *                     dstm_dgraph_distance_from_topology) and merge them
+ *                     with dstm_distance_combine() before passing the
+ *                     result here.
  *
  * @return 0 if successful; an error code otherwise.
  */
@@ -385,9 +451,26 @@ typedef struct dstm_darray_s dstm_darray_t;
 int dstm_darray_create(dstm_darray_t **ret,
                        size_t element_size,
                        size_t local_elements);
+
+/* Like dstm_darray_create, but back this rank's partition on local region
+ * @p region_id (as returned by dstm_region_register) instead of the default
+ * region 0.  Collective over dstm_global_context.comm.  Each rank may pass a
+ * different region_id; the mapping is Allgathered internally so remote
+ * accesses address the correct region on each owner. */
+int dstm_darray_create_on_region(dstm_darray_t **ret,
+                                 size_t element_size,
+                                 size_t local_elements,
+                                 int region_id);
+
 int dstm_darray_create_equal(dstm_darray_t **ret,
                              size_t element_size,
                              size_t total_elements);
+
+int dstm_darray_create_equal_on_region(dstm_darray_t **ret,
+                                       size_t element_size,
+                                       size_t total_elements,
+                                       int region_id);
+
 void dstm_darray_destroy(dstm_darray_t **darray);
 
 void *dstm_darray_get_local_ptr(dstm_darray_t *darray);
@@ -673,6 +756,7 @@ typedef struct dstm_dgraph_s dstm_dgraph_t;
  *         or duplicate neighbors, dst outside [0, total_vertices)),
  *         -DSTM_ENOMEM, or -DSTM_FAILURE on MPI errors.
  */
+
 int dstm_dgraph_create(dstm_dgraph_t **ret,
                        size_t vertex_state_size,
                        size_t edge_state_size,
@@ -681,6 +765,22 @@ int dstm_dgraph_create(dstm_dgraph_t **ret,
                        const size_t *local_edge_dsts,
                        const void *local_vertex_states,
                        const void *local_edge_states);
+
+/* Like dstm_dgraph_create, but back this rank's slabs on local region
+ * @p region_id (as returned by dstm_region_register) instead of the
+ * default region 0.  Collective over dstm_global_context.comm.  Each rank
+ * may pass a different region_id; the mapping is Allgathered internally so
+ * remote vertex/edge state accesses address the correct region on each
+ * owner. */
+int dstm_dgraph_create_on_region(dstm_dgraph_t **ret,
+                                 size_t vertex_state_size,
+                                 size_t edge_state_size,
+                                 size_t local_vertices,
+                                 const size_t *local_out_degrees,
+                                 const size_t *local_edge_dsts,
+                                 const void *local_vertex_states,
+                                 const void *local_edge_states,
+                                 int region_id);
 
 // matching dstm_darray_create_equal
 int dstm_dgraph_create_equal(dstm_dgraph_t **ret,
@@ -691,6 +791,16 @@ int dstm_dgraph_create_equal(dstm_dgraph_t **ret,
                              const size_t *local_edge_dsts,
                              const void *local_vertex_states,
                              const void *local_edge_states);
+
+int dstm_dgraph_create_equal_on_region(dstm_dgraph_t **ret,
+                                       size_t vertex_state_size,
+                                       size_t edge_state_size,
+                                       size_t total_vertices,
+                                       const size_t *local_out_degrees,
+                                       const size_t *local_edge_dsts,
+                                       const void *local_vertex_states,
+                                       const void *local_edge_states,
+                                       int region_id);
 
 /**
  * Destroy a dgraph and free all resources. Safe on NULL pointer or a
@@ -942,8 +1052,26 @@ dstm_ptr_t dstm_region_ptr_fromvoid(dstm_region_t *r, void *ptr);
 void *dstm_region_ptr_tovoid(dstm_region_t *r, dstm_ptr_t ptr);
 int dstm_ptr_isnull(dstm_ptr_t ptr);
 
+/* Return the default local region id (always 0).  Region ids are an
+ * intra-rank namespace and are NOT related to the MPI rank. */
 int dstm_get_local_region_id(void);
-dstm_region_t *dstm_get_local_region(void);
+
+/* Look up a local region by its id (0 == default). NULL if none. */
+dstm_region_t *dstm_get_local_region(int region_id);
+
+/* Register an additional local backing store; returns its region id
+ * (>= 0) via *region_id, or an error. Collective is NOT required.
+ *
+ * PRECONDITION: all regions a rank intends to use must be registered
+ * before that rank (or any neighbor) issues operations on them.
+ * Neighbor heartbeats only populate the neighbor-clock table for regions
+ * that already exist when the heartbeat is received; a region registered
+ * after a neighbor has advanced its clock would start with a stale
+ * (time 0) neighbor entry for that region. */
+int dstm_region_register(size_t size, int *region_id);
+
+/* Unregister/destroy a local region previously registered. */
+int dstm_region_unregister(int region_id);
 
 /* Construct a dstm_ptr_t referring to byte @p offset within region
  * @p region (which may be a rank id, DSTM_REGIONID_LOCAL, or
@@ -965,15 +1093,16 @@ static inline dstm_ptr_t dstm_ptr_make(int region, intptr_t offset)
  * @p region_id, hosted on @p rank, at the location @p dst, taking
  * effect at logical time (time + delta).
  *
- * The triple (rank, region_id, dst.region) must be consistent: each
- * rank's region id is equal to its rank.  @p delta must be >= 0 (a
- * put cannot target the past).
+ * The triple (rank, region_id, dst.region) must be consistent:
+ * @p region_id must equal @p dst.region (the region argument and the
+ * pointer's region must agree).  @p delta must be >= 0 (a put cannot
+ * target the past).
  *
  * Local-rank invariant for delta == 0: when @p delta is zero, the
  * effective target time equals @p time and only the local rank can
  * meaningfully observe its own current state.  Therefore @p rank MUST
- * equal the local rank id (see dstm_get_local_region_id) when
- * @p delta == 0; remote puts with @p delta == 0 are rejected with
+ * equal the local rank when @p delta == 0; remote puts with
+ * @p delta == 0 are rejected with
  * -DSTM_EDOM.  Non-zero @p delta permits any @p rank.
  *
  * Put-before-get phase rule: local rank access with delta == 0 requires us to
@@ -982,17 +1111,18 @@ static inline dstm_ptr_t dstm_ptr_make(int region, intptr_t offset)
  * enforce this and abort the program with a contract-violation message logged
  * via dstm_log_error.
  *
- * @param[in] rank       target MPI rank (must be == @p region_id)
- * @param[in] region_id  region identifier (must be == @p rank)
+ * @param[in] rank       target MPI rank
+ * @param[in] region_id  region identifier (must be == @p dst.region)
  * @param[in] time       base logical timestamp
  * @param[in] delta      non-negative offset added to @p time
  * @param[in] dst        opaque pointer into the target region
  * @param[in] src        source buffer of @p size bytes (must be non-NULL)
  * @param[in] size       number of bytes to copy
- * @return DSTM_SUCCESS on success, -DSTM_EINVAL if @p src is NULL or
- *         @p delta is negative, -DSTM_EDOM if @p delta == 0 and @p rank
- *         is not the local rank.  Aborts the program if the put
- *         violates the put-before-get phase rule above.
+ * @return DSTM_SUCCESS on success, -DSTM_EINVAL if @p src is NULL,
+ *         @p delta is negative, @p region_id is out of range, or
+ *         @p region_id != @p dst.region; -DSTM_EDOM if @p delta == 0
+ *         and @p rank is not the local rank.  Aborts the program if
+ *         the put violates the put-before-get phase rule above.
  */
 int dstm_put(int rank,
              int region_id,
@@ -1007,8 +1137,8 @@ int dstm_put(int rank,
  * hosted on @p rank, at the location @p src, into the local buffer
  * @p dst, observing the version at logical time (time + delta).
  *
- * The triple (rank, region_id, src.region) must be consistent: each
- * rank's region id is equal to its rank.  @p delta must be <= 0 (a
+ * The triple (rank, region_id, src.region) must be consistent:
+ * @p region_id must equal @p src.region.  @p delta must be <= 0 (a
  * get cannot target the future).
  *
  * Local-rank invariant for delta == 0: when @p delta is zero, the
@@ -1025,16 +1155,17 @@ int dstm_put(int rank,
  * This call is blocking: it drives the progress loop until the
  * requested version is available locally.
  *
- * @param[in]  rank       target MPI rank (must be == @p region_id)
- * @param[in]  region_id  region identifier (must be == @p rank)
+ * @param[in]  rank       target MPI rank
+ * @param[in]  region_id  region identifier (must be == @p src.region)
  * @param[in]  time       base logical timestamp
  * @param[in]  delta      non-positive offset added to @p time
  * @param[out] dst        destination buffer of @p size bytes (non-NULL)
  * @param[in]  src        opaque pointer into the source region
  * @param[in]  size       number of bytes to copy
- * @return DSTM_SUCCESS on success, -DSTM_EINVAL if @p dst is NULL or
- *         @p delta is positive, -DSTM_EDOM if @p delta == 0 and @p rank
- *         is not the local rank.
+ * @return DSTM_SUCCESS on success, -DSTM_EINVAL if @p dst is NULL,
+ *         @p delta is positive, @p region_id is out of range, or
+ *         @p region_id != @p src.region; -DSTM_EDOM if @p delta == 0
+ *         and @p rank is not the local rank.
  */
 int dstm_get(int rank,
              int region_id,

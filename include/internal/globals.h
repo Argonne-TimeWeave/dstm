@@ -24,6 +24,14 @@
 extern "C" {
 #endif
 
+#define DSTM_MAX_REGIONS 64
+
+struct dstm_region_s;
+typedef struct dstm_region_s dstm_region_t;
+
+struct dstm_region_ninfo_s;
+typedef struct dstm_region_ninfo_s dstm_region_ninfo_t;
+
 struct dstm_context_s {
 	/* Active communicator used by all session-level traffic
 	 * (dstm_msg_*, darray collectives, etc.).  During an active
@@ -39,8 +47,46 @@ struct dstm_context_s {
 	MPI_Comm user_comm;
 	int world_size;
 	int rank;
-	dstm_region_t *region;
+
+    /* Local region table, indexed by local region id. Slot 0 is default */
+	dstm_region_t *regions[DSTM_MAX_REGIONS];
+
+    /* High-water mark: one past the highest region id ever registered
+     * this session, used as an iteration bound over `regions`.  This is
+     * NOT the number of live regions -- unregister leaves holes (NULL
+     * slots) and never lowers this bound.  Iterators MUST skip NULL
+     * slots.  Reset to 0 in dstm_fini. */
+    int region_count;
+
 	dstm_distance_t *distances;
+
+    /* ---- rank-level versioning / clock state ----
+     * These were previously per-region.  They are now shared across ALL
+     * of this rank's regions: neighbor clocks are keyed by (rank,
+     * region_id) inside `ninfos`, while the barrier and heartbeat
+     * watermark are genuinely rank-wide.  All reset per session. */
+    dstm_region_ninfo_t *ninfos;    /* neighbor last-known times 
+                                        by (rank, region_id) */
+
+    /* Number of barrier tokens received but not yet consumed by the
+    * barrier DFA.  The BARRIER message handler increments this on
+    * every token arrival; the barrier DFA decrements it when it
+    * consumes a token to advance to the next state. */
+    int barrier_token_count;
+
+    /* Set to 1 after the first barrier round completes (all ranks
+    * have drained their outgoing requests).  When set, the version
+    * transition checks (WRITABLE->READABLE, READABLE->DISCARDABLE)
+    * skip ALL neighbor distance checks, since no rank can issue new
+    * PUT/GET messages.  Reset to 0 when the barrier exits. */
+    int barrier_all_drained;
+
+    /* Highest logical timestamp for which we have already broadcast a
+    * HEARTBEAT to all neighbors.  Used to suppress redundant
+    * heartbeats: dstm_put/dstm_get only emit a heartbeat when the
+    * caller's `time` strictly exceeds this watermark. Rank-wide; reset to 0 on each
+    * dstm_start. */
+    dstm_time_t local_heartbeat_time;
 };
 typedef struct dstm_context_s dstm_context_t;
 

@@ -34,19 +34,58 @@ int dstm_errno = 0;
  ******************************************************************************/
 
 dstm_opts_t dstm_default_options = {DSTM_DEFAULT_REGION_SIZE};
-dstm_context_t dstm_global_context = {0, 0, 0, 0, NULL, NULL};
+dstm_context_t dstm_global_context = {0};
 
 /*******************************************************************************
  * Utils
  ******************************************************************************/
-int dstm_get_local_region_id(void)
+int dstm_get_local_region_id(void) { return 0; }  /* default region */
+
+dstm_region_t *dstm_get_local_region(int region_id)
 {
-	return dstm_global_context.rank;
+        if (region_id < 0 || region_id >= DSTM_MAX_REGIONS)
+                return NULL;
+        return dstm_global_context.regions[region_id];
 }
 
-dstm_region_t *dstm_get_local_region(void)
+int dstm_region_register(size_t size, int *region_id)
 {
-	return dstm_global_context.region;
+        if (region_id == NULL)
+                return -DSTM_EINVAL;
+        for (int i = 0; i < DSTM_MAX_REGIONS; i++) {
+                if (dstm_global_context.regions[i] == NULL) {
+                        int err = dstm_region_create(
+                                &dstm_global_context.regions[i], size);
+                        if (err) return err;
+                        dstm_global_context.regions[i]->id = i;
+                        if (i + 1 > dstm_global_context.region_count)
+                                dstm_global_context.region_count = i + 1;
+                        *region_id = i;
+                        return DSTM_SUCCESS;
+                }
+        }
+        return -DSTM_ENOMEM;
+}
+
+int dstm_region_unregister(int region_id)
+{
+        dstm_region_t *r = dstm_get_local_region(region_id);
+        if (r == NULL) return -DSTM_EINVAL;
+
+        /* Purge neighbor-clock entries keyed by this region so a later
+         * re-register of the same id within the same session does not
+         * inherit stale neighbor times (which would feed wrong values
+         * into the version state machine). */
+        dstm_region_ninfo_t *ni, *tmp;
+        HASH_ITER(hh, dstm_global_context.ninfos, ni, tmp) {
+                if (ni->key.region_id == region_id) {
+                        HASH_DEL(dstm_global_context.ninfos, ni);
+                        free(ni);
+                }
+        }        
+
+        dstm_region_destroy(&dstm_global_context.regions[region_id]);
+        return DSTM_SUCCESS;
 }
 
 /*******************************************************************************
@@ -75,11 +114,19 @@ int dstm_start_custom(dstm_distance_t *dist, dstm_opts_t opts)
 		return err;
 
 	/* create a region locally with user-specified size */
-	err = dstm_region_create(&dstm_global_context.region, opts.region_size);
+	err = dstm_region_create(&dstm_global_context.regions[0], opts.region_size);
 	if (err) {
 		dstm_distance_destroy(&dstm_global_context.distances);
 		return err;
 	}
+    dstm_global_context.regions[0]->id = 0;
+
+    dstm_global_context.region_count = 1;
+
+    /* reset rank-level session state */
+    dstm_global_context.local_heartbeat_time = 0;
+    dstm_global_context.barrier_token_count = 0;
+    dstm_global_context.barrier_all_drained = 0;
 
 	/* Duplicate user_comm into a fresh per-session communicator.  All
 	 * session-level traffic (puts, gets, heartbeats, barrier tokens)
@@ -108,8 +155,25 @@ int dstm_fini(dstm_time_t last_time)
 	 * drain something (likely a regression). */
 	assert(requests == NULL);
 
-	dstm_region_destroy(&dstm_global_context.region);
-	dstm_distance_destroy(&dstm_global_context.distances);
+    for (int i = 0; i < DSTM_MAX_REGIONS; i++)
+            if (dstm_global_context.regions[i] != NULL)
+                    dstm_region_destroy(&dstm_global_context.regions[i]);
+
+    dstm_global_context.region_count = 0;
+
+    /* Neighbor info is populated per-session by the message handlers
+     * (ninfo_set on puts/gets/heartbeats).  Clear it here so a subsequent
+     * dstm_start begins with an empty table; leaking entries across
+     * sessions would feed stale neighbor times into the barrier/version
+     * logic. */
+    dstm_region_ninfo_t *ni, *tmp;
+    HASH_ITER(hh, dstm_global_context.ninfos, ni, tmp) {
+            HASH_DEL(dstm_global_context.ninfos, ni);
+            free(ni);
+    }
+    dstm_global_context.ninfos = NULL;
+
+    dstm_distance_destroy(&dstm_global_context.distances);
 
 	/* Rendezvous before tearing down the session communicator.  The ring
 	 * barrier above only guarantees each rank has completed *locally*; a
@@ -170,6 +234,9 @@ int dstm_init(int *argc, char **argv[])
 int dstm_finalize(void)
 {
 	dstm_msg_finalize();
+
+    /* Defensive: dstm_fini normally destroys the session matrix and
+	 * nulls the pointer, so this is a no-op in the balanced case. */
 	dstm_distance_destroy(&dstm_global_context.distances);
 
 	/* Free the long-lived user communicator.  At this point `comm`

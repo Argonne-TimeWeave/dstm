@@ -85,11 +85,22 @@ typedef struct dstm_region_block_header_s dstm_region_block_header_t;
 
 #define DSTM_REGION_HEADER_SIZE sizeof(dstm_region_block_header_t)
 
-/* Neighbor info for distributed memory tracking */
-struct dstm_region_ninfo_s {
+/* Neighbor info for distributed memory tracking.
+ *
+ * Keyed by (rank, region_id): neighbor clocks must be tracked per region
+ * so that traffic advancing the shared logical clock on one region cannot
+ * prematurely retire versions on another region.  The composite key is a
+ * packed struct hashed with HASH_ADD/FIND(hh, ...). */
+struct dstm_region_ninfo_key_s {
 	int rank;
-	dstm_time_t time;
-	UT_hash_handle hh;
+	int region_id;
+};
+typedef struct dstm_region_ninfo_key_s dstm_region_ninfo_key_t;
+
+struct dstm_region_ninfo_s {
+    dstm_region_ninfo_key_t key;
+    dstm_time_t time;
+    UT_hash_handle hh;
 };
 typedef struct dstm_region_ninfo_s dstm_region_ninfo_t;
 
@@ -120,6 +131,7 @@ struct dstm_region_s {
 	/* Memory buffer */
 	void *buffer; /* Base address of region */
 	size_t size; /* Total size (power of 2) */
+    int id; /* local region id (index in context->regions) */
 	int max_order; /* log2(size/MIN_BLOCK_SIZE) */
 	int owns_buffer; /* 1 if we allocated, 0 if user-provided */
 
@@ -130,32 +142,10 @@ struct dstm_region_s {
 	size_t bitmap_size; /* Size of bitmap in bytes */
 
 	dstm_time_t time; /* Minimum active version timestamp */
-	dstm_region_ninfo_t *ninfos;
 
 	/* DL list of active versions, sorted by time (ascending).
 	 * Each version has its own buffer and state machine. */
 	dstm_region_version_t *versions;
-
-	/* Number of barrier tokens received but not yet consumed by the
-	 * barrier DFA.  The BARRIER message handler increments this on
-	 * every token arrival; the barrier DFA decrements it when it
-	 * consumes a token to advance to the next state. */
-	int barrier_token_count;
-
-	/* Set to 1 after the first barrier round completes (all ranks
-	 * have drained their outgoing requests).  When set, the version
-	 * transition checks (WRITABLE->READABLE, READABLE->DISCARDABLE)
-	 * skip ALL neighbor distance checks, since no rank can issue new
-	 * PUT/GET messages.  Reset to 0 when the barrier exits. */
-	int barrier_all_drained;
-
-	/* Highest logical timestamp for which we have already broadcast a
-	 * HEARTBEAT to all neighbors.  Used to suppress redundant
-	 * heartbeats: dstm_put/dstm_get only emit a heartbeat when the
-	 * caller's `time` strictly exceeds this watermark.  Per-region
-	 * (and therefore per-session) so it resets to 0 with each fresh
-	 * dstm_start. */
-	int local_heartbeat_time;
 };
 
 /*******************************************************************************
@@ -172,8 +162,8 @@ void dstm_region_destroy(dstm_region_t **region);
  * Methods
  ******************************************************************************/
 
-int dstm_region_set_ninfo(dstm_region_t *region, int rank, dstm_time_t time);
-int dstm_region_get_ninfo(dstm_region_t *region, int rank, dstm_time_t *time);
+int dstm_ninfo_set(int rank, int region_id, dstm_time_t time);
+int dstm_ninfo_get(int rank, int region_id, dstm_time_t *time);
 
 dstm_ptr_t dstm_region_malloc(dstm_region_t *r, size_t size);
 void dstm_region_free(dstm_region_t *r, dstm_ptr_t ptr);

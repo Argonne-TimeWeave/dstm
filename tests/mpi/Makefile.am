@@ -20,14 +20,20 @@ AM_COLOR_TESTS = yes
 
 COMPILED_TESTS = \
 		allgatherv \
+        combine_distances \
+        combine_distances_insufficient \
 		darray \
 		distances \
 		get_or_default \
-               init_comm \
-               init_comm_world \
+        init_comm \
+        init_comm_world \
 		local_delta \
 		msg \
 		multi_session \
+        multi_region \
+        multi_region_asym \
+        multi_region_disjoint_timesteps \
+        multi_dgraph \
         dgraph \
         mini_airport \
 		put_after_get

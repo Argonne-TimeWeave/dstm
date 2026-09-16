@@ -47,7 +47,7 @@ dstm_ptr_t dstm_region_ptr_fromvoid(dstm_region_t *r, void *ptr)
 	}
 
 	/* convert to offset */
-	p.region = dstm_global_context.rank;
+	p.region = r->id;
 	p.offset = (intptr_t)((char *)ptr - (char *)r->buffer);
 	return p;
 }
@@ -60,8 +60,7 @@ void *dstm_region_ptr_tovoid(dstm_region_t *r, dstm_ptr_t ptr)
 	if (ptr.region == DSTM_REGIONID_LOCAL)
 		return (void *)ptr.offset;
 
-	if (ptr.region != dstm_global_context.rank ||
-	    ptr.offset > (intptr_t)r->size)
+	if (ptr.region != r->id || ptr.offset > (intptr_t)r->size)
 		return NULL;
 
 	return (void *)((char *)r->buffer + ptr.offset);
@@ -321,11 +320,7 @@ static int dstm_region_init_allocator(dstm_region_t *r)
 
 	/* Initialize metadata */
 	r->time = 0;
-	r->ninfos = NULL;
 	r->versions = NULL;
-	r->barrier_token_count = 0;
-	r->barrier_all_drained = 0;
-	r->local_heartbeat_time = 0;
 
 	return DSTM_SUCCESS;
 
@@ -419,13 +414,7 @@ void dstm_region_destroy(dstm_region_t **region)
 		free(v);
 	}
 
-	/* Free neighbor info hash table */
-	dstm_region_ninfo_t *ni, *tmp;
-	HASH_ITER(hh, r->ninfos, ni, tmp)
-	{
-		HASH_DEL(r->ninfos, ni);
-		free(ni);
-	}
+    /* neighbor info is now rank-level (context); not freed here */
 
 	/* Free buddy allocator structures */
 	if (r->free_lists != NULL)
@@ -446,40 +435,46 @@ void dstm_region_destroy(dstm_region_t **region)
  * Neighbor Info Functions
  ******************************************************************************/
 
-int dstm_region_set_ninfo(dstm_region_t *region, int rank, dstm_time_t time)
+int dstm_ninfo_set(int rank, int region_id, dstm_time_t time)
 {
-	if (region == NULL)
-		return -DSTM_EINVAL;
+    dstm_region_ninfo_key_t key;
+    /* zero the whole key (including any padding) so HASH_FIND/HASH_ADD,
+     * which hash the raw key bytes, are deterministic. */
+    memset(&key, 0, sizeof(key));
+    key.rank = rank;
+    key.region_id = region_id;
 
-	dstm_region_ninfo_t *ni;
-	HASH_FIND_INT(region->ninfos, &rank, ni);
-	if (ni == NULL) {
-		ni = calloc(1, sizeof(*ni));
-		assert(ni != NULL);
-		ni->rank = rank;
-		ni->time = time;
-		HASH_ADD_INT(region->ninfos, rank, ni);
-	} else {
-		if (time > ni->time)
-			ni->time = time;
-	}
-	return DSTM_SUCCESS;
+    dstm_region_ninfo_t *ni;
+    HASH_FIND(hh, dstm_global_context.ninfos, &key, sizeof(key), ni);
+    if (ni == NULL) {
+        ni = calloc(1, sizeof(*ni));
+        assert(ni != NULL);
+        ni->key = key;
+        ni->time = time;
+        HASH_ADD(hh, dstm_global_context.ninfos, key, sizeof(key), ni);
+    } else {
+        if (time > ni->time)
+            ni->time = time;
+    }
+    return DSTM_SUCCESS;
 }
 
-int dstm_region_get_ninfo(dstm_region_t *region, int rank, dstm_time_t *time)
+int dstm_ninfo_get(int rank, int region_id, dstm_time_t *time)
 {
-	if (region == NULL)
-		return -DSTM_EINVAL;
+    dstm_region_ninfo_key_t key;
+    memset(&key, 0, sizeof(key));
+    key.rank = rank;
+    key.region_id = region_id;
 
-	dstm_region_ninfo_t *ni;
-	HASH_FIND_INT(region->ninfos, &rank, ni);
-	if (ni == NULL) {
-		*time = 0;
-		return -DSTM_EINVAL;
-	}
+    dstm_region_ninfo_t *ni;
+    HASH_FIND(hh, dstm_global_context.ninfos, &key, sizeof(key), ni);
+    if (ni == NULL) {
+        *time = 0;
+        return -DSTM_EINVAL;
+    }
 
-	*time = ni->time;
-	return DSTM_SUCCESS;
+    *time = ni->time;
+    return DSTM_SUCCESS;
 }
 
 /*******************************************************************************
@@ -654,8 +649,8 @@ json_t *dstm_region_ninfo_to_json(dstm_region_ninfo_t *ni)
 {
 	if (ni == NULL)
 		return json_null();
-	return json_pack("{s:I, s:i}", "time", (json_int_t)ni->time, "rank",
-	                 ni->rank);
+    return json_pack("{s:I, s:i, s:i}", "time", (json_int_t)ni->time,
+	                 "rank", ni->key.rank, "region_id", ni->key.region_id);
 }
 
 json_t *dstm_region_version_to_json(dstm_region_version_t *v)
