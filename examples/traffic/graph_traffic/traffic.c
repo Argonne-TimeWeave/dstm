@@ -371,6 +371,12 @@ struct sim {
         size_t             events_cap;
         const char        *trip_output;
 
+        /* Optional rank-0 dump of the congestion replica at one tick.
+         * The snapshot is taken after receives and before routing, so it
+         * is the exact replica view consulted by route_and_stage(). */
+        int                snapshot_dump_enabled;
+        int32_t            snapshot_dump_tick;
+
         /* Number of initial timestamps included in the routing-metric
          * cohort. A car is included when:
          *
@@ -1012,6 +1018,143 @@ static void send_state(int32_t t)
 }
 
 /*******************************************************************************
+ * Replica staleness snapshot
+ *
+ * A congestion replica contains one timestamp per directed edge, rather
+ * than one timestamp per vertex. The dump therefore contains both:
+ *
+ *   edge records: the exact stamp, age, and value in rank zero's replica
+ *   node records: the oldest known outgoing-edge stamp for each vertex
+ *
+ * Node age is the maximum age among the node's known outgoing edges.
+ * known_edges/total_edges lets a visualizer distinguish a fully observed
+ * node from one whose replica still contains unknown outgoing edges.
+ *
+ * A stamp or age of -1 means that no information has been observed.
+ ******************************************************************************/
+
+static void write_staleness_snapshot(int32_t t)
+{
+        if (!S.snapshot_dump_enabled ||
+            t != S.snapshot_dump_tick ||
+            S.rank != 0)
+                return;
+
+        char path[4096];
+
+        snprintf(path, sizeof(path),
+                 "staleness-%s-t%d-rank0.csv",
+                 replica_mode_name(S.mode), (int)t);
+
+        FILE *f = fopen(path, "w");
+        if (f == NULL) {
+                perror(path);
+                return;
+        }
+
+        /*
+         * Node records carry the authoritative dense-ID mapping and
+         * coordinates. Edge records use those same dense IDs.
+         *
+         * Node age is the maximum age among known outgoing edges.
+         * A node with one or more unknown outgoing edges is marked
+         * partially_known=1 so a visualizer does not accidentally treat
+         * it as fully observed.
+         */
+        fprintf(f,
+                "record_type,"
+                "node_id,original_node_id,x,y,owner,"
+                "edge_id,src,dst,"
+                "stamp,age,value,"
+                "known_edges,total_edges,partially_known\n");
+
+        for (size_t u = 0; u < S.city.nv; u++) {
+                int32_t oldest_stamp = -1;
+                int64_t maximum_age = -1;
+                size_t known_edges = 0;
+                size_t total_edges =
+                        S.city.row_ptr[u + 1] - S.city.row_ptr[u];
+
+                for (size_t ge = S.city.row_ptr[u];
+                     ge < S.city.row_ptr[u + 1];
+                     ge++) {
+                        const struct cong_entry *e = &S.rep.e[ge];
+
+                        if (e->stamp < 0)
+                                continue;
+
+                        int64_t age =
+                                (int64_t)t - (int64_t)e->stamp;
+
+                        known_edges++;
+
+                        if (oldest_stamp < 0 ||
+                            e->stamp < oldest_stamp)
+                                oldest_stamp = e->stamp;
+
+                        if (maximum_age < 0 || age > maximum_age)
+                                maximum_age = age;
+                }
+
+                int partially_known =
+                        known_edges < total_edges;
+
+                fprintf(f,
+                        "node,"
+                        "%zu,%ld,%.17g,%.17g,%d,"
+                        "-1,-1,-1,"
+                        "%d,%" PRId64 ",nan,"
+                        "%zu,%zu,%d\n",
+                        u,
+                        S.city.dense2orig[u],
+                        S.city.x[u],
+                        S.city.y[u],
+                        city_owner(&S.city, u),
+                        (int)oldest_stamp,
+                        maximum_age,
+                        known_edges,
+                        total_edges,
+                        partially_known);
+        }
+
+        /*
+         * Emit every directed graph edge. The src and dst values are
+         * dense IDs and therefore index directly into the coordinates
+         * emitted by the node records above.
+         */
+        for (size_t ge = 0; ge < S.city.ne; ge++) {
+                const struct cong_entry *e = &S.rep.e[ge];
+                int known = e->stamp >= 0;
+                int64_t age = known
+                        ? (int64_t)t - (int64_t)e->stamp
+                        : -1;
+
+                fprintf(f,
+                        "edge,"
+                        "-1,-1,nan,nan,-1,"
+                        "%zu,%zu,%zu,"
+                        "%d,%" PRId64 ",%.9g,"
+                        "%d,1,%d\n",
+                        ge,
+                        S.city.esrc[ge],
+                        S.city.dst[ge],
+                        (int)e->stamp,
+                        age,
+                        e->value,
+                        known,
+                        known ? 0 : 1);
+        }
+
+        if (fclose(f) != 0) {
+                perror(path);
+                return;
+        }
+
+        printf("staleness snapshot: %s\n", path);
+        fflush(stdout);
+}
+
+/*******************************************************************************
  * Spawn
  ******************************************************************************/
 
@@ -1093,6 +1236,10 @@ static void run_step(int32_t t)
         recv_cars(t);           /* every tick, every mode */
         if (diffuse_state)
                 recv_state(t);
+
+        /* Capture the replica after incoming merges and immediately
+         * before this tick's routing decisions consult it. */
+        write_staleness_snapshot(t);
 
         route_and_stage(t);
         measure_local(t);
@@ -1825,7 +1972,8 @@ static void usage(const char *prog)
         fprintf(stderr,
                 "usage: %s --data DIR [--steps N] [--cars M] [--rate R]\n"
                 "          [--cap C] [--seed S] [--replica-mode M]\n"
-                "          [--trip-output FILE] [--verbose] [--quiet]\n"
+                "          [--trip-output FILE] [--snapshot-dump T]\n"
+                "          [--verbose] [--quiet]\n"
                 "\n"
                 "  --data  DIR path to a dir with node.csv and link.csv\n"
                 "  --steps N   simulation ticks, t=0..N   (default 60)\n"
@@ -1836,6 +1984,8 @@ static void usage(const char *prog)
                 "  --stale-delay D merge replica every D ticks (default 1)\n"
                 "  --quiet     silence DSTM logging (default level: debug)\n"
                 "  --trip-output FILE  per-trip CSV output path\n"
+                "  --snapshot-dump T   dump rank-0 replica before routing\n"
+                "                      at timestamp T\n"
                 "  --replica-mode stale|oracle|blind      (default stale)\n"
                 "        stale   diffusion by relay (the real model)\n"
                 "        oracle  replica synced globally each tick\n"
@@ -1879,6 +2029,12 @@ int main(int argc, char *argv[])
                         S.trip_output = argv[++i];
                 else if (!strcmp(argv[i], "--rate") && i + 1 < argc)
                         S.spawn_rate = atoi(argv[++i]);
+                else if (!strcmp(argv[i], "--snapshot-dump") &&
+                         i + 1 < argc) {
+                        S.snapshot_dump_tick =
+                                (int32_t)atoi(argv[++i]);
+                        S.snapshot_dump_enabled = 1;
+                }
                 else if (!strcmp(argv[i], "--replica-mode") && i + 1 < argc) {
                         const char *m = argv[++i];
 
@@ -1918,6 +2074,20 @@ int main(int argc, char *argv[])
                 cap = 1;
         if (S.stale_delay < 1)
                 S.stale_delay = 1;
+
+
+        if (S.snapshot_dump_enabled &&
+            (S.snapshot_dump_tick < 0 ||
+             S.snapshot_dump_tick > steps)) {
+                if (r == 0)
+                        fprintf(stderr,
+                                "error: --snapshot-dump timestamp must be "
+                                "between 0 and %d inclusive\n",
+                                steps);
+                dstm_finalize();
+                MPI_Finalize();
+                return 1;
+        }
 
         if (data == NULL) {
                 if (r == 0) {

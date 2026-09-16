@@ -1,0 +1,1 @@
+python3 visualize_staleness.py     --stale-delay 10 --steps 100 --timestamp 99 --node-size 2.5 --edge-width 0.12 --dpi 300
