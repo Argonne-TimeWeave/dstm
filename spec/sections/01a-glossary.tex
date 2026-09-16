@@ -70,12 +70,10 @@ session start. Each process owns exactly one, named by that process's rank:
 region identifiers and rank identifiers are the same numbers.
 
 \begin{definition}[Region and address space]\label{def:region}
-The process $\proc{p}$ owns a \emph{region} of $S_p > 0$ bytes with
-\emph{address space} $\Addrof{p} \defeq \{0, \dots, S_p - 1\}$. The global
-address space is
-\[
-  \Addr \defeq \biguplus_{p \in \Ranks} \Addrof{p}.
-\]
+The \emph{local address space} of rank $p$ is
+$\Addrof{p} \defeq \{0, \dots, S_p - 1\}$ for a region size $S_p > 0$; the
+\emph{region} of rank $p$ is the corresponding partition of the global address
+space $\Addr$. Both are fixed by \cref{ax:pgas}.
 \end{definition}
 
 \term{allocation}{Allocation}
@@ -129,9 +127,9 @@ and which process is responsible for them --- an invariant the implementation
 asserts on every operation.
 
 \begin{definition}[Pointer]\label{def:pointer}
-A \emph{pointer} is a pair $\pi = (p, o) \in \Ranks \times \Int$, well formed
-when $o \in \Addrof{p}$. Write $\mathit{owner}(\pi) \defeq p$ and
-$\mathit{off}(\pi) \defeq o$.
+A \emph{pointer} is a global address $\gaddr{p}{a} \in \Addr$, well formed
+when $a \in \Addrof{p}$. Write $\mathit{owner}(\pi) \defeq p$ and
+$\mathit{off}(\pi) \defeq a$.
 \end{definition}
 
 % ===========================================================================
@@ -225,79 +223,47 @@ $\clk{p}$ when rank $p$ holds no version.
 \label{sec:gloss-locality}
 
 \term{comm-graph}{Communication graph}
-The communication graph is how a program declares the shape of its simulation:
-which pairs of ranks may ever exchange operations, and how long, in simulated
-time, an interaction across such a pair takes to become visible. Supplied once
-per \gls{session} and never changed, it is the source of every optimisation
-DSTM performs --- the only reason a process can conclude that another can no
-longer affect it.
+The communication graph declares the shape of a simulation: which pairs of
+ranks may ever exchange \glspl{operation}, and how long, in simulated time, an
+interaction across such a pair takes to become visible. Supplied once per
+\gls{session} and never changed, it is the source of every optimisation DSTM
+performs --- the only reason a process can conclude that another can no longer
+affect it.
 
 \begin{definition}[Communication graph]\label{def:comm-graph}
-A \emph{communication graph} is a triple $\cgraph = (\Ranks, \edges, w)$ with
-$\edges \subseteq \Ranks \times \Ranks$ the \emph{channel} relation, subject
-to
+A \emph{communication graph} is a triple $\cgraph = (\Ranks, \edges, w)$ in
+which $\edges \subseteq \Ranks \times \Ranks$ is the \emph{channel} relation
+and $w$ assigns each channel a weight, subject to
 \begin{description}[leftmargin=2.9cm,style=nextline,font=\normalfont\bfseries]
   \item[\textnormal{(G1) Irreflexivity}] $(p,p) \notin \edges$.
   \item[\textnormal{(G2) Symmetry}] $(p,q) \in \edges \iff (q,p) \in \edges$,
-    and $\ew{p}{q} = \ew{q}{p}$. \devmark{dev:asymmetric}
+    and $\lag{p}{q} = \lag{q}{p}$. \devmark{dev:asymmetric}
   \item[\textnormal{(G3) Positive integer weights}]
     $w : \edges \to \Nat_{>0}$. \devmark{dev:zero-distance}
 \end{description}
 \end{definition}
 
-\term{distance}{Distance}
-The distance between two ranks is the least total weight of a chain of
-channels joining them. It is a distance in the ordinary mathematical sense,
-which is what licenses reasoning about it geometrically.
+\term{lag}{Lag}
+The lag of a channel is its weight: the number of simulated timesteps an
+interaction across it takes to become visible. It is a \emph{time} separation
+between two neighbours, nothing more.
 
-\begin{definition}[Distance]\label{def:distance}
-A \emph{path} from $p$ to $q$ is a sequence $p = z_0, \dots, z_k = q$ with
-$(z_{m-1}, z_m) \in \edges$ for each $m$, of \emph{length}
-$\sum_{m} \ew{z_{m-1}}{z_m}$. The \emph{distance}
-$d : \Ranks \times \Ranks \to \Nat \cup \{\infty\}$ is the least length of
-such a path, with $\dist{p}{p} = 0$ (empty path) and $\infty$ when no path
-exists.
-\end{definition}
+\begin{convention}[Lag is not a distance]\label{conv:lag-not-metric}
+$w$ is deliberately \emph{not} a metric and nothing below assumes it is. It is
+defined only on channels, never between arbitrary ranks; no triangle
+inequality is required, so a channel may cost more than a detour around it
+without making the configuration ill formed. The only axioms are (G1)--(G3),
+and only (G2) and (G3) are ever used.
+\end{convention}
 
-\begin{proposition}[$d$ is an extended metric]\label{prop:metric}
-For all $p, q, r \in \Ranks$:
-\begin{description}[leftmargin=3.4cm,style=nextline,font=\normalfont\bfseries]
-  \item[\textnormal{(M1) Non-negativity}] $\dist{p}{q} \ge 0$.
-  \item[\textnormal{(M2) Identity of indiscernibles}]
-    $\dist{p}{q} = 0 \iff p = q$.
-  \item[\textnormal{(M3) Symmetry}] $\dist{p}{q} = \dist{q}{p}$.
-  \item[\textnormal{(M4) Triangle inequality}]
-    $\dist{p}{r} \le \dist{p}{q} + \dist{q}{r}$.
-\end{description}
-\end{proposition}
+Of the three, (G3) carries the weight. Because $w$ is integer-valued it says
+every channel costs at least one timestep, which makes every cycle in
+$\cgraph$ carry positive weight --- and that is what makes the dependence
+graph acyclic (\cref{thm:acyclic}) and the system deadlock-free
+(\cref{thm:deadlock-freedom}). A configuration admitting a zero-weight channel
+has none of DSTM's guarantees \devmark{dev:zero-distance}.
 
-\begin{proof}
-(M1) Path lengths are sums of positive weights; the empty path has length $0$.
-
-(M2) If $p = q$ the empty path gives $0$. If $p \ne q$, every path uses at
-least one channel, each weighing at least $1$ by (G3), so $\dist{p}{q} \ge 1$.
-
-(M3) By (G2) a path reverses to one of equal length, so the minima coincide.
-
-(M4) Vacuous if a right-hand term is $\infty$, under $\infty + a = \infty$.
-Otherwise concatenating shortest paths $p \to q$ and $q \to r$ gives a path
-$p \to r$ of length $\dist{p}{q} + \dist{q}{r}$, and $\dist{p}{r}$ minimises
-over a set containing it.
-\end{proof}
-
-The value $\infty$ makes $d$ an \emph{extended} metric; its finiteness classes
-are the connected components of $\cgraph$. Only (M2) and (M3) are used later.
-
-\begin{remark}[(M2) is the load-bearing axiom]\label{rem:m2}
-Since $d$ is integer-valued, (M2) says exactly that distinct ranks are at
-distance at least one. That is what makes every cycle in $\cgraph$ carry
-positive weight, hence the dependence graph acyclic (\cref{thm:acyclic}) and
-the system deadlock-free (\cref{thm:deadlock-freedom}). A configuration with
-$\dist{p}{q} = 0$ for $p \ne q$ is not a metric space, and DSTM's guarantees
-do not apply to it \devmark{dev:zero-distance}.
-\end{remark}
-
-\term{reachability}{Adjacency, neighbourhood and metric closure}
+\term{reachability}{Adjacency and neighbourhood}
 \alsoterm{neighbourhood}
 Two ranks are \emph{neighbours} when a channel joins them directly.
 Non-neighbours exchange no messages and neither constrains the other's
@@ -308,40 +274,40 @@ on neighbourhood size, not on $\worldsize$.
 \[
   \nbr{p} \defeq \{\, q \in \Ranks : (p, q) \in \edges \,\},
   \qquad
-  \diam_p \defeq \max_{q \in \nbr{p}} \dist{p}{q}
+  \diam_p \defeq \max_{q \in \nbr{p}} \lag{p}{q}
 \]
 with $\diam_p \defeq 0$ when $\nbr{p} = \emptyset$.
 \end{definition}
 
-\begin{remark}[Adjacency is not finite distance]\label{rem:adjacency-vs-distance}
-Conflating them is the mistake the old ``distance matrix with $-1$'' notation
-invited. Two ranks at opposite corners of a mesh are at finite distance ---
-a path exists --- but are not neighbours, exchange no heartbeats and never
-appear in each other's guards. Requiring $d$ to be a genuine metric therefore
-costs no sparsity: (M4) constrains the metric, while $\edges$ stays as sparse
-as the application makes it.
-\end{remark}
+\term{path-weight}{Path weight}
+The path weight between two ranks is the least total lag of a chain of
+channels joining them. Unlike the lag itself it is defined for every pair, and
+it is the quantity that bounds how far apart two processes can drift
+(\cref{prop:drift-bound}).
 
-\begin{definition}[Metric closure]\label{def:metric-closure}
-$\cgraph$ is \emph{metrically closed} when $\ew{p}{q} = \dist{p}{q}$ for every
-$(p,q) \in \edges$ --- no channel costs more than a detour around it. It is
-\emph{well formed} when it satisfies (G1)--(G3) and is metrically closed.
+\begin{definition}[Path weight]\label{def:path-weight}
+A \emph{path} from $p$ to $q$ is a sequence $p = z_0, \dots, z_k = q$ with
+$(z_{m-1}, z_m) \in \edges$ for each $m$, of \emph{weight}
+$\sum_{m} \lag{z_{m-1}}{z_m}$. The \emph{path weight}
+$W : \Ranks \times \Ranks \to \Nat \cup \{\infty\}$ is the least weight of
+such a path, with $\pw{p}{p} = 0$ and $\pw{p}{q} = \infty$ when no path
+exists.
 \end{definition}
 
-Without it a channel could weigh $10$ while a two-hop detour costs $2$, and
-``the distance from $p$ to $q$'' would mean one thing to the metric and
-another to the guard consulting the channel. Closure collapses the two.
-
-It costs nothing in practice: every library constructor weighs channels
-equally, so a $k$-hop detour costs $k$ times a direct channel; likewise for a
-graph-derived matrix (\cref{prop:derive-wf}). A hand-built graph violating it
-models a system where relayed information outruns the direct channel --- a
-modelling error, not a runtime one. No theorem in \cref{ch:semantics} appeals
-to (M4).
+\begin{remark}[Where a metric does belong]\label{rem:path-weight-metric}
+$W$ is a metric --- a least-path weight always satisfies the triangle
+inequality, by construction rather than by assumption --- whereas $w$ is not.
+The distinction is exactly right: $w$ is data the application supplies and
+must not be over-constrained, while $W$ is derived and is used only to bound
+drift and memory. Note also that $\pw{p}{q} < \infty$ does \emph{not} make $p$
+and $q$ neighbours: ranks at opposite corners of a mesh have a finite path
+weight, share no channel, exchange no \glspl{heartbeat} and never appear in
+each other's guards.
+\end{remark}
 
 \term{lookahead}{Lookahead}
 Lookahead is the guarantee the \gls{comm-graph} buys: nothing $\proc{q}$ does
-now can affect $\proc{p}$'s state earlier than $\dist{p}{q}$ into the future.
+now can affect $\proc{p}$'s state earlier than $\lag{p}{q}$ into the future.
 It is the same quantity conservative PDES calls lookahead \cite{chandy1979},
 playing the same role --- what lets a process declare state final without
 asking anyone.
@@ -373,9 +339,9 @@ location's identity, not metadata attached to it. Two writes to the same
 offset at different effective times do not touch the same cell.
 
 \begin{definition}[Cell]\label{def:cell}
-A \emph{cell} is a triple $\cell{p}{\eff}{a}$ with $p \in \Ranks$,
-$\eff \in \Time$, $a \in \Addrof{p}$; and
-$\Cells \defeq \{\, \cell{p}{\eff}{a} \,\}$ is the set of all cells.
+$\Cells \defeq \Addr \times \Time$; we write $\cell{p}{\eff}{a}$ for the cell
+at global address $\gaddr{p}{a}$ and \gls{effective-time} $\eff$
+(\cref{def:cell-pgas}).
 \end{definition}
 
 \term{version}{Version}
@@ -575,11 +541,11 @@ like opposites and are the same schedule (\cref{thm:pipeline-depth}).
 \term{pull-model}{Pull model}
 Each process publishes into its \emph{own} region at its current time
 ($\delta = 0$, local); consumers reach across into that region's \emph{past}
-($\delta = -\dist{p}{q}$). Data sits still; readers reach back.
+($\delta = -\lag{p}{q}$). Data sits still; readers reach back.
 
 \term{push-model}{Push model}
 Each process writes into its \emph{neighbours'} regions at a point in their
-\emph{future} ($\delta = +\dist{p}{q}$); every process reads only its own
+\emph{future} ($\delta = +\lag{p}{q}$); every process reads only its own
 region at its current time ($\delta = 0$, local). Data moves; readers stay
 home.
 

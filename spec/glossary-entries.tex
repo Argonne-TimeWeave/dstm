@@ -104,14 +104,20 @@
 \newglossaryentry{comm-graph}{
   name={communication graph},
   plural={communication graphs},
-  description={The declaration of which pairs of processes may exchange
+  description={The declaration of which pairs of ranks may exchange
     operations, and what each such channel costs in simulated time}}
 
-\newglossaryentry{distance}{
-  name={distance},
-  plural={distances},
-  description={The least total channel weight joining two processes; an
-    extended metric on the set of processes}}
+\newglossaryentry{lag}{
+  name={lag},
+  plural={lags},
+  description={The weight of a channel: the number of simulated timesteps an
+    interaction across it takes to become visible. Not a metric}}
+
+\newglossaryentry{path-weight}{
+  name={path weight},
+  plural={path weights},
+  description={The least total lag of a chain of channels joining two ranks;
+    a metric, and the bound on how far two processes may drift apart}}
 
 \newglossaryentry{distance-matrix}{
   name={distance matrix},

@@ -51,7 +51,7 @@ versioned memory exists.
 Requires & \textsc{chk} & \code{dist} non-\code{NULL}, of size $\worldsize$;
   region size $\ge$ 64 bytes \\
          & \textsc{res} & $\Dmat$ encodes a well-formed \gls{comm-graph}
-  (\cref{def:metric-closure}). Only the diagonal and $\Dmat_{ij} \ge -1$ are
+  (\cref{def:comm-graph}). Only the diagonal and $\Dmat_{ij} \ge -1$ are
   checked \devmark{dev:zero-distance} \devmark{dev:asymmetric} \\
          & \textsc{res} & collective: all processes call it, in the same order
   (\cref{res:collective}) \\
@@ -108,14 +108,14 @@ void dstm_distance_destroy(dstm_distance_t **dist);
 
 \alsoterm{distance-matrix}%
 A \code{dstm\_distance\_t} is the API-level encoding of a
-\gls{comm-graph}: $\Dmat_{ij} = \ew{i}{j}$ when a channel joins the two
+\gls{comm-graph}: $\Dmat_{ij} = \lag{i}{j}$ when a channel joins the two
 processes, $\Dmat_{ii} = 0$, and $-1$ where there is no channel. Note that
-$-1$ encodes \emph{absence of a channel}, not infinite distance --- the two
-processes may well be at finite distance through a path
-(\cref{rem:adjacency-vs-distance}).
+$-1$ encodes \emph{absence of a channel}, not an infinite lag --- the two
+ranks may well be joined by a path
+(\cref{rem:path-weight-metric}).
 
 The named constructors assign equal weight to every channel, so they are
-metrically closed by construction and (G1)--(G3) hold.
+so (G1)--(G3) hold by construction.
 \code{dstm\_distance\_create\_from\_matrix} is the escape hatch for
 application-derived topologies and is the only place where a malformed graph
 can enter the system.
@@ -129,13 +129,11 @@ can enter the system.
 Requires & \textsc{chk} & $m_{ii} = 0$; $m_{ij} \ge -1$ \\
          & \textsc{res} & $m_{ij} = m_{ji}$ (G2) --- not checked
   \devmark{dev:asymmetric} \\
-         & \textsc{res} & $m_{ij} \ne 0$ for $i \ne j$, i.e.\ (M2) --- not
+         & \textsc{res} & $m_{ij} \ne 0$ for $i \ne j$, i.e.\ (G3) --- not
   checked, and $0$ is silently reinterpreted as absence of a channel
   \devmark{dev:zero-distance} \\
-         & \textsc{res} & metrically closed (\cref{def:metric-closure}):
-  no entry exceeds the total weight of a detour --- not checked \\
 Ensures  & & $\cgraph$ is fixed for the session; $\nbr{p}$ follows by
-  \cref{def:neighbourhood} and $d$ by \cref{def:distance} \\
+  \cref{def:neighbourhood} and $W$ by \cref{def:path-weight} \\
 Blocks   & & no; purely local \\
 \bottomrule
 \end{tabularx}
@@ -143,7 +141,7 @@ Blocks   & & no; purely local \\
 
 \begin{remark}[Choosing the weights]
 A channel weight is a modelling decision, not a tuning parameter:
-$\dist{p}{q}$ must be a sound lower bound on the simulated latency of every
+$\lag{p}{q}$ must be a sound lower bound on the simulated latency of every
 interaction between the two processes. If anything in the model can cross
 faster, the program cannot express it legally without violating
 \cref{res:lookahead}. Subject to soundness, larger is better:
@@ -179,7 +177,7 @@ Requires & \textsc{ast} & \code{rank == region\_id == dst.region}
   (\cref{def:pointer}) \\
          & \textsc{chk} & \code{src} non-\code{NULL}; $\delta \ge 0$;
   if $\delta = 0$ then $q = p$ \\
-         & \textsc{res} & $\delta \ge \dist{p}{q}$ (\cref{res:lookahead})
+         & \textsc{res} & $\delta \ge \lag{p}{q}$ (\cref{res:lookahead})
   \devmark{dev:lookahead-uncheck} \\
          & \textsc{res} & $t \ge \clk{p}$ (\cref{res:monotone})
   \devmark{dev:monotone-origin} \\
@@ -208,7 +206,7 @@ Rules    & & \textsc{Tick}; then \textsc{Put-Local} or \textsc{Put-Remote};
 Requires & \textsc{ast} & \code{rank == region\_id == src.region} \\
          & \textsc{chk} & \code{dst} non-\code{NULL}; $\delta \le 0$;
   if $\delta = 0$ then $q = p$ \\
-         & \textsc{res} & $|\delta| \le \dist{p}{q}$ (\cref{res:staleness})
+         & \textsc{res} & $|\delta| \le \lag{p}{q}$ (\cref{res:staleness})
   \devmark{dev:lookahead-uncheck} \\
          & \textsc{res} & $t \ge \clk{p}$ (\cref{res:monotone}) \\
 Ensures  & & \code{dst} holds
@@ -334,8 +332,8 @@ by typing.
 Requires & \textsc{chk} & $\mathit{deltas}[p] > 0$;
   $\mathit{deltas}[r] < 0$ for $r \ne p$ \\
          & \textsc{res} & $|\mathit{deltas}|=\worldsize$; identical $t$ on
-  every process; $\mathit{deltas}[p] \ge \dist{p}{r}$ and
-  $|\mathit{deltas}[r]| \le \dist{p}{r}$ \\
+  every process; $\mathit{deltas}[p] \ge \lag{p}{r}$ and
+  $|\mathit{deltas}[r]| \le \lag{p}{r}$ \\
 Ensures  & & $\mathit{dst}$ holds every process's slice \emph{except the
   caller's own}, which is never written \\
 Blocks   & & yes, once per remote element \\
@@ -385,7 +383,7 @@ using the API.
 The state of edge $(u,v)$ lives on the owner of $u$, which makes the natural
 idiom legal: reading edge $(u,v)$ with $u$ local is a local get at $\delta =
 0$, writing edge $(v,u)$ with $v$ remote is a remote put at $\delta =
-+\dist{}{}$. Reading $(x,y)$ as ``the inbox at $x$ for traffic from $y$'' puts
++\lag{}{}$. Reading $(x,y)$ as ``the inbox at $x$ for traffic from $y$'' puts
 every \gls{operation} on the legal side of the ownership boundary and gives
 each \gls{cell} one writer, discharging \cref{res:write-disjoint} structurally
 --- the \glslink{mailbox}{mailbox pattern} in graph form.
@@ -432,7 +430,7 @@ Blocks   & & yes, one all-gather \\
 \begin{proposition}[Derived matrices are well formed]
 \label{prop:derive-wf}
 The graph encoded by \code{dstm\_dgraph\_derive\_distance} satisfies
-(G1)--(G3) and is metrically closed.
+(G1)--(G3).
 \end{proposition}
 
 \begin{proof}
@@ -443,10 +441,6 @@ $\mathit{touch}(i,j) \vee \mathit{touch}(j,i)$ of the ``some edge crosses''
 relation, and the assigned weight is the same $d$ on both sides. (G3) holds
 because $d > 0$ is checked and every channel weighs exactly $d$.
 
-For metric closure, every channel has the same weight $d$, so any detour
-around a channel uses at least two channels and costs at least $2d > d$. The
-direct channel is therefore always a shortest path, and $\ew{i}{j} =
-\dist{i}{j}$.
 \end{proof}
 
 \Cref{prop:derive-wf} is why the dgraph path has never exhibited
@@ -468,17 +462,17 @@ for (t = 0; t < T; t++) {
         /* consume: own inbox at the current tick */
         for (s in neighbours) dstm_darray_get(a, cell(me, s), &in[s], t, 0);
         compute();
-        /* produce: neighbour inboxes, one distance ahead */
+        /* produce: neighbour inboxes, one lag ahead      */
         for (d in neighbours) dstm_darray_put(a, cell(d, me), &out[d], t, D(me,d));
 }
 \end{lstlisting}
 
-Discharges \cref{res:lookahead} ($\delta = \dist{}{}$ exactly),
+Discharges \cref{res:lookahead} ($\delta = \lag{}{}$ exactly),
 \cref{res:staleness} (local reads have $\delta = 0$),
 \cref{res:write-disjoint} (cell $(d, \mathit{me})$ has $\mathit{me}$ as its
 only writer) and \cref{res:phase} (all \glspl{get} precede all \glspl{put} at each tick, and
 they target different \glspl{effective-time} anyway). Consumer tick is
-$t + \dist{}{}$ by \cref{thm:pipeline-depth}. One message per edge per tick.
+$t + \lag{}{}$ by \cref{thm:pipeline-depth}. One message per edge per tick.
 
 \subsection*{Pull}
 
@@ -486,7 +480,7 @@ $t + \dist{}{}$ by \cref{thm:pipeline-depth}. One message per edge per tick.
 for (t = 0; t < T; t++) {
         /* produce: own region at the current tick */
         dstm_darray_put(a, cell(me, me), &out, t, 0);
-        /* consume: neighbours' regions, one distance behind */
+        /* consume: neighbours' regions, one lag behind  */
         for (s in neighbours) dstm_darray_get(a, cell(s, s), &in[s], t, -D(me,s));
         compute();
 }

@@ -69,10 +69,10 @@ and appear nowhere in the existing documentation or source:
 \begin{center}
 \begin{minipage}{0.88\textwidth}
 \itshape
-The distance $\dist{p}{q}$ is a lower bound on how long a write takes to
-become visible (\cref{res:lookahead}: $\delta \ge \dist{p}{q}$), and an upper
+The \gls{lag} $\lag{p}{q}$ is a lower bound on how long a write takes to
+become visible (\cref{res:lookahead}: $\delta \ge \lag{p}{q}$), and an upper
 bound on how far back a read may look (\cref{res:staleness}:
-$|\delta| \le \dist{p}{q}$).
+$|\delta| \le \lag{p}{q}$).
 \end{minipage}
 \end{center}
 
@@ -137,20 +137,20 @@ Three findings are worth reading first.
 
 \begin{enumerate}[leftmargin=1.5em,itemsep=4pt]
 
-\item \textbf{The \gls{delta}/distance contract is undocumented and unchecked}
+\item \textbf{The \gls{delta}/\gls{lag} contract is undocumented and unchecked}
   (\cref{dev:lookahead-uncheck}). \Cref{res:lookahead,res:staleness} are the
   assumptions that make both promotion guards sound, yet they appear in no
   header, comment or paper. Violating the first aborts; violating the second
   hangs, silently, inside a \gls{get}.
 
-\item \textbf{A distance of zero is unsound, not merely unoptimised}
+\item \textbf{A lag of zero is unsound, not merely unoptimised}
   (\cref{dev:zero-distance}). The paper states that ``a distance of 0 between
   all \glspl{rank} is a correct setup''. The implementation accepts such a matrix and
   then treats those pairs as \emph{unreachable}, suppressing all \glspl{heartbeat}
   and all visibility checks between them. Under the intended reading the
   configuration deadlocks (\cref{rem:zero-cycle}); as implemented it silently
   loses updates. The intended meaning --- all-to-all synchronisation every
-  tick --- is expressed by a distance of one.
+  tick --- is expressed by a lag of one.
 
 \item \textbf{\Glspl{version} do not inherit} (\cref{dev:non-inheriting}). Describing
   versioning as retaining ``a \gls{history} of state'' invites the reading that

@@ -119,7 +119,7 @@ and $t' - t \ge 1$ whenever $p \ne r$.
 \begin{proof}
 $t = \eff - \delta$ and $t' = \eff - \delta' = \eff + |\delta'|$, giving the
 identity. For the bound, suppose $p \ne r$. If $p \ne q$ then
-\cref{res:lookahead} and (M2) give $\delta \ge \dist{p}{q} \ge 1$. If $p = q$
+\cref{res:lookahead} and (G3) give $\delta \ge \lag{p}{q} \ge 1$. If $p = q$
 then $r \ne q$, so the get is remote and the rule \textsc{Get-Remote} requires
 $\delta' \le -1$, giving $|\delta'| \ge 1$. Either way $t' - t \ge 1$.
 \end{proof}
@@ -198,13 +198,13 @@ is what lets DSTM dispense with null messages.
 \caption{The two idioms of \cref{sec:exec-idioms}. Solid edges are writes,
 dashed edges reads, dashed boxes versions. The version they route through
 differs --- $p$'s own region versus $r$'s --- but the tick at which the value
-reaches the consumer is $t + \dist{p}{r}$ in both cases.}
+reaches the consumer is $t + \lag{p}{r}$ in both cases.}
 \label{fig:push-pull}
 \end{figure}
 
 \begin{theorem}[Pipeline depth]\label{thm:pipeline-depth}
 Let $p$ produce a value at origin time $t$ and let $r$ consume it, with
-$q \in \{p, r\}$ the owner of the mediating version, $\dist{p}{r} = D$.
+$q \in \{p, r\}$ the owner of the mediating version, $\lag{p}{r} = D$.
 \begin{enumerate}[label=(\roman*),leftmargin=1.4cm,itemsep=1pt]
   \item In the \glslink{pull-model}{pull idiom} ($q = p$, $\delta = 0$, $\delta' = -D$) the consumer
     tick is $t' = t + D$.
@@ -219,12 +219,12 @@ $t' < t + D$.
 Both cases are \cref{lem:edge-span}: $t' - t = \delta + |\delta'|$, which is
 $0 + D$ and $D + 0$ respectively. For optimality, if $q = p$ then
 $\delta \ge 0$ and, since $r \ne q$, \cref{res:staleness} bounds
-$|\delta'| \le \dist{r}{p} = D$ while \textsc{Get-Remote} forces
+$|\delta'| \le \lag{r}{p} = D$ while \textsc{Get-Remote} forces
 $|\delta'| \ge 1$; the minimum of $\delta + |\delta'|$ subject to the reader
 actually reaching $p$'s version is attained at $\delta = 0$, and the consumer
 tick can be no earlier than the tick at which the reader may legally look back
 to $t$, namely $t + |\delta'|$ with $|\delta'| \le D$. Symmetrically if
-$q = r$ then $\delta \ge \dist{p}{r} = D$ and $\delta' = 0$, so
+$q = r$ then $\delta \ge \lag{p}{r} = D$ and $\delta' = 0$, so
 $t' - t \ge D$. In both cases $t' - t \ge \min(D, D) = D$ once the constraint
 that the value must actually cross from $p$ to $r$ is imposed.
 \end{proof}
@@ -257,6 +257,48 @@ as its tasks have slack, and stops --- in a blocking get --- on reaching a
 task with none. A barrier-synchronised execution zeroes all slack at every
 tick boundary, which is why it is slower and why its cost is set by the
 slowest process.
+
+Under a coupled schedule (\cref{def:coupled}) the available slack is not
+merely a consequence of the workload: it is bounded by the
+\gls{comm-graph}, and the bound is computable from $\cgraph$ alone.
+
+\begin{proposition}[Drift is bounded by the graph]\label{prop:drift-bound}
+Let the schedule be coupled. Then for adjacent ranks $p, q$,
+\[
+  T_p - T_q \;\le\; \lag{p}{q},
+\]
+and for any $p, u$,
+\[
+  T_p - T_u \;\le\; \pw{p}{u} .
+\]
+In particular drift within a connected component of $\cgraph$ is bounded by
+its weighted diameter $\max_{p,u} \pw{p}{u}$, the largest \gls{path-weight}
+it contains, and drift between components is
+unbounded.
+\end{proposition}
+
+\begin{proof}
+For the first bound, suppose $\proc{p}$ has completed tick $T_p$. By
+\cref{def:coupled} that required $\clk{q} \ge T_p - \lag{p}{q}$ for every
+$q \in \nbr{p}$, and $\clk{q} \ge T_p - \lag{p}{q}$ gives
+$T_q \ge T_p - \lag{p}{q}$, which rearranges to the claim.
+
+For the second, let $p = z_0, \dots, z_k = u$ be a path of least weight,
+which exists whenever $\pw{p}{u} < \infty$; otherwise the bound is vacuous.
+Summing the first bound along the path telescopes:
+\[
+  T_p - T_u \;=\; \sum_{m=1}^{k} \bigl(T_{z_{m-1}} - T_{z_m}\bigr)
+  \;\le\; \sum_{m=1}^{k} \lag{z_{m-1}}{z_m} \;=\; \pw{p}{u}. \qedhere
+\]
+\end{proof}
+
+\begin{remark}[The metric arrives where it is wanted]
+\Cref{prop:drift-bound} is the one place a triangle inequality is used, and
+$W$ supplies it for free: a least-path weight satisfies it by construction
+(\cref{rem:path-weight-metric}). Requiring the same of $w$, as an axiom on
+data the application supplies, would buy nothing and rule out legitimate
+configurations --- see \cref{conv:lag-not-metric}.
+\end{remark}
 
 \begin{theorem}[Makespan]\label{thm:makespan}
 Let $\cpath(\Hist)$ be the maximum, over directed paths $\pi$ in
@@ -311,7 +353,7 @@ satisfies
 where $H_p$ is the largest effective time targeted by any put issued so far
 towards $p$, and
 \[
-  L_p \;\defeq\; \min_{q \in \nbr{p}} \bigl(\kn{p}{q} - \dist{p}{q}\bigr),
+  L_p \;\defeq\; \min_{q \in \nbr{p}} \bigl(\kn{p}{q} - \lag{p}{q}\bigr),
   \qquad L_p \defeq \clk{p} \text{ when } \nbr{p} = \emptyset .
 \]
 \end{theorem}
@@ -319,41 +361,48 @@ towards $p$, and
 \begin{proof}
 A version exists only if created by \textsc{Apply}, so no live version exceeds
 $H_p$. For the lower end, any version with $\eff < L_p$ satisfies
-$\kn{p}{q} - \dist{p}{q} > \eff$ for every $q \in \nbr{p}$; together with
+$\kn{p}{q} - \lag{p}{q} > \eff$ for every $q \in \nbr{p}$; together with
 $\clk{p} \ge \eff$ (which holds since $L_p \le \clk{p}$ by
 \cref{inv:l1-clock}) and the absence of pending gets --- guaranteed by
 \cref{thm:discard-safety}, since such a get would be illegal --- the premises
 of \textsc{Retire} hold, and \textsc{Evict} follows by \ref{f:progress}.
 \end{proof}
 
-\begin{corollary}[Memory is linear in drift]\label{cor:space-drift}
-Suppose the execution has bounded drift $\Theta$ (\cref{def:bounded-drift}),
-the horizon bound of \cref{res:horizon} is $\Theta_{\max}$, and heartbeats are
-delivered promptly enough that $\kn{p}{q} \ge \clk{q} - \lambda$ for a
-constant $\lambda$. Then
+\begin{corollary}[Memory is bounded by the local neighbourhood]
+\label{cor:space-drift}
+Let the schedule be coupled, let $\delta_{\max}$ be the horizon bound of
+\cref{res:horizon}, and suppose \glspl{heartbeat} are delivered promptly
+enough that $\kn{p}{q} \ge \clk{q} - \lambda$ for a constant $\lambda$. Then
 \[
   \bigl|\{\eff : \Vst{p}{\eff} \ne \Absent\}\bigr|
-  \;\le\; 2\Theta + \Theta_{\max} + \diam_p + \lambda + 1 .
+  \;\le\; 3\diam_p + \delta_{\max} + \lambda + 1 .
 \]
-In particular the live-version count is independent of the length of the run.
+In particular the live-version count is independent of the length of the run,
+and of the size of the system beyond rank $p$'s own neighbourhood.
 \end{corollary}
 
 \begin{proof}
-$H_p \le \max_{q \in \nbr{p} \cup \{p\}} \clk{q} + \Theta_{\max}
- \le \clk{p} + \Theta + \Theta_{\max}$ by bounded drift and
-\cref{res:horizon}. And
-$L_p \ge \min_q (\clk{q} - \lambda) - \diam_p
- \ge \clk{p} - \Theta - \lambda - \diam_p$. Subtract.
+By \cref{prop:drift-bound}, $\clk{q} \le \clk{p} + \lag{p}{q} \le \clk{p} +
+\diam_p$ for every $q \in \nbr{p}$. Hence
+$H_p \le \max_{q \in \nbr{p} \cup \{p\}} \clk{q} + \delta_{\max}
+ \le \clk{p} + \diam_p + \delta_{\max}$ using \cref{res:horizon}. In the other
+direction the same proposition gives $\clk{q} \ge \clk{p} - \diam_p$, so
+\[
+  L_p \;\ge\; \min_{q \in \nbr{p}} (\clk{q} - \lambda) - \diam_p
+      \;\ge\; \clk{p} - 2\diam_p - \lambda .
+\]
+Subtracting and adding one gives the bound.
 \end{proof}
 
 \Cref{cor:space-drift} is the formal content of the claim in \cite{dstm2026}
 that discarding \glspl{version} ``is a memory management optimization $\dots$
 without changing the semantics of the program''. Both halves are theorems:
 semantics-preservation is \cref{thm:discard-safety}, the bound is
-\cref{cor:space-drift}. Each term says something operational --- $2\Theta$
-that memory is the price of \gls{drift}, $\Theta_{\max}$ that writing far into
-the future costs, $\diam_p$ that distant neighbours cost, $\lambda$ that a
-lazy \gls{heartbeat} implementation costs memory rather than correctness.
+\cref{cor:space-drift}. Each term is operational --- $3\diam_p$ that memory
+is the price of the largest \gls{lag} in the neighbourhood, $\delta_{\max}$
+that writing far into the future costs, $\lambda$ that a lazy
+\gls{heartbeat} implementation costs memory rather than correctness. No term
+refers to the system beyond rank $p$'s own neighbours.
 
 % ===========================================================================
 \subsection{Summary}
@@ -380,10 +429,10 @@ Effective time in the cell identity
 Delta of an operation
  & weight of a producer--consumer edge
  & \cref{lem:edge-span} \\
-(M2), $\dist{p}{q} \ge 1$
+(G3), $\lag{p}{q} \ge 1$
  & every cycle of $\cgraph$ has positive weight
  & \cref{thm:acyclic} \\
-Distance matrix
+Communication graph
  & declared lookahead; pipeline depth
  & \cref{thm:pipeline-depth} \\
 Process drift

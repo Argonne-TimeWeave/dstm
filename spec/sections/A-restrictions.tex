@@ -25,14 +25,14 @@ $\delta$ the \gls{delta} and $\eff = t + \delta$ the \gls{effective-time}.
    passed it''. \\
 
 \cref{res:lookahead}
- & put: $\delta \ge \dist{p}{q}$
+ & put: $\delta \ge \lag{p}{q}$
  & Makes \textsc{Publish} sound: a neighbour known to be at $\kn{p}{q}$ cannot
-   write earlier than $\kn{p}{q} + \dist{p}{q}$. \\
+   write earlier than $\kn{p}{q} + \lag{p}{q}$. \\
 
 \cref{res:staleness}
- & get: $|\delta| \le \dist{p}{q}$
+ & get: $|\delta| \le \lag{p}{q}$
  & Makes \textsc{Retire} sound: a neighbour cannot read further back than
-   $\kn{p}{q} - \dist{p}{q}$. \\
+   $\kn{p}{q} - \lag{p}{q}$. \\
 
 \cref{res:phase}
  & within a process, every put on $(q,\eff)$ precedes every get on $(q,\eff)$
@@ -45,7 +45,7 @@ $\delta$ the \gls{delta} and $\eff = t + \delta$ the \gls{effective-time}.
    and results vary between runs. \\
 
 \cref{res:horizon}
- & $\delta \le \Theta_{\max}$ for puts
+ & $\delta \le \delta_{\max}$ for puts
  & Bounds live versions. Affects no value, only memory. \\
 
 \cref{res:collective}
@@ -79,9 +79,9 @@ a debug configuration and out of production builds.
 \midrule
 \cref{res:monotone}       & none & reject $t < \clk{p}$ in put/get
   & $O(1)$ \\
-\cref{res:lookahead}      & none & reject $\delta < \dist{p}{q}$; the matrix
+\cref{res:lookahead}      & none & reject $\delta < \lag{p}{q}$; the matrix
   lookup is already performed nearby & $O(1)$ \\
-\cref{res:staleness}      & none & reject $|\delta| > \dist{p}{q}$
+\cref{res:staleness}      & none & reject $|\delta| > \lag{p}{q}$
   & $O(1)$ \\
 \cref{res:phase}          & partial: \code{abort()} on apply to a
   non-writable version, which detects it late and only sometimes
@@ -117,27 +117,27 @@ undetectable.}
 \cref{lem:store-welldef} (store is well defined)
  & \cref{res:write-disjoint} \\
 \cref{thm:write-closure} (write closure)
- & \cref{res:monotone}, \cref{res:lookahead}, \cref{res:phase}; (M2), (M3) \\
+ & \cref{res:monotone}, \cref{res:lookahead}, \cref{res:phase}; (G2), (G3) \\
 \cref{thm:immutability} (immutability)
  & via \cref{thm:write-closure} \\
 \cref{thm:discard-safety} (discard safety)
- & \cref{res:monotone}, \cref{res:staleness}; (M3) \\
+ & \cref{res:monotone}, \cref{res:staleness}; (G2) \\
 \cref{thm:read-soundness} (reads match $\StoreH$)
  & \cref{thm:write-closure}, \cref{res:write-disjoint} \\
 \cref{thm:determinism} (determinacy)
  & all of the mechanical group, plus \cref{res:write-disjoint} \\
 \cref{thm:deadlock-freedom} (no deadlock)
- \& (M2); fairness \ref{f:delivery}--\ref{f:clock} \\
+ \& (G3); fairness \ref{f:delivery}--\ref{f:clock} \\
 \cref{thm:barrier-correct} (termination)
  & \cref{res:collective}, \cref{res:terminate} \\
 \cref{thm:acyclic} (schedulability)
- & \cref{res:lookahead}, \cref{res:phase}; (M2) \\
+ & \cref{res:lookahead}, \cref{res:phase}; (G3) \\
 \cref{thm:space-bound} (memory bound)
  & \cref{res:horizon}, \cref{thm:discard-safety} \\
 \bottomrule
 \end{tabularx}
-\caption{Dependency of the results on the restrictions. (M2) --- every
-reachable distance is at least one --- appears in three separate results and
+\caption{Dependency of the results on the restrictions. (G3) --- every
+channel lag is at least one --- appears in three separate results and
 is the single most load-bearing well-formedness condition.}
 \label{tab:result-deps}
 \end{table}

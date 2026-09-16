@@ -117,7 +117,7 @@ The two \glspl{operation} differ in the gap between \gls{issue} and
 
 \begin{remark}[Blocking is where drift is absorbed]
 A get is the only place a DSTM program waits, and its duration is exactly how
-far the reader has run ahead of the producer it reads. Versioning, distance
+far the reader has run ahead of the producer it reads. Versioning, lag
 bounds and \glspl{heartbeat} all exist to make that wait as short as the
 application's real data dependence requires.
 \end{remark}
@@ -169,7 +169,7 @@ $\work{p}{t} \ge 0$ is the wall-clock duration of that computation.
        (2.55,2.35) -- (4.45,2.35)
        node[midway,below=4pt,text=dstmamber]{drift of $r_0$ over $r_2$};
 \end{tikzpicture}
-\caption{An execution as a task grid, for a four-process ring with all distances
+\caption{An execution as a task grid, for a four-process ring with all lags
 equal to $1$. Solid edges are puts (forward in time, into a neighbour's
 region); dashed edges are gets (backward in time, out of a neighbour's
 region). Process $r_0$ has reached tick $4$ while $r_2$ is still at tick $2$:
@@ -180,20 +180,28 @@ a barrier. The edges, not the rows, are what constrain the schedule.}
 
 \Cref{fig:task-grid} makes the central claim visible: rows are independent,
 and the only coupling is the edges, every one of which spans at least one tick
-because every \gls{distance} is at least one. A process is never blocked by
+because every \gls{lag} is at least one. A process is never blocked by
 \emph{where} its neighbours are, only by \emph{what} they have already
 produced.
 
-\begin{definition}[Bounded drift]\label{def:bounded-drift}
-An execution has \emph{bounded drift} $\Theta$ when
-$|\drift{p}{q}| \le \Theta$ for every $p$ and every $q \in \nbr{p}$
-throughout. Drift between non-neighbours is unconstrained and unobservable.
+Drift is not bounded by the model, but it is bounded by the
+\gls{comm-graph} whenever the program communicates each tick. That hypothesis
+is worth naming.
+
+\begin{definition}[Coupled schedule]\label{def:coupled}
+A schedule is \emph{coupled} when, at every tick $t$ it executes, each process
+$\proc{p}$ completes a \gls{get} whose target \gls{version} cannot be
+published until $\clk{q} \ge t - \lag{p}{q}$ for every $q \in \nbr{p}$. Write
+$T_p$ for the greatest tick $\proc{p}$ has completed.
 \end{definition}
 
-Drift is not bounded by the model but by the application's own data
-dependences: a process reading from a neighbour every tick cannot outrun it by
-more than the \gls{distance} between them. \Cref{thm:space-bound} shows memory
-consumption is a function of drift, which is the reason to care.
+Both standard idioms are coupled, for slightly different reasons. Under the
+\gls{push-model} a process reads its own region at $\delta = 0$, so publishing
+$\ver{p}{t}$ requires $\kn{p}{q} + \lag{p}{q} > t$ directly. Under the
+\gls{pull-model} it reads $\ver{q}{t - \lag{p}{q}}$, whose publication
+requires $\clk{q} \ge t - \lag{p}{q}$ by the local-clock clause.
+\Cref{prop:drift-bound} turns this into a bound computed from $\cgraph$ alone,
+and \cref{cor:space-drift} turns that into a bound on memory.
 
 % ===========================================================================
 \subsection{Session lifecycle}
@@ -225,7 +233,7 @@ consumption is a function of drift, which is the reason to care.
           inner sep=5pt,label={[text=dstmteal,font=\scriptsize]above:session}] {};
   \end{scope}
 \end{tikzpicture}}
-\caption{Session lifecycle. The distance matrix and every region are fixed
+\caption{Session lifecycle. The \gls{comm-graph} and every region are fixed
 between \code{dstm\_start} and \code{dstm\_fini}; changing topology means
 closing the session and opening another.}
 \label{fig:lifecycle}
@@ -250,8 +258,8 @@ benchmark applications in \cite{dstm2026} use one of them exclusively.
  & \textbf{Pull} & \textbf{Push} \\
 \midrule
 Producer $p$ writes & own region, $\delta = 0$
-                    & neighbour $q$'s region, $\delta = +\dist{p}{q}$ \\
-Consumer $q$ reads  & $p$'s region, $\delta = -\dist{p}{q}$
+                    & neighbour $q$'s region, $\delta = +\lag{p}{q}$ \\
+Consumer $q$ reads  & $p$'s region, $\delta = -\lag{p}{q}$
                     & own region, $\delta = 0$ \\
 Data movement       & on demand, at read time & eager, at write time \\
 Messages per pair   & two (request, reply)    & one \\
@@ -260,8 +268,8 @@ Messages per pair   & two (request, reply)    & one \\
 \end{center}
 
 They look like opposites, but the value produced by $\proc{p}$ at tick $t$
-becomes available to $\proc{q}$ at tick $t + \dist{p}{q}$ in both cases: the
-\gls{distance}, not the direction of data movement, sets the pipeline depth.
+becomes available to $\proc{q}$ at tick $t + \lag{p}{q}$ in both cases: the
+\gls{lag}, not the direction of data movement, sets the pipeline depth.
 \Cref{thm:pipeline-depth} states this precisely. The choice is therefore a
 communication-cost decision --- one message versus two --- never a semantic
 one.

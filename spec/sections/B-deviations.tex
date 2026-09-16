@@ -28,11 +28,11 @@ Each entry carries a class:
 \toprule
 \textbf{ID} & \textbf{Class} & \textbf{Summary} & \textbf{Affects} \\
 \midrule
-\ref{dev:zero-distance}    & soundness     & $\dist{p}{q}=0$ off-diagonal accepted but treated as absence of a channel & \cref{prop:metric} \\
+\ref{dev:zero-distance}    & soundness     & $\lag{p}{q}=0$ off-diagonal accepted but treated as absence of a channel & \cref{def:comm-graph} \\
 \ref{dev:asymmetric}       & soundness     & asymmetric matrices accepted, only one row consulted & \cref{def:comm-graph} \\
 \ref{dev:monotone-origin}  & soundness     & monotone origin time never enforced & \cref{res:monotone} \\
 \ref{dev:write-disjoint}   & soundness     & write-disjointness never enforced & \cref{thm:determinism} \\
-\ref{dev:lookahead-uncheck}& soundness     & $\delta$/distance contract unstated and unchecked & \crefrange{thm:write-closure}{thm:discard-safety} \\
+\ref{dev:lookahead-uncheck}& soundness     & $\delta$/lag contract unstated and unchecked & \crefrange{thm:write-closure}{thm:discard-safety} \\
 \ref{dev:destroy-lifetime} & soundness     & destroy frees a recycled extent, non-collectively, while peers hold pointers & \cref{def:addressability} \\
 \ref{dev:clock-width}      & latent        & clock stored as \code{int}, compared against \code{int64\_t} & \cref{def:local-clock} \\
 \ref{dev:cmp-truncation}   & latent        & \code{int64\_t} difference truncated to \code{int} in comparator & --- \\
@@ -56,11 +56,11 @@ Each entry carries a class:
 \begin{deviation}[Zero distance means unreachable]\label{dev:zero-distance}
 \textbf{Class:} soundness.
 
-\textbf{Statement.} (M2) of \cref{prop:metric} requires
-$\dist{p}{q}\ge 1$ for reachable $p \ne q$. The implementation accepts
-$\dist{p}{q}=0$ from the public constructor and then treats such a pair as
+\textbf{Statement.} (G3) of \cref{def:comm-graph} requires
+$\lag{p}{q}\ge 1$ for reachable $p \ne q$. The implementation accepts
+$\lag{p}{q}=0$ from the public constructor and then treats such a pair as
 \emph{unreachable}: every loop that scans the \gls{neighbourhood} skips entries with
-$\dist{p}{q} \le 0$.
+$\lag{p}{q} \le 0$.
 
 \textbf{Evidence.} \srcref{distance.c}{655}--\srcref{distance.c}{662} validates
 only $\Dmat_{ii}=0$ and $\Dmat_{ij}\ge-1$, so a zero off-diagonal passes. The
@@ -77,10 +77,10 @@ path of \cref{thm:write-closure} at best, a lost update at worst. The claim in
 \cite{dstm2026} that ``a distance of 0 between all \glspl{rank} is a correct
 setup'' is therefore false as implemented: that configuration is unsound, not
 merely unoptimised. The intended reading --- all-to-all synchronisation every
-timestep --- is $\dist{p}{q}=1$, which \code{dstm\_distance\_create\_complete}
+timestep --- is $\lag{p}{q}=1$, which \code{dstm\_distance\_create\_complete}
 already produces.
 
-\textbf{Fix.} Reject $\dist{p}{q}=0$ for $p \ne q$ in
+\textbf{Fix.} Reject $\lag{p}{q}=0$ for $p \ne q$ in
 \code{dstm\_distance\_create\_from\_matrix}, and align the header text with
 the $-1$ sentinel.
 
@@ -98,18 +98,18 @@ of an asymmetric pair are never reconciled.
 
 \textbf{Evidence.} \code{dstm\_distance\_create\_from\_matrix} performs no
 symmetry check; \srcref{dstm.h}{251} explicitly states entries ``do not need
-to be symmetric''. Both guards read $\dist{\text{self}}{i}$ only:
+to be symmetric''. Both guards read $\lag{\text{self}}{i}$ only:
 \srcref{ops.c}{89} and \srcref{ops.c}{152}. \cite{dstm2026} states
 ``distances are assumed symmetrical''.
 
-\textbf{Consequence.} With $\dist{p}{q} < \dist{q}{p}$, $\proc{q}$ retires
-\glspl{version} on its own larger distance while $\proc{p}$ may still read
+\textbf{Consequence.} With $\lag{p}{q} < \lag{q}{p}$, $\proc{q}$ retires
+\glspl{version} on its own larger lag while $\proc{p}$ may still read
 further back, so a legal get can target an evicted version and
 \cref{thm:discard-safety} fails. \code{dstm\_dgraph\_derive\_distance}
 symmetrises explicitly, which is why the dgraph path has not exposed this.
 
 \textbf{Fix.} Enforce symmetry at construction, or replace both guard lookups
-with $\max(\dist{p}{q}, \dist{q}{p})$ and drop (G2).
+with $\max(\lag{p}{q}, \lag{q}{p})$ and drop (G2).
 
 \textbf{Test.} \code{create\_from\_matrix} with an asymmetric pair returns
 \code{-DSTM\_EINVAL}.
@@ -163,11 +163,11 @@ idiom (\cref{sec:gloss-idioms}) discharges the restriction structurally, so
 conforming applications pay nothing in release builds.
 \end{deviation}
 
-\begin{deviation}[The delta/distance contract is unstated]\label{dev:lookahead-uncheck}
+\begin{deviation}[The delta/lag contract is unstated]\label{dev:lookahead-uncheck}
 \textbf{Class:} soundness.
 
-\textbf{Statement.} \Cref{res:lookahead} ($\delta \ge \dist{p}{q}$ for remote
-puts) and \cref{res:staleness} ($|\delta| \le \dist{p}{q}$ for remote \glspl{get})
+\textbf{Statement.} \Cref{res:lookahead} ($\delta \ge \lag{p}{q}$ for remote
+puts) and \cref{res:staleness} ($|\delta| \le \lag{p}{q}$ for remote \glspl{get})
 are the assumptions that make both promotion guards sound. Neither appears in
 the header documentation, in the source comments, or in \cite{dstm2026}, and
 neither is checked.
@@ -182,15 +182,15 @@ contract are \srcref{ops.c}{99} and \srcref{ops.c}{163}.
 published \gls{version}. Violating \cref{res:staleness} targets an evicted
 one, which does not fail: the version lookup returns nothing, the request
 never completes, and the caller blocks forever inside \code{dstm\_get}. A
-\gls{delta} smaller than the \gls{distance} therefore hangs with no
+\gls{delta} smaller than the \gls{lag} therefore hangs with no
 diagnostic.
 
 \textbf{Fix.} Document both bounds in \code{dstm.h}; check them in
 \code{dstm\_put} and \code{dstm\_get}, returning \code{-DSTM\_EDOM}. The check
 is two comparisons against a matrix lookup already performed nearby.
 
-\textbf{Test.} A remote put with $0 < \delta < \dist{p}{q}$ and a remote get
-with $|\delta| > \dist{p}{q}$ both return \code{-DSTM\_EDOM}.
+\textbf{Test.} A remote put with $0 < \delta < \lag{p}{q}$ and a remote get
+with $|\delta| > \lag{p}{q}$ both return \code{-DSTM\_EDOM}.
 \end{deviation}
 
 \begin{deviation}[Destruction frees a recycled extent, non-collectively]

@@ -46,35 +46,37 @@
 %  Other base sets
 % ---------------------------------------------------------------------------
 \newcommand{\Time}{\mathbb{T}}                   % logical (simulation) time
-\newcommand{\Addr}{\mathcal{A}}                  % address space
-\newcommand{\Addrof}[1]{\Addr_{#1}}              % address space of rank #1
+\newcommand{\Addr}{\mathcal{A}}                  % the global address space
+\newcommand{\Addrof}[1]{\Addr_{#1}}              % local address space of rank #1
+\newcommand{\gaddr}[2]{(#1,#2)}                  % a global address
 \newcommand{\Handles}{\mathcal{H}}               % allocation handles
 \newcommand{\allocof}[1]{\mathit{alloc}_{#1}}    % rank #1's allocation map
 \newcommand{\extent}[2]{\mathit{ext}_{#1}(#2)}   % addresses held by a handle
 \newcommand{\live}[1]{\mathit{Live}_{#1}}        % the allocated addresses
 \newcommand{\Bytes}{\mathbb{B}}                  % bytes
 \newcommand{\Values}{\mathbb{V}}                 % byte strings
-\newcommand{\Ptrs}{\mathit{Ptr}}                 % pointers
 \newcommand{\Cells}{\mathit{Cell}}               % versioned cells
 \newcommand{\Ops}{\mathcal{O}}                   % operations
 \newcommand{\Msgs}{\mathcal{M}}                  % messages
 
 % ---------------------------------------------------------------------------
-%  Communication graph and the induced distance, both on ranks
+%  Communication graph
 %
-%    * the graph (R,E,w) says which ranks may exchange operations and what
-%      each channel costs. E is sparse; DSTM exploits that.
-%    * d is the extended metric E induces. It is total and is *not*
-%      adjacency: two ranks may be at finite distance sharing no channel.
+%  (R,E,w) says which ranks may exchange operations and what each channel
+%  costs in simulated time. That cost is the channel's *lag*. It is not a
+%  metric and is not required to be one: no triangle inequality is assumed.
+%
+%  The path weight W is derived, appears only in the drift bound, and is a
+%  metric by construction -- which is the only place a metric is wanted.
 % ---------------------------------------------------------------------------
 \newcommand{\cgraph}{\mathcal{G}}                % the communication graph
-\newcommand{\edges}{E}                           % its edge set
-\newcommand{\ew}[2]{w(#1,#2)}                    % channel weight on an edge
-\newcommand{\dist}[2]{d(#1,#2)}                  % the induced distance
+\newcommand{\edges}{E}                           % its channel set
+\newcommand{\lag}[2]{w(#1,#2)}                   % lag of the channel (#1,#2)
+\newcommand{\pw}[2]{W(#1,#2)}                    % least path weight
 \newcommand{\Dmat}{\mathbf{D}}                   % API-level matrix encoding
-\newcommand{\noedge}{\bot}                       % absence of an edge
+\newcommand{\noedge}{\bot}                       % absence of a channel
 \newcommand{\nbr}[1]{N(#1)}                      % neighbourhood (adjacency)
-\newcommand{\diam}{\Delta}                       % max distance in a neighbourhood
+\newcommand{\diam}{\Delta}                       % greatest lag in a neighbourhood
 
 % ---------------------------------------------------------------------------
 %  Time: clocks, origin/delta/effective time, drift
@@ -164,7 +166,7 @@
 \newcommand{\cpath}{\mathrm{CP}}                 % critical path length
 \newcommand{\makespan}{\mathrm{MS}}
 \newcommand{\slack}[2]{\mathrm{slack}(#1,#2)}
-\newcommand{\work}[2]{w(#1,#2)}                  % work of a task
+\newcommand{\work}[2]{\mathit{work}(#1,#2)}      % work of a task (not the lag w)
 
 % ---------------------------------------------------------------------------
 %  Layer names

@@ -125,7 +125,7 @@ whose \gls{origin-time} exceeds the clock.
 \noindent\srcrefr{ops.c}{608}{636} and \srcrefr{ops.c}{677}{720}. The
 $\delta = 0 \Rightarrow q = p$ side conditions are the \code{-DSTM\_EDOM}
 checks at \srcref{ops.c}{598} and \srcref{ops.c}{667}. Note what the rules do
-\emph{not} require: neither checks $\delta$ against $\dist{p}{q}$. That is
+\emph{not} require: neither checks $\delta$ against $\lag{p}{q}$. That is
 \cref{res:lookahead,res:staleness}, and it is assumed, not verified
 \devmark{dev:lookahead-uncheck}.
 
@@ -211,7 +211,7 @@ reader has already observed.
   {\Vst{p}{\eff} = \Wr \\
    \nexists\, \varrho \in \Pend{p}.\;
      \varrho \in \{\mathsf{lput},\mathsf{iput}\} \wedge \opeff{\varrho} = \eff \\\\
-   \forall q \in \nbr{p}.\;\ \kn{p}{q} + \dist{p}{q} > \eff \\
+   \forall q \in \nbr{p}.\;\ \kn{p}{q} + \lag{p}{q} > \eff \\
    \clk{p} \ge \eff}
   {\Vst{p}{\eff} \mathrel{{:}{=}} \Rd}
 \end{mathpar}
@@ -225,7 +225,7 @@ local-clock clause at \srcref{ops.c}{112}.
   {\Vst{p}{\eff} = \Rd \\
    \nexists\, \varrho \in \Pend{p}.\;
      \varrho \in \{\mathsf{lget},\mathsf{iget}\} \wedge \opeff{\varrho} = \eff \\\\
-   \forall q \in \nbr{p}.\;\ \kn{p}{q} - \dist{p}{q} > \eff \\
+   \forall q \in \nbr{p}.\;\ \kn{p}{q} - \lag{p}{q} > \eff \\
    \clk{p} \ge \eff}
   {\Vst{p}{\eff} \mathrel{{:}{=}} \Dc}
 \end{mathpar}
@@ -241,9 +241,9 @@ local-clock clause at \srcref{ops.c}{112}.
 \noindent\srcrefr{ops.c}{201}{205}.
 
 The two neighbour clauses are the design in one line. A neighbour $q$ believed
-to be at $\kn{p}{q}$ can still write as early as $\kn{p}{q} + \dist{p}{q}$ and
-still read as far back as $\kn{p}{q} - \dist{p}{q}$. Publication waits for the
-first bound to pass $\eff$, retirement for the second: one \gls{distance}
+to be at $\kn{p}{q}$ can still write as early as $\kn{p}{q} + \lag{p}{q}$ and
+still read as far back as $\kn{p}{q} - \lag{p}{q}$. Publication waits for the
+first bound to pass $\eff$, retirement for the second: one \gls{lag}
 serving as a forward horizon for writes and a backward horizon for reads.
 
 \subsubsection*{Serving reads}
@@ -367,15 +367,15 @@ promotion.
 
 \emph{Case $r \ne p$.} Then $r \in \nbr{p}$, since \cref{res:lookahead}
 requires $r \in \nbr{p}$. The \rn{Publish} premise gives
-$\kn{p}{r} + \dist{p}{r} > \eff$, and \cref{inv:l1-clock} gives
+$\kn{p}{r} + \lag{p}{r} > \eff$, and \cref{inv:l1-clock} gives
 $\clk{r} \ge \kn{p}{r}$, hence
 \[
-  \clk{r} + \dist{r}{p} \;\ge\; \kn{p}{r} + \dist{p}{r} \;>\; \eff,
+  \clk{r} + \lag{r}{p} \;\ge\; \kn{p}{r} + \lag{p}{r} \;>\; \eff,
 \]
-using (M3) for $\dist{r}{p} = \dist{p}{r}$. By \cref{res:monotone} the origin
+using (G2) for $\lag{r}{p} = \lag{p}{r}$. By \cref{res:monotone} the origin
 time of $w$ is at least $\clk{r}$ as it stands now, and by
-\cref{res:lookahead} $\opdelta{w} \ge \dist{r}{p}$. Therefore
-$\opeff{w} = \optime{w} + \opdelta{w} \ge \clk{r} + \dist{r}{p} > \eff$, so
+\cref{res:lookahead} $\opdelta{w} \ge \lag{r}{p}$. Therefore
+$\opeff{w} = \optime{w} + \opdelta{w} \ge \clk{r} + \lag{r}{p} > \eff$, so
 $w$ does not target $\eff$. Contradiction.
 
 \emph{Case $r = p$.} The \rn{Publish} premise gives $\clk{p} \ge \eff$. By
@@ -389,9 +389,9 @@ issuing a put on $(p,\eff)$ after such a get.
 \end{proof}
 
 \Cref{thm:write-closure} consumes all four mechanical restrictions, and is
-where (M2) and (M3) earn their place. Dropping symmetry breaks the inequality
-chain in the first case \devmark{dev:asymmetric}; dropping (M2) makes the
-second case's strictness fail for a neighbour at distance zero
+where (G2) and (G3) earn their place. Dropping symmetry breaks the inequality
+chain in the first case \devmark{dev:asymmetric}; dropping (G3) makes the
+second case's strictness fail for a neighbour at lag zero
 \devmark{dev:zero-distance}.
 
 \begin{corollary}[Immutability]\label{thm:immutability}
@@ -416,12 +416,12 @@ targeting $(p,\eff)$.
 Let $g$ be such a get, issued by $r$.
 
 \emph{Case $r \ne p$.} Then $r \in \nbr{p}$ by \cref{res:staleness}. The
-\rn{Retire} premise gives $\kn{p}{r} - \dist{p}{r} > \eff$, and
+\rn{Retire} premise gives $\kn{p}{r} - \lag{p}{r} > \eff$, and
 \cref{inv:l1-clock} gives $\clk{r} \ge \kn{p}{r}$, so
-$\clk{r} - \dist{r}{p} > \eff$ by (M3). By \cref{res:monotone},
+$\clk{r} - \lag{r}{p} > \eff$ by (G2). By \cref{res:monotone},
 $\optime{g} \ge \clk{r}$; by \cref{res:staleness},
-$\opdelta{g} \ge -\dist{r}{p}$. Hence
-$\opeff{g} \ge \clk{r} - \dist{r}{p} > \eff$.
+$\opdelta{g} \ge -\lag{r}{p}$. Hence
+$\opeff{g} \ge \clk{r} - \lag{r}{p} > \eff$.
 
 \emph{Case $r = p$.} The premise gives $\clk{p} \ge \eff$, and
 \cref{res:staleness} forces $\opdelta{g} = 0$ for a local get, so
@@ -483,15 +483,15 @@ either advances past $\eff$ or enters the barrier, and in the barrier
 $\mathit{drained}_q$ removes the clause.
 
 The neighbour clause requires, for each $r \in \nbr{q}$, that
-$\kn{q}{r} > \eff - \dist{q}{r}$. By \ref{f:clock} and \ref{f:delivery} the
+$\kn{q}{r} > \eff - \lag{q}{r}$. By \ref{f:clock} and \ref{f:delivery} the
 heartbeats of \rn{Tick} raise $\kn{q}{r}$ without bound unless $r$ is
 itself permanently blocked. So define the \emph{demand relation}: a process
 blocked at effective time $\eff$ on process $\proc{q}$ demands that each
 $r \in \nbr{q}$ reach origin time strictly greater than
-$\eff - \dist{q}{r}$.
+$\eff - \lag{q}{r}$.
 
 Each step of this relation strictly decreases the demanded time, by at least
-$\dist{q}{r} \ge 1$ (M2). A cyclic wait would therefore require a chain
+$\lag{q}{r} \ge 1$ (G3). A cyclic wait would therefore require a chain
 $\eff > \eff_1 > \dots > \eff_k = \eff$, which is impossible. Since $\Ranks$
 is finite, the demand chain from any blocked process is a finite acyclic chain
 terminating at a process whose demand is vacuous, and that process makes progress
@@ -499,8 +499,8 @@ by \ref{f:clock}. Working back along the chain, every blocked process is
 eventually released.
 \end{proof}
 
-\begin{remark}[Why (M2) is not negotiable]\label{rem:zero-cycle}
-The proof consumes (M2) exactly once, essentially. Suppose $\dist{p}{q} = 0$
+\begin{remark}[Why (G3) is not negotiable]\label{rem:zero-cycle}
+The proof consumes (G3) exactly once, essentially. Suppose $\lag{p}{q} = 0$
 were permitted with its natural reading, ``visible in the same tick''. Then
 $p$'s \rn{Publish} clause at $\eff$ reads $\kn{p}{q} > \eff$ and $q$'s reads
 $\kn{q}{p} > \eff$: each must observe the other strictly beyond $\eff$ before

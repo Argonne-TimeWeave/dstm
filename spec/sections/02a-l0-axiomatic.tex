@@ -11,7 +11,7 @@ interleaving is an input.
 
 \begin{notationx}\label{not:history}
 Throughout, $\Hist$ is a history over a rank set $\Ranks$ with a distance
-well-formed \gls{comm-graph} $\cgraph$ (\cref{def:metric-closure}). We write $\Hist_{\opput}$ and
+\gls{comm-graph} $\cgraph$ (\cref{def:comm-graph}). We write $\Hist_{\opput}$ and
 $\Hist_{\opget}$ for the \glspl{put} and \glspl{get} in $\Hist$, and
 $\Hist|_p \defeq \{o \in \Hist : \opsrc{o} = p\}$ for the operations issued by
 process $\proc{p}$, totally ordered by $\po$.
@@ -57,11 +57,11 @@ Equivalently: a process never moves backwards along the timeline.
 For every put $o \in \Hist_{\opput}$ with $p = \opsrc{o}$ and
 $q = \optgt{o}$,
 \[
-  \opdelta{o} \;\ge\; \dist{p}{q},
+  \opdelta{o} \;\ge\; \lag{p}{q},
   \qquad\text{and}\qquad
   q \in \nbr{p} \ \text{ or }\ q = p .
 \]
-By (M2) the local case degenerates to $\opdelta{o} \ge 0$.
+The local case degenerates to $\opdelta{o} \ge 0$.
 \devmark{dev:lookahead-uncheck}
 \end{restr}
 
@@ -69,7 +69,7 @@ By (M2) the local case degenerates to $\opdelta{o} \ge 0$.
 For every get $o \in \Hist_{\opget}$ with $p = \opsrc{o}$ and
 $q = \optgt{o}$,
 \[
-  -\opdelta{o} \;\le\; \dist{p}{q},
+  -\opdelta{o} \;\le\; \lag{p}{q},
   \qquad\text{and}\qquad
   q \in \nbr{p} \ \text{ or }\ q = p .
 \]
@@ -83,12 +83,12 @@ may only read its current effective time.
 key to the whole model:
 
 \begin{center}
-\emph{The \gls{distance} is a lower bound on how long a write takes to
+\emph{The \gls{lag} is a lower bound on how long a write takes to
 become visible,\\ and an upper bound on how far back a read may look.}
 \end{center}
 
-A write may take longer than $\dist{p}{q}$ and a read may look back less far;
-what neither may do is beat the distance. Everything in \cref{sec:l1} is a
+A write may take longer than $\lag{p}{q}$ and a read may look back less far;
+what neither may do is beat the lag. Everything in \cref{sec:l1} is a
 consequence.
 
 \begin{restr}[Phase order]\label{res:phase}
@@ -111,7 +111,7 @@ but cannot happen.
 Let $\Hist$ satisfy \cref{res:monotone,res:lookahead,res:phase}, and let
 $g$ be a get targeting $(q,\eff)$ and $w$ a put targeting $(q,\eff)$ with
 $\opsrc{w} \ne \opsrc{g}$. If $\opsrc{w} \ne q$ then
-$\optime{w} \le \eff - \dist{\opsrc{w}}{q} < \eff$, whereas any operation
+$\optime{w} \le \eff - \lag{\opsrc{w}}{q} < \eff$, whereas any operation
 issued by $\opsrc{w}$ after a read of $(q,\eff)$ could be served has origin
 time at least $\eff$. Hence the cross-process case of the phase order is implied,
 and the per-rank statement of \cref{res:phase} is the only genuine
@@ -119,20 +119,20 @@ restriction.
 \end{proposition}
 
 \begin{proof}
-By \cref{res:lookahead}, $\opdelta{w} \ge \dist{\opsrc{w}}{q} \ge 1$ using
-(M2) and $\opsrc{w} \ne q$. Since $\opeff{w} = \optime{w} + \opdelta{w} =
+By \cref{res:lookahead}, $\opdelta{w} \ge \lag{\opsrc{w}}{q} \ge 1$ using
+(G3) and $\opsrc{w} \ne q$. Since $\opeff{w} = \optime{w} + \opdelta{w} =
 \eff$, we get $\optime{w} \le \eff - 1 < \eff$. By \cref{res:monotone} the
 \glspl{origin-time} of $\opsrc{w}$ are nondecreasing, so every put by $\opsrc{w}$
 targeting $(q,\eff)$ occurs while that process's clock is still at most
 $\eff - 1$. The publish guard of \cref{sec:l1-rules} does not fire until every
-neighbour's \gls{known-time} $\kn{q}{r}$ satisfies $\kn{q}{r} + \dist{q}{r} > \eff$,
+neighbour's \gls{known-time} $\kn{q}{r}$ satisfies $\kn{q}{r} + \lag{q}{r} > \eff$,
 which for $r = \opsrc{w}$ requires $\opsrc{w}$ to have advanced strictly past
-$\eff - \dist{q}{\opsrc{w}}$, i.e.\ past the last origin time at which it
+$\eff - \lag{q}{\opsrc{w}}$, i.e.\ past the last origin time at which it
 could have produced such a put.
 
 The remaining case is $\opsrc{w} = q \ne \opsrc{g}$, a local put on the target
 process concurrent with a remote read. By \cref{res:staleness} applied to $g$,
-$\eff \le \optime{g} - \dist{\opsrc{g}}{q} < \optime{g}$, and the read cannot
+$\eff \le \optime{g} - \lag{\opsrc{g}}{q} < \optime{g}$, and the read cannot
 be served before $q$'s own clock reaches $\eff$; a local put at $\eff$ issued
 after that point would violate \cref{res:monotone} unless it has
 $\opdelta{} = 0$ and origin exactly $\eff$, which is the case
@@ -166,7 +166,7 @@ at the same tick. The \glslink{mailbox}{mailbox idiom}
 \subsubsection*{Resource and lifecycle restrictions}
 
 \begin{restr}[Bounded horizon]\label{res:horizon}
-There is a constant $\Theta_{\max}$ such that $\opdelta{o} \le \Theta_{\max}$
+There is a constant $\delta_{\max}$ such that $\opdelta{o} \le \delta_{\max}$
 for every $o \in \Hist_{\opput}$.
 \end{restr}
 
@@ -228,7 +228,7 @@ $c = \cell{q}{\eff}{a}$. Then $c \in \fpw{w_1}$ and $c \in \fpw{w_2}$ by
 \end{proof}
 
 \Cref{def:store-h} is the whole of the DSTM memory semantics: no clocks, no
-distances, no \glspl{version}, no statuses, no messages. Those exist in
+lags, no \glspl{version}, no statuses, no messages. Those exist in
 \cref{sec:l1} solely to compute this function without a global \gls{barrier}.
 
 \begin{definition}[Read result]\label{def:read-result}
@@ -295,8 +295,8 @@ issued by a process whose clock is strictly below $\eff$ at the time, while $g$'
 issuer has clock at least $\eff$; the two are ordered by the causal chain of
 \glspl{heartbeat}, and $w$'s issue necessarily precedes $g$'s completion. Its value
 therefore depends only on reads that $\opsrc{w}$ performed at origin times
-$\le \eff - \dist{\opsrc{w}}{q} < \eff$, all of strictly smaller first
-component by (M2).
+$\le \eff - \lag{\opsrc{w}}{q} < \eff$, all of strictly smaller first
+component by (G3).
 
 \emph{Case $\opsrc{w} = \opsrc{g} = p$.} Then $\optgt{w} = q$ and
 $\opeff{w} = \opeff{g}$, so \cref{res:phase} gives $w \po g$, hence

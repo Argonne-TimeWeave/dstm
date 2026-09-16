@@ -2,20 +2,70 @@
 \label{sec:memory-model}
 
 The memory model answers one question: \emph{what may a read return?}
-Messages, clocks, distances and scheduling belong to the execution model and
-exist only to implement what follows.
+Messages, clocks, lags and scheduling belong to the execution model and exist
+only to implement what follows.
+
+It is built in four steps. A partitioned global address space is assumed
+outright; a region is a partition of it; a \gls{cell} is a global address plus
+a time coordinate; the \gls{store} maps cells to bytes. Everything
+characteristic of DSTM is in the third step.
 
 % ===========================================================================
-\subsection{The store is a map, not an array with history}
+\subsection{The partitioned global address space}
+\label{sec:pgas}
+
+DSTM does not construct its address space; it assumes one, of the kind
+provided by any PGAS runtime, and adds a coordinate to it. The assumption is
+this.
+
+\begin{axiom}[Partitioned global address space]\label{ax:pgas}
+There is a set $\Addr$ of \emph{global addresses} such that
+\begin{description}[leftmargin=2.9cm,style=nextline,font=\normalfont\bfseries]
+  \item[\textnormal{(A1) Partition}] every global address is a pair
+    $\gaddr{p}{a}$ of a rank $p \in \Ranks$ and a \emph{local address}
+    $a \in \Addrof{p}$, where $\Addrof{p} \defeq \{0, \dots, S_p - 1\}$ for
+    some $S_p > 0$:
+    \[
+      \Addr \defeq \{\, \gaddr{p}{a} : p \in \Ranks,\ a \in \Addrof{p} \,\} .
+    \]
+  \item[\textnormal{(A2) Uniqueness}] the pair is the address: $\gaddr{p}{a} =
+    \gaddr{p'}{a'}$ iff $p = p'$ and $a = a'$. Local address spaces are
+    therefore disjoint as partitions of $\Addr$, and $\Addr$ is their disjoint
+    union.
+  \item[\textnormal{(A3) Affinity}] $\gaddr{p}{a}$ has affinity to $\proc{p}$:
+    the bytes reside there, and $\proc{p}$ alone stores them.
+  \item[\textnormal{(A4) One-sidedness}] any process may name any global
+    address, and access it without the affine process executing application
+    code.
+\end{description}
+\end{axiom}
+
+\begin{definition}[Region]\label{def:region-pgas}
+The \emph{region} of rank $p$ is the partition
+$\{\, \gaddr{p}{a} : a \in \Addrof{p} \,\}$ of $\Addr$, identified with
+$\Addrof{p}$ where no confusion arises. A \gls{pointer} is a global address;
+the API encodes it as a \code{(region, offset)} pair in which the region
+identifier is the rank, which is (A1) in C.
+\end{definition}
+
+(A1)--(A2) are what your intuition for a PGAS already contains: $p$ selects
+the partition, $a$ indexes within it, and the pair names one byte-slot
+globally. (A3) is why lags are attached to ranks rather than addresses, and
+(A4) is why the interface is \code{put}/\code{get} rather than message
+passing. Nothing here is specific to DSTM --- UPC++ \cite{upcxx2019} and
+Charm++ \cite{charmpp1993} satisfy all four.
+
+% ===========================================================================
+\subsection{Versioning: one extra coordinate}
 \label{sec:store-is-a-map}
 
-``Versioned memory'' suggests a mutable array plus a log of its past states,
-so that version $\eff$ is what the array looked like at time $\eff$. That
-reading is wrong, and every subsequent confusion follows from it.
+DSTM's entire departure from \cref{ax:pgas} is to index memory by one further
+coordinate.
 
-DSTM's memory is a \emph{total map from versioned \glspl{cell} to bytes}.
-Time is a coordinate of the cell, on the same footing as the address, not an
-annotation on a location that persists across time.
+\begin{definition}[Cell]\label{def:cell-pgas}
+$\Cells \defeq \Addr \times \Time$. We write $\cell{p}{\eff}{a}$ for
+$(\gaddr{p}{a}, \eff)$.
+\end{definition}
 
 \begin{definition}[Memory model]\label{def:memory-model}
 The state of a DSTM \gls{session} is a \gls{store}
@@ -23,7 +73,12 @@ $\Store : \Cells \to \Bytes$ (\cref{def:store}). A read of
 $\cell{q}{\eff}{a}$ returns $\Store(\cell{q}{\eff}{a})$.
 \end{definition}
 
-Three properties give this map its character.
+``Versioned memory'' suggests a mutable array plus a log of its past states,
+so that version $\eff$ is what the array looked like at time $\eff$. That
+reading is wrong, and every subsequent confusion follows from it. Time is a
+\emph{coordinate of the cell}, on the same footing as the address, not an
+annotation on a location that persists across time. Three properties fix the
+consequences.
 
 \begin{definition}[Zero default]\label{def:zero-default}
 $\Store$ is total. A cell that no \gls{operation} ever writes holds the byte $0$.
@@ -203,7 +258,7 @@ and comes with sharp limits.
   that matters. This is an MPI-level assumption inherited wholesale.
 
 \item[No dynamic topology.]
-  Neither the rank set, the distance matrix, the \gls{region} sizes nor a \glslink{dgraph}{dgraph}'s
+  Neither the rank set, the \gls{comm-graph}, the \gls{region} sizes nor a \glslink{dgraph}{dgraph}'s
   edge set may change within a session (\cref{def:session}).
 \end{description}
 
@@ -237,11 +292,11 @@ Write conflict
  & detected, resolved by abort and retry
  & tolerated, resolved by rollback and antimessages \\[2pt]
 Finality of a version
- & deduced from distance and neighbour clocks
+ & deduced from channel lags and neighbour clocks
  & established at commit
  & never; any version may be undone \\[2pt]
 Reclamation
- & distance-bounded retirement
+ & lag-bounded retirement
  & garbage collection of unreachable snapshots
  & fossil collection below global virtual time \\[2pt]
 Read of unwritten cell
