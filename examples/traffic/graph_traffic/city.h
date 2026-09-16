@@ -13,6 +13,8 @@
 
 #include <stddef.h>
 
+#define SECONDS_PER_TICK 10.0
+
 struct city {
         size_t nv;              /* vertex count                         */
         size_t ne;              /* directed edge count                  */
@@ -24,6 +26,7 @@ struct city {
         size_t *esrc;           /* ne, source vertex of each edge id    */
         int    *ff_ticks;       /* ne, free-flow travel time in ticks   */
         float  *cap_tick;       /* ne, capcaity in veh/tick */
+        float  *length_m;       /* ne, physical edge length in metres   */
 
         /* Block partition, identical on every rank. */
         size_t *vtx_off;        /* world_size + 1                       */

@@ -63,6 +63,8 @@ struct car_rec {
         int32_t dst_vertex;
         int32_t depart_tick;
         int32_t hops;
+        float   routed_tt;
+        float   distance_m;
 };
 
 /* ---- Car channel (shipped EVERY tick, delta = edge_delay) ---- */
@@ -92,7 +94,7 @@ struct state_header {
 typedef char chan_assert_carhdr[(sizeof(struct car_header)   == 32) ? 1 : -1];
 typedef char chan_assert_sthdr [(sizeof(struct state_header) == 32) ? 1 : -1];
 typedef char chan_assert_ent[(sizeof(struct cong_entry) == 8) ? 1 : -1];
-typedef char chan_assert_car[(sizeof(struct car_rec) == 24) ? 1 : -1];
+typedef char chan_assert_car[(sizeof(struct car_rec) == 32) ? 1 : -1];
 
 struct car_layout {
         uint32_t cap;

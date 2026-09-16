@@ -29,9 +29,15 @@
 #   ./scale_replica.sh --dry-run
 #
 # OUTPUT
-#   results/<stamp>/runs.csv      one row per run
-#   results/<stamp>/raw/*.log     full stdout+stderr per run
-#   results/<stamp>/config.txt    what was launched
+#   results/<stamp>/runs.csv       one aggregate row per run
+#   results/<stamp>/raw/*.log      full stdout+stderr per run
+#   results/<stamp>/trips/*.csv    one row per simulated trip
+#   results/<stamp>/config.txt     what was launched
+#
+# The trip tables contain matching deterministic trip IDs, initial routed
+# travel-time estimates, experienced travel times, prediction gaps,
+# distance, VMT, and VHT. Matching trip IDs can be compared across rank
+# counts, replica modes, stale delays, and repetitions.
 set -uo pipefail
 
 # --------------------------------------------------------------------------
@@ -60,7 +66,7 @@ RANKS="${RANKS:-4 8 16 32 64 128 256}"
 MODES="${MODES:-blind stale oracle}"
 STALE_DELAYS="${STALE_DELAYS:-2 8 32}"       # only swept when mode=stale
 
-STEPS="${STEPS:-256}"
+STEPS="${STEPS:-512}"
 CARS="${CARS:-256}"
 RATE="${RATE:-256}"
 CAP="${CAP:-32}"
@@ -80,8 +86,8 @@ scale_replica.sh -- scale ranks x {blind,stale,oracle} for graph_traffic
   --modes "a b c"   replica modes                    (default "${MODES}")
   --stale-delays "2 8 32"  stale-delay sweep (stale mode only)  (default "${STALE_DELAYS}")
   --steps N         ticks                            (default ${STEPS})
-  --cars N          burst spawn count                (default ${CARS})
-  --rate N          continuous spawn rate            (default ${RATE})
+  --cars N          global initial trip count        (default ${CARS})
+  --rate N          global trips spawned per tick    (default ${RATE})
   --cap N           per-edge car cap                 (default ${CAP})
   --seed N          RNG seed                         (default ${SEED})
   --reps N          repetitions per point            (default ${REPS})
@@ -181,9 +187,13 @@ place_for() {
 # Output tree.
 # --------------------------------------------------------------------------
 STAMP="$(date +%Y%m%d-%H%M%S)"
-OUTDIR="${OUTROOT}/${STAMP}"; RAWDIR="${OUTDIR}/raw"
-CSV="${OUTDIR}/runs.csv"; CONFIG="${OUTDIR}/config.txt"
-mkdir -p "${RAWDIR}"
+OUTDIR="${OUTROOT}/${STAMP}"
+RAWDIR="${OUTDIR}/raw"
+TRIPDIR="${OUTDIR}/trips"
+CSV="${OUTDIR}/runs.csv"
+CONFIG="${OUTDIR}/config.txt"
+
+mkdir -p "${RAWDIR}" "${TRIPDIR}"
 
 {
         echo "host:         $(hostname)"
@@ -193,23 +203,25 @@ mkdir -p "${RAWDIR}"
         echo "nodefile:     ${ALLOC_NODEFILE:-<none>}"
         echo "exe:          ${EXE}"
         echo "data:         ${DATA}"
+        echo "trip tables:  ${TRIPDIR}"
         echo "mpi prefix:   ${MPI_PREFIX:-<unset>}   forwarded: ${MPI_ENV_VARS}"
         echo "ranks:        ${RANKS}"
         echo "modes:        ${MODES}"
         echo "stale delays: ${STALE_DELAYS}  (stale mode only)"
-        echo "steps:        ${STEPS}   cars: ${CARS}   rate: ${RATE}   cap: ${CAP}   seed: ${SEED}"
+        echo "steps:        ${STEPS}   global cars: ${CARS}   global rate: ${RATE}   cap: ${CAP}   seed: ${SEED}"
         echo "reps:         ${REPS}    timeout: ${TIMEOUT_S}s   max ppn: ${MAX_PPN}"
 } | tee "${CONFIG}"
 echo
 
-echo "ranks,nodes,ppn,mode,stale_delay,rep,status,run_time,mean_dur,mean_hops,arrived_pct,cohort_arrived,cohort_spawned,arrived,spawned,live,lost,blocked_pct,crossings,mean_age,stale_mean,stale_max,mib_tick_total,mib_tick_per_rank,seed,steps,cars,rate,cap" > "${CSV}"
+echo "ranks,nodes,ppn,mode,stale_delay,rep,status,run_time,mean_dur,mean_hops,arrived_pct,cohort_arrived,cohort_spawned,arrived,spawned,live,lost,blocked_pct,crossings,mean_age,stale_mean,stale_max,mib_tick_total,mib_tick_per_rank,seed,steps,cars,rate,cap,trip_table" > "${CSV}"
 
 # --------------------------------------------------------------------------
 # One run.
 # --------------------------------------------------------------------------
 run_one() {
         local np="$1" nodes="$2" ppn="$3" mode="$4" delay="$5" rep="$6"
-        local tag log launch=() cmd=() rc t0 t1 wall status delay_flag=() delay_lbl
+        local tag log trip_file launch=() cmd=() rc t0 t1 wall status
+        local delay_flag=() delay_lbl
 
         # Only stale mode consumes --stale-delay; others log "na".
         if [[ "${mode}" == "stale" ]]; then
@@ -220,7 +232,9 @@ run_one() {
                 delay_lbl="na"
                 tag="np${np}-n${nodes}x${ppn}-${mode}-r${rep}"
         fi
+
         log="${RAWDIR}/${tag}.log"
+        trip_file="${TRIPDIR}/${tag}.csv"
 
         # Batch allocation -> full recipe; interactive single node -> plain -n.
         if [[ "${ALLOC_SRC}" != "localhost" ]]; then
@@ -236,7 +250,8 @@ run_one() {
         cmd=("${launch[@]}" ${MPI_EXTRA} "${EXE}"
              --data "${DATA}" --steps "${STEPS}" --cars "${CARS}"
              --rate "${RATE}" --cap "${CAP}" --seed "${SEED}"
-             --replica-mode "${mode}" "${delay_flag[@]}" ${VERBOSITY})
+             --replica-mode "${mode}" "${delay_flag[@]}"
+             --trip-output "${trip_file}" ${VERBOSITY})
 
         printf '  np=%-4s %sx%-3s %-7s d=%-3s rep=%s ... ' "${np}" "${nodes}" "${ppn}" "${mode}" "${delay_lbl}" "${rep}"
 
@@ -309,6 +324,17 @@ run_one() {
                 status="parse_fail"
         fi
 
+        # A successful run must also produce a valid per-trip table.
+        if [[ "${status}" == ok ]]; then
+                if [[ ! -s "${trip_file}" ]]; then
+                        status="trip_output_missing"
+                elif ! grep -q \
+                        '^trip_id,mode,stale_delay,seed,origin,destination,' \
+                        "${trip_file}"; then
+                        status="trip_output_invalid"
+                fi
+        fi
+
         : "${dur:=nan}" "${hops:=nan}" "${arrived_pct:=nan}"
         : "${cohort_arr:=-1}" "${cohort_spawn:=-1}"
         : "${arr:=-1}" "${spawn:=-1}" "${live:=-1}" "${lost:=-1}"
@@ -325,7 +351,7 @@ run_one() {
         # Prefer the program's own reported time; fall back to launcher wall clock.
         : "${prog_time:=${wall}}"
 
-        echo "${np},${nodes},${ppn},${mode},${delay_lbl},${rep},${status},${prog_time},${dur},${hops},${arrived_pct},${cohort_arr},${cohort_spawn},${arr},${spawn},${live},${lost},${blk},${cross},${age},${smean},${smax},${mibt},${mibt_pr},${SEED},${STEPS},${CARS},${RATE},${CAP}" >> "${CSV}"
+        echo "${np},${nodes},${ppn},${mode},${delay_lbl},${rep},${status},${prog_time},${dur},${hops},${arrived_pct},${cohort_arr},${cohort_spawn},${arr},${spawn},${live},${lost},${blk},${cross},${age},${smean},${smax},${mibt},${mibt_pr},${SEED},${STEPS},${CARS},${RATE},${CAP},trips/${tag}.csv" >> "${CSV}"
 
         if [[ "${status}" == ok ]]; then
                 printf '%8ss  dur=%-7s hops=%-6s cohort=%s/%s (%s%%) blk=%-5s%% mib/t=%-7s\n' \
@@ -333,7 +359,10 @@ run_one() {
                         "${cohort_arr}" "${cohort_spawn}" "${arrived_pct}" \
                         "${blk}" "${mibt}"
         else
-                printf '%s (%s)\n' "${status}" "$(basename "${log}")"
+                printf '%s (log=%s trips=%s)\n' \
+                        "${status}" \
+                        "$(basename "${log}")" \
+                        "$(basename "${trip_file}")"
         fi
 }
 
@@ -368,6 +397,7 @@ done
 
 echo "csv:  ${CSV}"
 echo "logs: ${RAWDIR}"
+echo "trips: ${TRIPDIR}"
 echo
 echo "quick median-of-reps view (early-departure cohort by ranks x mode x delay):"
 awk -F, 'NR>1 && $7=="ok" {
@@ -383,17 +413,29 @@ awk -F, 'NR>1 && $7=="ok" {
         seen[$1]=1;
         combo[$4"|"$5]=1;
 }
-function med(s,   a,n,i,j,t) {
+function med(s,   a,v,n,m,i,j,t) {
         n=split(s,a," ");
-        if(!n) return "nan";
-        for(i=1;i<=n;i++)
-                for(j=i+1;j<=n;j++)
-                        if(a[j]<a[i]) {
-                                t=a[i];
-                                a[i]=a[j];
-                                a[j]=t
+        m=0;
+
+        for(i=1;i<=n;i++) {
+                if(a[i] == "" || tolower(a[i]) == "nan")
+                        continue;
+                v[++m]=a[i]+0;
+        }
+
+        if(m == 0)
+                return "nan";
+
+        for(i=1;i<=m;i++)
+                for(j=i+1;j<=m;j++)
+                        if(v[j]<v[i]) {
+                                t=v[i];
+                                v[i]=v[j];
+                                v[j]=t
                         }
-        return (n%2) ? a[(n+1)/2] : (a[n/2]+a[n/2+1])/2
+
+        return (m%2) ? v[(m+1)/2]
+                     : (v[m/2]+v[m/2+1])/2
 }
 END {
         printf "%-6s %-7s %-6s %10s %10s %11s %8s %8s %10s\n",

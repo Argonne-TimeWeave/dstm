@@ -16,10 +16,6 @@
 
 #include "city.h"
 
-/* One simulation tick, in seconds. free-flow travel time of an edge is
- * ceil((length / fspd) / SECONDS_PER_TICK), clamped to >= 1. */
-#define SECONDS_PER_TICK 10.0
-
 /* Convert length[m] and free-flow speed[m/s] to integer ticks (>= 1).
  * Missing/zero/garbage data (fspd <= 0 or length <= 0 or non-finite)
  * degrades to 1 tick -- the pre-change behavior. */
@@ -377,6 +373,7 @@ int city_load(struct city *c, const char *dir, int world_size)
         size_t            *eu = NULL, *ev = NULL, *seg = NULL, *cur = NULL;
         int               *ew = NULL, *segw = NULL;
         float             *ec = NULL, *segc = NULL;
+        float             *el = NULL, *segl = NULL;
 
         long n_nodes = read_nodes_xy(npath, &node_ids, &node_xy);
         long n_links = read_link_pairs(lpath, &la, &lb, &llen, &lfab, &lfba,
@@ -488,7 +485,8 @@ int city_load(struct city *c, const char *dir, int world_size)
         ev = malloc((ecap ? ecap : 1) * sizeof(*ev));
         ew = malloc((ecap ? ecap : 1) * sizeof(*ew));
         ec = malloc((ecap ? ecap : 1) * sizeof(*ec));
-        if (!eu || !ev || !ew || !ec) goto oom;
+        el = malloc((ecap ? ecap : 1) * sizeof(*el));
+        if (!eu || !ev || !ew || !ec || !el) goto oom;
 
         size_t dropped_self = 0;
         for (long i = 0; i < n_links; i++) {
@@ -498,13 +496,19 @@ int city_load(struct city *c, const char *dir, int world_size)
                 if (u == v) { dropped_self++; continue; }
                 /* A->B uses fspd_ab/cap_ab, B->A uses fspd_ba/cap_ba;
                  * both share length. */
+                float length_m =
+                        (isfinite(llen[i]) && llen[i] > 0.0)
+                                ? (float)llen[i] : 0.0f;
+
                 eu[en] = u; ev[en] = v;
                 ew[en] = ff_ticks_of(llen[i], lfab[i]);
                 ec[en] = cap_tick_of(lcab[i]);
+                el[en] = length_m;
                 en++;
                 eu[en] = v; ev[en] = u;
                 ew[en] = ff_ticks_of(llen[i], lfba[i]);
                 ec[en] = cap_tick_of(lcba[i]);
+                el[en] = length_m;
                 en++;
         }
         free(la); free(lb); la = lb = NULL;
@@ -521,8 +525,9 @@ int city_load(struct city *c, const char *dir, int world_size)
         seg  = malloc((en ? en : 1) * sizeof(*seg));  /* dst by row */
         segw = malloc((en ? en : 1) * sizeof(*segw)); /* ff ticks by row */
         segc = malloc((en ? en : 1) * sizeof(*segc)); /* cap/tick by row */
+        segl = malloc((en ? en : 1) * sizeof(*segl));  /* length by row */
         cur  = malloc((nv ? nv : 1) * sizeof(*cur));
-        if (!seg || !segw || !segc || !cur) goto oom;
+        if (!seg || !segw || !segc || !segl || !cur) goto oom;
         for (size_t i = 0; i < nv; i++) cur[i] = c->row_ptr[i];
         /* Scatter dst and its per-edge attributes together so segw/segc
          * stay aligned to seg before the per-row sort re-permutes them all
@@ -532,17 +537,19 @@ int city_load(struct city *c, const char *dir, int world_size)
                 seg[pos]  = ev[e];
                 segw[pos] = ew[e];
                 segc[pos] = ec[e];
+                segl[pos] = el[e];
         }
-        free(eu); free(ev); free(ew); free(ec);
-        eu = ev = NULL; ew = NULL; ec = NULL;
+        free(eu); free(ev); free(ew); free(ec); free(el);
+        eu = ev = NULL; ew = NULL; ec = NULL; el = NULL;
 
         /* --- Sort + dedup each row into fresh CSR --------------------- */
         c->dst      = malloc((en ? en : 1) * sizeof(*c->dst));
         c->esrc     = malloc((en ? en : 1) * sizeof(*c->esrc));
         c->ff_ticks = malloc((en ? en : 1) * sizeof(*c->ff_ticks));
         c->cap_tick = malloc((en ? en : 1) * sizeof(*c->cap_tick));
+        c->length_m = malloc((en ? en : 1) * sizeof(*c->length_m));
         size_t *new_row = malloc((nv + 1) * sizeof(*new_row));
-        if (!c->dst || !c->esrc || !c->ff_ticks || !c->cap_tick || !new_row)
+        if (!c->dst || !c->esrc || !c->ff_ticks || !c->cap_tick || !c->length_m || !new_row)
                 goto oom;
 
         size_t w = 0, dropped_dup = 0;
@@ -557,43 +564,53 @@ int city_load(struct city *c, const char *dir, int world_size)
                         size_t dv = seg[i];
                         int    wv = segw[i];
                         float  cv = segc[i];
+                        float  lv = segl[i];
                         size_t j  = i;
                         while (j > lo && seg[j - 1] > dv) {
                                 seg[j]  = seg[j - 1];
                                 segw[j] = segw[j - 1];
                                 segc[j] = segc[j - 1];
+                                segl[j] = segl[j - 1];
                                 j--;
                         }
                         seg[j]  = dv;
                         segw[j] = wv;
                         segc[j] = cv;
+                        segl[j] = lv;
                 }
 
                 for (size_t k = lo; k < hi; k++) {
                         if (k > lo && seg[k] == seg[k - 1]) {
-                                /* Duplicate directed edge (e.g. two links
-                                 * between the same pair). Keep the SMALLER
-                                 * free-flow time (more constraining, matches
-                                 * the distance-matrix min reduction), and
-                                 * the LARGER capacity: two parallel roads
-                                 * carry more traffic than one. */
+                                /* Keep the minimum free-flow alternative
+                                 * and its physical length. On equal
+                                 * free-flow times, keep the shorter edge.
+                                 * Capacity retains the existing maximum
+                                 * parallel-road approximation. */
                                 dropped_dup++;
-                                if (segw[k] < c->ff_ticks[w - 1])
+
+                                if (segw[k] < c->ff_ticks[w - 1] ||
+                                    (segw[k] == c->ff_ticks[w - 1] &&
+                                     segl[k] < c->length_m[w - 1])) {
                                         c->ff_ticks[w - 1] = segw[k];
+                                        c->length_m[w - 1] = segl[k];
+                                }
+
                                 if (segc[k] > c->cap_tick[w - 1])
                                         c->cap_tick[w - 1] = segc[k];
                                 continue;
                         }
+
                         c->dst[w]      = seg[k];
                         c->esrc[w]     = u;
                         c->ff_ticks[w] = segw[k];
                         c->cap_tick[w] = segc[k];
+                        c->length_m[w] = segl[k];
                         w++;
                 }
         }
         new_row[nv] = w;
-        free(seg); free(segw); free(segc); free(cur);
-        cur = NULL; seg = NULL; segw = NULL; segc = NULL;
+        free(seg); free(segw); free(segc); free(segl); free(cur);
+        cur = NULL; seg = NULL; segw = NULL; segc = NULL; segl = NULL;
         free(c->row_ptr);
         c->row_ptr = new_row;   /* compacted offsets */
         c->ne = w;
@@ -630,8 +647,8 @@ fail:
         free(la); free(lb); free(llen); free(lfab); free(lfba);
         free(lcab); free(lcba);
         free(nidx); free(oidx); free(pts);
-        free(eu); free(ev); free(ew); free(ec);
-        free(seg); free(segw); free(segc); free(cur);
+        free(eu); free(ev); free(ew); free(ec); free(el);
+        free(seg); free(segw); free(segc); free(segl); free(cur);
         city_free(c);
         return -1;
 }
@@ -645,6 +662,7 @@ void city_free(struct city *c)
         free(c->esrc);
         free(c->ff_ticks);
         free(c->cap_tick);
+        free(c->length_m);
         free(c->vtx_off);
         free(c->dense2orig);
         free(c->downtown);
