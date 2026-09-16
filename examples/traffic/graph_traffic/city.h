@@ -35,6 +35,8 @@ struct city {
          * Dense ids are assigned by ascending original id, so every rank
          * builds an identical map from the same CSV with no comms. */
         long   *dense2orig;     /* nv                                   */
+        double *x;
+        double *y;
 
         /* Destination-bias set (dense ids): the top-degree vertices.
          * Replaces the grid's central box so congestion concentrates. */
