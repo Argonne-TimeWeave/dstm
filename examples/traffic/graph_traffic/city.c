@@ -460,18 +460,36 @@ int city_load(struct city *c, const char *dir, int world_size)
          * (its position after this call) is spatially compact. */
         rcb(pts, 0, nv);
 
-        /* Emit dense2orig in the spatial order, and build the sorted
-         * (orig -> dense) index the edge remap needs. */
+        /* Emit the original ID and coordinates in dense spatial order,
+         * and build the sorted (orig -> dense) index used by the edge
+         * remapping code.
+         *
+         * Retaining x/y here is important: after RCB, dense vertex ID i
+         * no longer necessarily corresponds to row i in node.csv. */
         c->dense2orig = malloc((nv ? nv : 1) * sizeof(*c->dense2orig));
-        oidx = malloc((nv ? nv : 1) * sizeof(*oidx));
-        if (!c->dense2orig || !oidx) { free(oidx); free(pts); goto oom; }
+        c->x          = malloc((nv ? nv : 1) * sizeof(*c->x));
+        c->y          = malloc((nv ? nv : 1) * sizeof(*c->y));
+        oidx          = malloc((nv ? nv : 1) * sizeof(*oidx));
+
+        if (!c->dense2orig || !c->x || !c->y || !oidx) {
+                free(oidx);
+                free(pts);
+                goto oom;
+        }
+
         for (size_t i = 0; i < nv; i++) {
                 c->dense2orig[i] = pts[i].orig;
+                c->x[i]          = pts[i].x;
+                c->y[i]          = pts[i].y;
+
                 oidx[i].orig  = pts[i].orig;
                 oidx[i].dense = i;
         }
-        free(pts); pts = NULL;
-        qsort(oidx, nv, sizeof(*oidx), cmp_orig_index);        
+
+        free(pts);
+        pts = NULL;
+
+        qsort(oidx, nv, sizeof(*oidx), cmp_orig_index);
 
         if ((size_t)world_size > nv) {  /* same guard as the grid path */
                 fprintf(stderr, "world_size %d > %zu vertices\n",
@@ -665,6 +683,8 @@ void city_free(struct city *c)
         free(c->length_m);
         free(c->vtx_off);
         free(c->dense2orig);
+        free(c->x);
+        free(c->y);
         free(c->downtown);
         memset(c, 0, sizeof(*c));
 }
