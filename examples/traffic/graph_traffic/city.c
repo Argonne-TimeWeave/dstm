@@ -291,31 +291,72 @@ static int cmp_rcb_y(const void *a, const void *b)
         return (oa > ob) - (oa < ob);
 }
 
-/* Sort [lo,hi) by the longer extent (x or y), then recurse on halves.
- * depth is unused for axis choice (we pick the wider spread each level),
- * which keeps cells roughly square. */
-static void rcb(struct rcb_pt *p, size_t lo, size_t hi)
+/* Recursively partition [lo, hi) into the exact vertex counts assigned
+ * to ranks [rank_lo, rank_hi).
+ *
+ * The previous implementation recursed to individual vertices and only
+ * afterward cut the resulting order into equal-sized rank blocks. Those
+ * block boundaries did not generally coincide with RCB boundaries, so a
+ * rank could contain vertices from two unrelated spatial cells.
+ *
+ * vtx_off is already populated here. Therefore the split between the two
+ * rank groups is made at the exact number of vertices required by the
+ * left rank group. Each final RCB leaf is exactly one rank partition. */
+static void rcb_partition(struct rcb_pt *p,
+                          size_t lo, size_t hi,
+                          int rank_lo, int rank_hi,
+                          const size_t *vtx_off)
 {
-        if (hi - lo <= 1)
-                return;
+        if (rank_hi - rank_lo <= 1)
+                return;                 /* exactly one rank's partition */
 
-        double xmin = p[lo].x, xmax = p[lo].x;
-        double ymin = p[lo].y, ymax = p[lo].y;
+        double xmin = p[lo].x;
+        double xmax = p[lo].x;
+        double ymin = p[lo].y;
+        double ymax = p[lo].y;
+
         for (size_t i = lo + 1; i < hi; i++) {
-                if (p[i].x < xmin) xmin = p[i].x;
-                if (p[i].x > xmax) xmax = p[i].x;
-                if (p[i].y < ymin) ymin = p[i].y;
-                if (p[i].y > ymax) ymax = p[i].y;
+                if (p[i].x < xmin)
+                        xmin = p[i].x;
+                if (p[i].x > xmax)
+                        xmax = p[i].x;
+                if (p[i].y < ymin)
+                        ymin = p[i].y;
+                if (p[i].y > ymax)
+                        ymax = p[i].y;
         }
 
+        /* Split along the coordinate axis with the larger extent. */
         if ((xmax - xmin) >= (ymax - ymin))
                 qsort(p + lo, hi - lo, sizeof(*p), cmp_rcb_x);
         else
                 qsort(p + lo, hi - lo, sizeof(*p), cmp_rcb_y);
 
-        size_t mid = lo + (hi - lo) / 2;
-        rcb(p, lo, mid);
-        rcb(p, mid, hi);
+        /*
+         * Split the rank interval approximately in half, but split the
+         * point interval according to the exact number of vertices owned
+         * by the left rank group.
+         *
+         * Because this call represents ranks [rank_lo, rank_hi), its point
+         * interval contains:
+         *
+         *   vtx_off[rank_hi] - vtx_off[rank_lo]
+         *
+         * vertices. The left child must contain:
+         *
+         *   vtx_off[rank_mid] - vtx_off[rank_lo]
+         *
+         * vertices.
+         */
+        int rank_mid = rank_lo + (rank_hi - rank_lo) / 2;
+        size_t left_count =
+                vtx_off[rank_mid] - vtx_off[rank_lo];
+        size_t point_mid = lo + left_count;
+
+        rcb_partition(p, lo, point_mid,
+                      rank_lo, rank_mid, vtx_off);
+        rcb_partition(p, point_mid, hi,
+                      rank_mid, rank_hi, vtx_off);
 }
 /* --- End spatial ordering ------------------------------------------ */
 
@@ -409,6 +450,38 @@ int city_load(struct city *c, const char *dir, int world_size)
                         uni[nv++] = uni[i];   /* compact unique ids in place */
         c->nv = nv;
 
+        if ((size_t)world_size > nv) {
+                fprintf(stderr, "world_size %d > %zu vertices\n",
+                        world_size, nv);
+                goto fail;
+        }
+
+        /*
+         * Construct the exact rank ownership boundaries before spatial
+         * ordering. rcb_partition() uses these boundaries so each spatial
+         * leaf contains exactly the number of vertices assigned to its
+         * rank.
+         */
+        c->vtx_off = malloc(((size_t)world_size + 1) *
+                            sizeof(*c->vtx_off));
+        if (c->vtx_off == NULL)
+                goto oom;
+
+        {
+                size_t base = nv / (size_t)world_size;
+                size_t rem  = nv % (size_t)world_size;
+                size_t acc  = 0;
+
+                for (int r = 0; r < world_size; r++) {
+                        c->vtx_off[r] = acc;
+                        acc += base + ((size_t)r < rem ? 1u : 0u);
+                }
+
+                c->vtx_off[world_size] = acc;
+        }
+
+        c->world_size = world_size;
+
         /* Index of node.csv coordinates by original id, for O(log n)
          * lookup while building the spatial point array. */
         nidx = malloc(((size_t)n_nodes ? (size_t)n_nodes : 1) * sizeof(*nidx));
@@ -456,9 +529,15 @@ int city_load(struct city *c, const char *dir, int world_size)
         free(nidx); nidx = NULL;
         free(uni); uni = NULL;
 
-        /* Recursive coordinate bisection: reorders pts so that dense id i
-         * (its position after this call) is spatially compact. */
-        rcb(pts, 0, nv);
+        /*
+         * Recursive coordinate bisection with rank-aligned leaves.
+         * After this call, the point interval
+         *
+         *   [vtx_off[r], vtx_off[r + 1])
+         *
+         * is one spatially compact partition for rank r.
+         */
+        rcb_partition(pts, 0, nv, 0, world_size, c->vtx_off);
 
         /* Emit the original ID and coordinates in dense spatial order,
          * and build the sorted (orig -> dense) index used by the edge
@@ -490,12 +569,6 @@ int city_load(struct city *c, const char *dir, int world_size)
         pts = NULL;
 
         qsort(oidx, nv, sizeof(*oidx), cmp_orig_index);
-
-        if ((size_t)world_size > nv) {  /* same guard as the grid path */
-                fprintf(stderr, "world_size %d > %zu vertices\n",
-                        world_size, nv);
-                goto fail;
-        }
 
         /* --- Directed edges (dense), drop self-loops ------------------ */
         size_t ecap = 2 * (size_t)n_links, en = 0;
@@ -633,21 +706,10 @@ int city_load(struct city *c, const char *dir, int world_size)
         c->row_ptr = new_row;   /* compacted offsets */
         c->ne = w;
 
-        /* --- Block partition (identical to old city_build) ------------ */
-        c->vtx_off = malloc(((size_t)world_size + 1) * sizeof(*c->vtx_off));
-        if (!c->vtx_off) goto oom;
-        {
-                size_t base = nv / (size_t)world_size;
-                size_t rem  = nv % (size_t)world_size;
-                size_t acc  = 0;
-                for (int r = 0; r < world_size; r++) {
-                        c->vtx_off[r] = acc;
-                        acc += base + ((size_t)r < rem ? 1u : 0u);
-                }
-                c->vtx_off[world_size] = acc;
-        }
-        c->world_size = world_size;
-
+        /*
+         * vtx_off and world_size were initialized before RCB so the
+         * spatial recursion could produce rank-aligned partitions.
+         */
         if (city_pick_downtown(c) != 0) goto oom;
 
         printf("Loaded %s: %zu vtx, %zu directed edges "
@@ -745,15 +807,35 @@ void city_print_summary(const struct city *c)
                c->nv, c->ne);
         printf("Downtown        : %zu highest-degree vertices\n",
                c->n_downtown);
-        printf("Ranks           : %d (contiguous row-major vertex ranges)\n",
+        printf("Ranks           : %d "
+               "(contiguous rank-aligned RCB vertex ranges)\n",
                c->world_size);
         for (int r = 0; r < c->world_size; r++) {
                 size_t lo = c->vtx_off[r];
                 size_t hi = c->vtx_off[r + 1];
                 size_t le = c->row_ptr[hi] - c->row_ptr[lo];
 
-                printf("  rank %-3d: vertices [%zu, %zu)  %zu vtx, %zu out-edges\n",
-                       r, lo, hi, hi - lo, le);
+                double xmin = c->x[lo];
+                double xmax = c->x[lo];
+                double ymin = c->y[lo];
+                double ymax = c->y[lo];
+
+                for (size_t v = lo + 1; v < hi; v++) {
+                        if (c->x[v] < xmin)
+                                xmin = c->x[v];
+                        if (c->x[v] > xmax)
+                                xmax = c->x[v];
+                        if (c->y[v] < ymin)
+                                ymin = c->y[v];
+                        if (c->y[v] > ymax)
+                                ymax = c->y[v];
+                }
+
+                printf("  rank %-3d: vertices [%zu, %zu)  "
+                       "%zu vtx, %zu out-edges  "
+                       "bbox=[%.0f,%.0f]x[%.0f,%.0f]\n",
+                       r, lo, hi, hi - lo, le,
+                       xmin, xmax, ymin, ymax);
         }
         printf("====================\n");
 }
