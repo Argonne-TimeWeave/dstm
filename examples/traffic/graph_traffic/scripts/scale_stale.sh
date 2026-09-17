@@ -181,15 +181,34 @@ if [[ "${TIMEOUT_S}" != "0" ]] && command -v timeout >/dev/null 2>&1; then
         TIMEOUT_CMD=(timeout --signal=TERM --kill-after=30 "${TIMEOUT_S}")
 fi
 
-# Pick nodes/ppn for a rank count: pack onto as few nodes as possible,
-# <= MAX_PPN per node. Returns "nodes ppn" or "" if it won't fit.
+# Pick nodes/ppn for a rank count: spread across as many allocated nodes as
+# possible, up to MAX_NODES, before placing multiple ranks on each node.
+#
+# With at least 8 allocated nodes and MAX_NODES=8:
+#   np=4   -> 4 nodes x 1 rank/node
+#   np=8   -> 8 nodes x 1 rank/node
+#   np=16  -> 8 nodes x 2 ranks/node
+#   np=256 -> 8 nodes x 32 ranks/node
+#
+# Returns "nodes ppn" or "" if the rank count cannot fit.
 place_for() {
-        local np="$1" nodes ppn
-        nodes=$(( (np + MAX_PPN - 1) / MAX_PPN ))
+        local np="$1" nodes ppn capacity
+
+        # Use one node per rank until all available nodes are occupied.
+        nodes="${np}"
+        (( nodes > AVAIL_NODES )) && nodes="${AVAIL_NODES}"
+        (( nodes > MAX_NODES )) && nodes="${MAX_NODES}"
         (( nodes < 1 )) && nodes=1
-        (( nodes > AVAIL_NODES )) && { echo ""; return; }
+
+        # Then distribute additional ranks evenly across those nodes.
         ppn=$(( (np + nodes - 1) / nodes ))
-        (( ppn > MAX_PPN )) && { echo ""; return; }
+
+        capacity=$(( nodes * MAX_PPN ))
+        (( np > capacity || ppn > MAX_PPN )) && {
+                echo ""
+                return
+        }
+
         echo "${nodes} ${ppn}"
 }
 

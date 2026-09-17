@@ -1,11 +1,11 @@
 host:         cascade10
-date:         2026-09-16T16:41:02+00:00
-job id:       1001188
+date:         2026-09-17T15:16:58+00:00
+job id:       1001463
 alloc source: COBALT_NODEFILE  (8 nodes, using <= 8)
-nodefile:     /var/tmp/cobalt.1001188
+nodefile:     /var/tmp/cobalt.1001463
 exe:          /home/ncassarino/dstm/examples/traffic/graph_traffic/traffic
 data:         /home/ncassarino/dstm/examples/traffic/graph_traffic/data/bloomington/
-trip tables:  /home/ncassarino/dstm/examples/traffic/graph_traffic/scripts/stale-results/20260916-164102/trips
+trip tables:  /home/ncassarino/dstm/examples/traffic/graph_traffic/scripts/stale-results/20260917-151658/trips
 mpi prefix:   /soft/libraries/mpi/openmpi/4.1.1   forwarded: LD_LIBRARY_PATH PATH
 ranks:        256  (8x32)   mode: stale
 stale delays: 1 2 4 8 16 32
