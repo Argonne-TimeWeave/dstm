@@ -68,6 +68,7 @@
 /*******************************************************************************
  * Tunables
  ******************************************************************************/
+#define GRAPH_TRAFFIC_REGION_SIZE (1ULL << 30)
 
 /* Ticks an agent dwells at a vertex before it may depart again. 1 gives
  * intersections a meaningful queue length; 0 makes agents move every
@@ -297,6 +298,18 @@ struct sim {
         dstm_distance_t *dist;
         dstm_dgraph_t   *g_cars;
         dstm_dgraph_t   *g_state;
+
+        /*
+         * DSTM region IDs are local backing-store identifiers, not MPI
+         * ranks. The car channels use the default region, while the
+         * congestion-replica channels use a separately registered region.
+         *
+         * dstm_dgraph_create_on_region() gathers these IDs across ranks,
+         * so remote operations address the owning rank's corresponding
+         * local region correctly.
+         */
+        int cars_region_id;
+        int state_region_id;
 
         /* Local vertex ownership. */
         size_t v_lo;            /* first owned vertex, global id        */
@@ -1463,21 +1476,39 @@ static int setup(const char *dir, int steps, unsigned int cap)
                 return -1;
         }
 
-        rc = dstm_dgraph_create(&S.g_cars, sizeof(struct vertex_state),
-                                S.Lcar.bytes, S.nlocal, S.ldeg, S.ldst,
-                                NULL, NULL);
+        /*
+         * Region 0 is created by dstm_start(). Register every additional
+         * region before any DSTM operation can emit or receive heartbeats.
+         */
+        S.cars_region_id = dstm_get_local_region_id();
+
+        rc = dstm_region_register(GRAPH_TRAFFIC_REGION_SIZE,
+                                  &S.state_region_id);
         if (rc != DSTM_SUCCESS) {
-                fprintf(stderr, "rank %d: dgraph_create(cars) failed: %d\n",
+                fprintf(stderr,
+                        "rank %d: region_register(state) failed: %d\n",
                         S.rank, rc);
                 return -1;
         }
 
-        rc = dstm_dgraph_create(&S.g_state, sizeof(struct vertex_state),
-                                S.Lstate.bytes, S.nlocal, S.ldeg, S.ldst,
-                                NULL, NULL);
+        rc = dstm_dgraph_create_on_region(&S.g_cars, sizeof(struct vertex_state),
+                S.Lcar.bytes, S.nlocal, S.ldeg, S.ldst, NULL, NULL, S.cars_region_id);
         if (rc != DSTM_SUCCESS) {
-                fprintf(stderr, "rank %d: dgraph_create(state) failed: %d\n",
-                        S.rank, rc);
+                fprintf(stderr,
+                        "rank %d: dgraph_create_on_region(cars, region %d) "
+                        "failed: %d\n",
+                        S.rank, S.cars_region_id, rc);
+                return -1;
+        }
+
+        rc = dstm_dgraph_create_on_region(&S.g_state, sizeof(struct vertex_state),
+                S.Lstate.bytes, S.nlocal, S.ldeg, S.ldst, NULL, NULL,
+                S.state_region_id);
+        if (rc != DSTM_SUCCESS) {
+                fprintf(stderr,
+                        "rank %d: dgraph_create_on_region(state, region %d) "
+                        "failed: %d\n",
+                        S.rank, S.state_region_id, rc);
                 return -1;
         }
 
