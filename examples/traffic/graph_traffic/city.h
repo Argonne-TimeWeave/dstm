@@ -28,15 +28,18 @@ struct city {
         float  *cap_tick;       /* ne, capcaity in veh/tick */
         float  *length_m;       /* ne, physical edge length in metres   */
 
-        /* Block partition, identical on every rank. */
+        /* Rank-aligned RCB partition, identical on every rank.
+         * Rank r owns dense vertices [vtx_off[r], vtx_off[r + 1]). */
         size_t *vtx_off;        /* world_size + 1                       */
 
-        /* Original (sparse) POLARIS node id per dense vertex 0..nv-1.
-         * Dense ids are assigned by ascending original id, so every rank
-         * builds an identical map from the same CSV with no comms. */
-        long   *dense2orig;     /* nv                                   */
-        double *x;
-        double *y;
+        /* Original identity and coordinates for each dense vertex.
+         *
+         * Dense IDs are assigned by rank-aligned recursive coordinate
+         * bisection. Every rank builds the same deterministic ordering
+         * from the replicated CSV input. */
+        long   *dense2orig;     /* nv, dense ID -> original node ID     */
+        double *x;              /* nv, dense-order x coordinate         */
+        double *y;              /* nv, dense-order y coordinate         */
 
         /* Destination-bias set (dense ids): the top-degree vertices.
          * Replaces the grid's central box so congestion concentrates. */
