@@ -17,6 +17,8 @@ traffic_SOURCES = \
     car.c \
     car.h \
     chan.c \
-    chan.h 
+    chan.h \
+    vis.c \
+    vis.h
 
 EXTRA_DIST = README.md
