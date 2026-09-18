@@ -64,6 +64,7 @@
 #include "car.h"
 #include "chan.h"
 #include "city.h"
+#include "vis.h"
 
 /*******************************************************************************
  * Tunables
@@ -105,6 +106,12 @@
 
 #define STALE_DELAY_DEFAULT 2
 
+/* Number of initial timestamps recorded when --traffic-vis is enabled.
+ * The recorded interval is 0 <= t < traffic_vis_warmup. */
+#define TRAFFIC_VIS_WARMUP_DEFAULT 20
+
+#define TRAFFIC_VIS_CORNERS 4
+
 /*******************************************************************************
  * Replica modes
  *
@@ -132,6 +139,17 @@ static const char *replica_mode_name(enum replica_mode m)
         case REPLICA_ORACLE: return "oracle";
         case REPLICA_BLIND:  return "blind";
         default:             return "stale";
+        }
+}
+
+static const char *traffic_vis_corner_name(int corner)
+{
+        switch (corner) {
+        case 0: return "southwest";
+        case 1: return "northwest";
+        case 2: return "southeast";
+        case 3: return "northeast";
+        default: return "unknown";
         }
 }
 
@@ -389,6 +407,19 @@ struct sim {
          * is the exact replica view consulted by route_and_stage(). */
         int                snapshot_dump_enabled;
         int32_t            snapshot_dump_tick;
+
+        /*
+         * Optional warmup traffic visualization.
+         *
+         * Four geographically extreme vertices are selected. Each file
+         * records the congestion replica held by that vertex's owner rank,
+         * because the replica is rank-local rather than vertex-local.
+         */
+        int                traffic_vis_enabled;
+        int32_t            traffic_vis_warmup;
+        size_t             traffic_vis_node[TRAFFIC_VIS_CORNERS];
+        int                traffic_vis_owner[TRAFFIC_VIS_CORNERS];
+        FILE              *traffic_vis_file[TRAFFIC_VIS_CORNERS];
 
         /* Number of initial timestamps included in the routing-metric
          * cohort. A car is included when:
@@ -1168,6 +1199,108 @@ static void write_staleness_snapshot(int32_t t)
 }
 
 /*******************************************************************************
+ * Warmup traffic-visualization dump
+ *
+ * Each selected viewpoint records its owner rank's congestion replica.
+ * This function is called after recv_state() and before routing, so the
+ * recorded replica is exactly the perspective used by route_and_stage().
+ ******************************************************************************/
+
+static void write_traffic_vis_tick(int32_t t)
+{
+        if (!S.traffic_vis_enabled ||
+            t < 0 ||
+            t >= S.traffic_vis_warmup)
+                return;
+
+        for (int corner = 0;
+             corner < TRAFFIC_VIS_CORNERS;
+             corner++) {
+                FILE *f = S.traffic_vis_file[corner];
+
+                if (f == NULL)
+                        continue;
+
+                size_t viewpoint = S.traffic_vis_node[corner];
+
+                for (size_t ge = 0;
+                     ge < S.city.ne;
+                     ge++) {
+                        const struct cong_entry *entry =
+                                &S.rep.e[ge];
+
+                        size_t src = S.city.esrc[ge];
+                        size_t dst = S.city.dst[ge];
+
+                        int known = entry->stamp >= 0;
+                        int64_t age = known
+                                ? (int64_t)t -
+                                  (int64_t)entry->stamp
+                                : -1;
+
+                        /*
+                         * The stored value is the last observed EWMA.
+                         * effective_congestion applies the same age decay
+                         * used by edge_cost(), so it represents what this
+                         * perspective currently believes the traffic load
+                         * to be.
+                         */
+                        float stored = known
+                                ? entry->value
+                                : NAN;
+
+                        float effective = known
+                                ? cong_effective(entry, t,
+                                                 CONG_TAU, 0.0f)
+                                : 0.0f;
+
+                        float capacity = S.city.cap_tick[ge];
+                        float ratio = effective / capacity;
+                        float penalty =
+                                ratio * ROUTE_DELAY_FACTOR;
+                        float perceived_cost =
+                                (float)S.city.ff_ticks[ge] +
+                                penalty;
+
+                        fprintf(f,
+                                "edge,%d,"
+                                "%s,%zu,%ld,%d,"
+                                "-1,-1,nan,nan,-1,"
+                                "%zu,%zu,%zu,%d,%d,"
+                                "%d,%" PRId64 ",%d,"
+                                "%.9g,%.9g,%.9g,%.9g,"
+                                "%d,%.9g,%.9g\n",
+                                (int)t,
+                                traffic_vis_corner_name(corner),
+                                viewpoint,
+                                S.city.dense2orig[viewpoint],
+                                S.rank,
+                                ge,
+                                src,
+                                dst,
+                                city_owner(&S.city, src),
+                                city_owner(&S.city, dst),
+                                (int)entry->stamp,
+                                age,
+                                known,
+                                stored,
+                                effective,
+                                capacity,
+                                ratio,
+                                S.city.ff_ticks[ge],
+                                penalty,
+                                perceived_cost);
+                }
+
+                /*
+                 * Flush at frame boundaries so a partially completed run
+                 * still contains complete animation frames.
+                 */
+                fflush(f);
+        }
+}
+
+/*******************************************************************************
  * Spawn
  ******************************************************************************/
 
@@ -1253,6 +1386,7 @@ static void run_step(int32_t t)
         /* Capture the replica after incoming merges and immediately
          * before this tick's routing decisions consult it. */
         write_staleness_snapshot(t);
+        write_traffic_vis_tick(t);
 
         route_and_stage(t);
         measure_local(t);
@@ -1316,6 +1450,219 @@ static int build_local_slice(void)
                S.nedge_local * sizeof(*S.ldst));
 
         return 0;
+}
+
+/*******************************************************************************
+ * Traffic-visualization viewpoints
+ *
+ * Select the vertex nearest each corner of the graph's coordinate bounding
+ * box. Selection is deterministic and performed independently by every
+ * rank over the replicated city data.
+ ******************************************************************************/
+
+static int traffic_vis_select_corners(void)
+{
+        if (!S.traffic_vis_enabled)
+                return 0;
+
+        if (S.city.nv < TRAFFIC_VIS_CORNERS) {
+                if (S.rank == 0)
+                        fprintf(stderr,
+                                "traffic visualization requires at least "
+                                "%d vertices\n",
+                                TRAFFIC_VIS_CORNERS);
+                return -1;
+        }
+
+        double xmin = S.city.x[0];
+        double xmax = S.city.x[0];
+        double ymin = S.city.y[0];
+        double ymax = S.city.y[0];
+
+        for (size_t v = 1; v < S.city.nv; v++) {
+                if (S.city.x[v] < xmin)
+                        xmin = S.city.x[v];
+                if (S.city.x[v] > xmax)
+                        xmax = S.city.x[v];
+                if (S.city.y[v] < ymin)
+                        ymin = S.city.y[v];
+                if (S.city.y[v] > ymax)
+                        ymax = S.city.y[v];
+        }
+
+        double xspan = xmax - xmin;
+        double yspan = ymax - ymin;
+
+        if (!(xspan > 0.0))
+                xspan = 1.0;
+        if (!(yspan > 0.0))
+                yspan = 1.0;
+
+        const double target_x[TRAFFIC_VIS_CORNERS] = {
+                xmin, xmin, xmax, xmax
+        };
+        const double target_y[TRAFFIC_VIS_CORNERS] = {
+                ymin, ymax, ymin, ymax
+        };
+
+        unsigned char *selected =
+                calloc(S.city.nv, sizeof(*selected));
+        if (selected == NULL)
+                return -1;
+
+        for (int corner = 0;
+             corner < TRAFFIC_VIS_CORNERS;
+             corner++) {
+                size_t best = (size_t)-1;
+                double best_distance = INFINITY;
+
+                for (size_t v = 0; v < S.city.nv; v++) {
+                        if (selected[v])
+                                continue;
+
+                        double dx =
+                                (S.city.x[v] - target_x[corner]) / xspan;
+                        double dy =
+                                (S.city.y[v] - target_y[corner]) / yspan;
+                        double distance = dx * dx + dy * dy;
+
+                        if (best == (size_t)-1 ||
+                            distance < best_distance ||
+                            (distance == best_distance &&
+                             v < best)) {
+                                best = v;
+                                best_distance = distance;
+                        }
+                }
+
+                assert(best != (size_t)-1);
+
+                selected[best] = 1;
+                S.traffic_vis_node[corner] = best;
+                S.traffic_vis_owner[corner] =
+                        city_owner(&S.city, best);
+        }
+
+        free(selected);
+
+        if (S.rank == 0) {
+                printf("=== Traffic visualization viewpoints ===\n");
+
+                for (int corner = 0;
+                     corner < TRAFFIC_VIS_CORNERS;
+                     corner++) {
+                        size_t v = S.traffic_vis_node[corner];
+
+                        printf("  %-9s: dense=%zu original=%ld "
+                               "owner=%d x=%.3f y=%.3f\n",
+                               traffic_vis_corner_name(corner),
+                               v,
+                               S.city.dense2orig[v],
+                               S.traffic_vis_owner[corner],
+                               S.city.x[v],
+                               S.city.y[v]);
+                }
+
+                printf("  warmup timestamps: [0, %d)\n",
+                       (int)S.traffic_vis_warmup);
+                printf("==========================================\n");
+                fflush(stdout);
+        }
+
+        return 0;
+}
+
+static int traffic_vis_open_files(void)
+{
+        int local_error = 0;
+
+        if (!S.traffic_vis_enabled)
+                return 0;
+
+        for (int corner = 0;
+             corner < TRAFFIC_VIS_CORNERS;
+             corner++) {
+                if (S.traffic_vis_owner[corner] != S.rank)
+                        continue;
+
+                size_t v = S.traffic_vis_node[corner];
+                char path[4096];
+
+                snprintf(path, sizeof(path),
+                         "traffic-view-%s-node%zu-rank%d-%s-d%d.csv",
+                         traffic_vis_corner_name(corner),
+                         v,
+                         S.rank,
+                         replica_mode_name(S.mode),
+                         S.stale_delay);
+
+                FILE *f = fopen(path, "w");
+                if (f == NULL) {
+                        perror(path);
+                        local_error = 1;
+                        continue;
+                }
+
+                S.traffic_vis_file[corner] = f;
+
+                /*
+                 * Node rows describe topology and viewpoint metadata.
+                 * Edge rows describe the perceived congestion state at
+                 * one timestamp.
+                 */
+                fprintf(f,
+                        "record_type,tick,"
+                        "corner,view_node,view_original_id,view_rank,"
+                        "node_id,original_node_id,x,y,node_owner,"
+                        "edge_id,src,dst,src_owner,dst_owner,"
+                        "stamp,age,known,"
+                        "congestion_ewma,effective_congestion,"
+                        "capacity,volume_capacity_ratio,"
+                        "free_flow_ticks,route_penalty,"
+                        "perceived_route_cost\n");
+
+                /*
+                 * Topology does not change, so write each node only once.
+                 * tick=-1 identifies static topology records.
+                 */
+                for (size_t node = 0;
+                     node < S.city.nv;
+                     node++) {
+                        fprintf(f,
+                                "node,-1,"
+                                "%s,%zu,%ld,%d,"
+                                "%zu,%ld,%.17g,%.17g,%d,"
+                                "-1,-1,-1,-1,-1,"
+                                "-1,-1,0,"
+                                "nan,nan,nan,nan,"
+                                "nan,nan,nan\n",
+                                traffic_vis_corner_name(corner),
+                                v,
+                                S.city.dense2orig[v],
+                                S.rank,
+                                node,
+                                S.city.dense2orig[node],
+                                S.city.x[node],
+                                S.city.y[node],
+                                city_owner(&S.city, node));
+                }
+
+                fflush(f);
+
+                printf("rank %d traffic visualization: %s\n",
+                       S.rank, path);
+        }
+
+        /*
+         * Ensure every rank makes the same setup decision. Without this,
+         * one rank could return from setup while other ranks continue into
+         * collective or DSTM operations.
+         */
+        int global_error = 0;
+        MPI_Allreduce(&local_error, &global_error,
+                      1, MPI_INT, MPI_MAX, MPI_COMM_WORLD);
+
+        return global_error ? -1 : 0;
 }
 
 static int setup(const char *dir, int steps, unsigned int cap)
@@ -1515,6 +1862,21 @@ static int setup(const char *dir, int steps, unsigned int cap)
         if (cong_replica_init(&S.rep, S.city.ne) != 0)
                 return -1;
 
+        if (traffic_vis_select_corners() != 0) {
+                if (S.rank == 0)
+                        fprintf(stderr,
+                                "traffic visualization corner selection "
+                                "failed\n");
+                return -1;
+        }
+
+        if (traffic_vis_open_files() != 0) {
+                if (S.rank == 0)
+                        fprintf(stderr,
+                                "traffic visualization file setup failed\n");
+                return -1;
+        }
+
         if (build_reverse() != 0) {
                 fprintf(stderr, "rank %d: build_reverse failed\n", S.rank);
                 return -1;
@@ -1620,8 +1982,29 @@ static void teardown_dstm(void)
                 dstm_dgraph_destroy(&S.g_state);
 }
 
+static void traffic_vis_close_files(void)
+{
+        for (int corner = 0;
+             corner < TRAFFIC_VIS_CORNERS;
+             corner++) {
+                if (S.traffic_vis_file[corner] == NULL)
+                        continue;
+
+                if (fclose(S.traffic_vis_file[corner]) != 0)
+                        fprintf(stderr,
+                                "rank %d: failed to close traffic "
+                                "visualization file for %s\n",
+                                S.rank,
+                                traffic_vis_corner_name(corner));
+
+                S.traffic_vis_file[corner] = NULL;
+        }
+}
+
 static void teardown_local(void)
 {
+        traffic_vis_close_files();
+
         car_pool_free(&S.pool);
         cong_replica_free(&S.rep);
 
@@ -2004,6 +2387,7 @@ static void usage(const char *prog)
                 "usage: %s --data DIR [--steps N] [--cars M] [--rate R]\n"
                 "          [--cap C] [--seed S] [--replica-mode M]\n"
                 "          [--trip-output FILE] [--snapshot-dump T]\n"
+                "          [--traffic-vis] [--traffic-vis-warmup N]\n"
                 "          [--verbose] [--quiet]\n"
                 "\n"
                 "  --data  DIR path to a dir with node.csv and link.csv\n"
@@ -2017,6 +2401,11 @@ static void usage(const char *prog)
                 "  --trip-output FILE  per-trip CSV output path\n"
                 "  --snapshot-dump T   dump rank-0 replica before routing\n"
                 "                      at timestamp T\n"
+                "  --traffic-vis       record four geographic corner views\n"
+                "                      during the initial warmup interval\n"
+                "  --traffic-vis-warmup N\n"
+                "                      number of timestamps to record\n"
+                "                      (default 20; records 0 <= t < N)\n"
                 "  --replica-mode stale|oracle|blind      (default stale)\n"
                 "        stale   diffusion by relay (the real model)\n"
                 "        oracle  replica synced globally each tick\n"
@@ -2034,6 +2423,7 @@ int main(int argc, char *argv[])
         int cap   = 8;
         int quiet = 1;
         S.stale_delay = STALE_DELAY_DEFAULT;
+        S.traffic_vis_warmup = TRAFFIC_VIS_WARMUP_DEFAULT;
 
         S.seed = 42;
 
@@ -2065,6 +2455,14 @@ int main(int argc, char *argv[])
                         S.snapshot_dump_tick =
                                 (int32_t)atoi(argv[++i]);
                         S.snapshot_dump_enabled = 1;
+                }
+                else if (!strcmp(argv[i], "--traffic-vis")) {
+                        S.traffic_vis_enabled = 1;
+                }
+                else if (!strcmp(argv[i], "--traffic-vis-warmup") &&
+                         i + 1 < argc) {
+                        S.traffic_vis_warmup =
+                                (int32_t)atoi(argv[++i]);
                 }
                 else if (!strcmp(argv[i], "--replica-mode") && i + 1 < argc) {
                         const char *m = argv[++i];
@@ -2119,6 +2517,23 @@ int main(int argc, char *argv[])
                 MPI_Finalize();
                 return 1;
         }
+
+        if (S.traffic_vis_warmup < 1) {
+                if (r == 0)
+                        fprintf(stderr,
+                                "error: --traffic-vis-warmup must be "
+                                "at least 1\n");
+                dstm_finalize();
+                MPI_Finalize();
+                return 1;
+        }
+
+        /*
+         * The simulation executes timestamps 0 through steps inclusive.
+         * Therefore it contains steps + 1 possible warmup frames.
+         */
+        if (S.traffic_vis_warmup > steps + 1)
+                S.traffic_vis_warmup = steps + 1;
 
         if (data == NULL) {
                 if (r == 0) {
