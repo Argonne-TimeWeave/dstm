@@ -18,6 +18,7 @@
 
 #include "internal/globals.h"
 #include "internal/region.h"
+#include "internal/profile.h"
 
 struct dstm_darray_s {
 	size_t element_size;
@@ -141,6 +142,8 @@ int dstm_darray_create_on_region(dstm_darray_t **ret,
 	err = MPI_Allgather(&local_elements, 1, MPI_UNSIGNED_LONG_LONG,
 	                    darray->rank_elements, 1, MPI_UNSIGNED_LONG_LONG,
 	                    comm);
+    dstm_profile_record_collective(DSTM_PROFILE_MPI_ALLGATHER, 
+                                   sizeof(unsigned long long));
 	if (err != MPI_SUCCESS) {
 		err = -DSTM_FAILURE;
 		goto err_mpi;
@@ -148,6 +151,8 @@ int dstm_darray_create_on_region(dstm_darray_t **ret,
 
 	err = MPI_Allgather(&local_ptr, 2, MPI_UNSIGNED_LONG_LONG,
 	                    darray->rank_ptrs, 2, MPI_UNSIGNED_LONG_LONG, comm);
+    dstm_profile_record_collective(DSTM_PROFILE_MPI_ALLGATHER,
+                                   2 * sizeof(unsigned long long));
 	if (err != MPI_SUCCESS) {
 		err = -DSTM_FAILURE;
 		goto err_mpi;
@@ -155,6 +160,8 @@ int dstm_darray_create_on_region(dstm_darray_t **ret,
 
     err = MPI_Allgather(&region_id, 1, MPI_INT,
                         darray->rank_region_id, 1, MPI_INT, comm);
+    dstm_profile_record_collective(DSTM_PROFILE_MPI_ALLGATHER,
+                                   sizeof(region_id));
     if (err != MPI_SUCCESS) {
             err = -DSTM_FAILURE;
             goto err_mpi;

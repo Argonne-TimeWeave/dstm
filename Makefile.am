@@ -49,6 +49,7 @@ noinst_include_internal_HEADERS = \
 				  include/internal/globals.h \
 				  include/internal/log.h \
 				  include/internal/msg.h \
+                  include/internal/profile.h \
 				  include/internal/region.h \
 				  include/internal/request.h \
 				  include/internal/uthash.h \
@@ -68,6 +69,7 @@ libdstm_la_SOURCES = \
 		    src/log.c \
 		    src/ops.c \
 		    src/msg.c \
+            src/profile.c \
 		    src/region.c \
             src/dgraph.c \
 		    src/request.c
