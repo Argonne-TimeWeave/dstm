@@ -104,6 +104,7 @@ AC_CONFIG_FILES([Makefile
 		 bindings/python/Makefile
 		 dstm.pc
 		 examples/Makefile
+         examples/datacenter/Makefile
 		 examples/traffic/Makefile
          examples/traffic/arr_traffic/Makefile
          examples/traffic/graph_traffic/Makefile
