@@ -2,7 +2,7 @@ SST_CONFIG ?= sst-config
 CXX := $(shell $(SST_CONFIG) --CXX)
 
 CXXFLAGS := $(shell $(SST_CONFIG) --ELEMENT_CXXFLAGS) \
-	-O3 -std=c++17 -fPIC
+	-O2 -std=c++17 -fPIC
 
 LDFLAGS := $(shell $(SST_CONFIG) --ELEMENT_LDFLAGS)
 

@@ -433,6 +433,7 @@ static int load_local_jobs(struct sim *s, const char *path)
         s->local_real_jobs = count;
         s->local_job_slots = count ? count : 1;
         s->jobs = calloc(s->local_job_slots, sizeof(*s->jobs));
+
         REQUIRE(s->jobs != NULL, "local job storage");
 
         if (count > 0)
@@ -1032,18 +1033,16 @@ static double integrate_rack_thermal(struct rack_state *rack,
                              0.0,
                              MAX_COOLING_REMOVAL_W);
 
-        /*
-         * First-order cooling-plant actuator:
-         *
-         *     tau dQ_cooling/dt = Q_requested - Q_cooling
-         */
+        double previous_cooling =
+                rack->cooling_removal_w;
+
         double cooling_derivative =
                 (requested_cooling -
-                 rack->cooling_removal_w) /
+                 previous_cooling) /
                 COOLING_ACTUATOR_TIME_S;
 
         double next_cooling =
-                rack->cooling_removal_w +
+                previous_cooling +
                 DT_SECONDS * cooling_derivative;
 
         next_cooling =
@@ -1051,29 +1050,17 @@ static double integrate_rack_thermal(struct rack_state *rack,
                              0.0,
                              MAX_COOLING_REMOVAL_W);
 
-        /*
-         * Coolant-loop energy balance:
-         *
-         *     C_coolant dT_coolant/dt =
-         *         Q_rack_to_coolant - Q_cooling
-         */
         double coolant_derivative =
                 (heat_to_coolant -
-                 rack->cooling_removal_w) /
+                 previous_cooling) /
                 COOLANT_HEAT_CAPACITY_J_K;
 
         double next_coolant =
                 rack->coolant_temp_c +
                 DT_SECONDS * coolant_derivative;
 
-        rack->inlet_temp_c = next_inlet;
-        rack->outlet_temp_c = next_outlet;
-        rack->coolant_temp_c = next_coolant;
-        rack->cooling_setpoint_c = next_setpoint;
-        rack->cooling_removal_w = next_cooling;
-
         double average_cooling =
-                0.5 * (rack->cooling_removal_w +
+                0.5 * (previous_cooling +
                        next_cooling);
 
         rack->inlet_temp_c = next_inlet;
