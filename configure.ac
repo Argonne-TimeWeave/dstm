@@ -105,6 +105,7 @@ AC_CONFIG_FILES([Makefile
 		 dstm.pc
 		 examples/Makefile
          examples/datacenter/Makefile
+         examples/datacenter/dstm/Makefile
 		 examples/traffic/Makefile
          examples/traffic/arr_traffic/Makefile
          examples/traffic/graph_traffic/Makefile
