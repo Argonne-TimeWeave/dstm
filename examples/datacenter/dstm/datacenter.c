@@ -59,52 +59,78 @@
 #define DEFAULT_NODES_PER_RACK 8
 #define DEFAULT_STEPS          300
 
-/*******************************************************************************
- * Node/power parameters
- ******************************************************************************/
-
 #define NODE_CPU_CAPACITY       64
 #define NODE_GPU_CAPACITY        8
 
-#define NODE_IDLE_POWER_W    180.0
-#define CPU_DYNAMIC_POWER_W  320.0
-#define GPU_DYNAMIC_POWER_W 2400.0
-
-/*******************************************************************************
- * Rack/thermal parameters
+/*
+ * Benchmark model references:
  *
- * These are illustrative lumped-RC values and should be calibrated against
- * exaDigit or facility measurements for a production experiment.
- ******************************************************************************/
+ * Power:
+ *   Fan, Weber, and Barroso, "Power Provisioning for a
+ *   Warehouse-sized Computer," ISCA 2007.
+ *
+ * Thermal formulation:
+ *   ASHRAE TC 9.9, Thermal Guidelines for Data Processing
+ *   Environments. The implementation uses the standard lumped-capacitance
+ *   energy balance:
+ *
+ *     C dT/dt = sum(heat inputs) - sum(heat outputs).
+ *
+ * SST does not prescribe these equations. The same equations and parameters
+ * must be copied independently into the SST rack component.
+ *
+ * The numerical values below are benchmark parameters. They must be fitted
+ * against measurements before results can be described as calibrated.
+ */
+
+#define NODE_IDLE_POWER_W       180.0
+#define CPU_DYNAMIC_POWER_W     320.0
+#define GPU_DYNAMIC_POWER_W    2400.0
 
 #define DT_SECONDS                 1.0
+
 #define AMBIENT_TEMP_C            22.0
 #define INITIAL_COOLANT_TEMP_C    18.0
 #define INITIAL_OUTLET_TEMP_C     24.0
 #define INITIAL_SETPOINT_C        18.0
 #define TARGET_INLET_TEMP_C       24.0
 
-/* Rack thermal capacitance, J/K. */
-#define RACK_HEAT_CAPACITY_J_K 120000.0
+/* Effective thermal masses, J/K. */
+#define RACK_HEAT_CAPACITY_J_K       120000.0
+#define COOLANT_HEAT_CAPACITY_J_K    500000.0
 
-/* Coolant-loop thermal capacitance, J/K. */
-#define COOLANT_HEAT_CAPACITY_J_K 500000.0
+/* Heat-transfer coefficients, W/K. */
+#define AIRFLOW_HEAT_CAPACITY_W_K      8000.0
+#define RACK_TO_COOLANT_UA_W_K         6000.0
 
-/* Rack-to-coolant thermal conductance, W/K. */
-#define RACK_UA_W_K                6000.0
+/*
+ * Cooling controller and actuator.
+ *
+ * The coolant setpoint is reset from inlet-temperature error. Actual cooling
+ * removal approaches the requested removal with a first-order actuator.
+ */
+#define COOLING_SETPOINT_RESET_C_C        0.10
+#define COOLING_SETPOINT_RATE_C_S         0.25
+#define MIN_COOLING_SETPOINT_C           12.0
+#define MAX_COOLING_SETPOINT_C           24.0
 
-/* Effective airflow heat-capacity rate, W/K. */
-#define AIRFLOW_W_K                8000.0
+#define COOLING_PROPORTIONAL_W_K      12000.0
+#define MAX_COOLING_REMOVAL_W        100000.0
+#define COOLING_ACTUATOR_TIME_S          20.0
 
-/* Cooling-system response. */
-#define COOLING_GAIN_W_K          12000.0
-#define COOLING_CONTROL_KP            0.10
-#define COOLING_SETPOINT_RATE_C_S      0.25
-#define MIN_COOLING_SETPOINT_C        12.0
-#define MAX_COOLING_SETPOINT_C        24.0
+/*
+ * Constant cooling coefficient of performance:
+ *
+ *     cooling electrical power = removed heat / COP
+ *
+ * A calibrated implementation may replace this with a measured
+ * temperature-dependent chiller curve, but both DSTM and SST must use the
+ * exact same curve.
+ */
+#define COOLING_COP                       4.0
 
-/* Fraction of source-rack electrical power recirculated to neighbors. */
-#define HEAT_RECIRCULATION_FRACTION    0.04
+/* Fraction of exhaust enthalpy routed to neighboring rack inlets. */
+#define HEAT_RECIRCULATION_FRACTION       0.04
 
 /*******************************************************************************
  * Error handling
@@ -177,6 +203,13 @@ struct rack_state {
         double coolant_temp_c;
         double coolant_flow;
         double cooling_setpoint_c;
+
+        /*
+         * Actual thermal power currently removed by the cooling system.
+         * This is versioned because the cooling plant has a finite response
+         * time.
+         */
+        double cooling_removal_w;
 };
 
 struct allocation {
@@ -246,7 +279,9 @@ struct sim {
         uint64_t jobs_started;
         uint64_t jobs_completed;
 
-        double energy_joules;
+        double it_energy_joules;
+        double cooling_energy_joules;
+
         double max_inlet_temp_c;
         double max_outlet_temp_c;
 };
@@ -748,16 +783,26 @@ static int try_start_job(struct sim *s, struct job_state *job, int t)
 static void schedule_queued_jobs(struct sim *s, int t)
 {
         /*
-         * SST-style first-fit event semantics:
+         * Deterministic per-domain FCFS semantics:
          *
-         *   arrival -> queued -> allocation/start -> timed completion.
+         *   1. Jobs are ordered by trace/job id.
+         *   2. All arrivals at time t are admitted before scheduling.
+         *   3. The oldest queued job is considered first.
+         *   4. If it cannot start, later jobs cannot bypass it.
+         *   5. A job completing at t releases resources before arrivals and
+         *      scheduling at t.
          *
-         * A production implementation can replace this loop with SST 2024's
-         * scheduler/allocation policy while retaining the DSTM state flow.
+         * These are benchmark semantics, not semantics supplied by SST.
+         * The SST implementation must reproduce this event order exactly.
          */
         for (size_t j = 0; j < s->local_real_jobs; j++) {
-                if (s->jobs[j].status == JOB_QUEUED)
-                        (void)try_start_job(s, &s->jobs[j], t);
+                struct job_state *job = &s->jobs[j];
+
+                if (job->status != JOB_QUEUED)
+                        continue;
+
+                if (!try_start_job(s, job, t))
+                        break;
         }
 }
 
@@ -835,7 +880,7 @@ static void update_utilization_and_power(struct sim *s)
                         rack->total_power_watts += node->power_watts;
                 }
 
-                s->energy_joules +=
+                s->it_energy_joules +=
                         rack->total_power_watts * DT_SECONDS;
         }
 }
@@ -880,32 +925,57 @@ static double receive_neighbor_heat(struct sim *s,
         return incoming_heat;
 }
 
-static void integrate_rack_thermal(struct rack_state *rack,
-                                   double incoming_heat_watts)
+static double integrate_rack_thermal(struct rack_state *rack,
+                                     double incoming_heat_watts)
 {
         /*
-         * Inlet temperature from ambient air plus delayed recirculated heat.
+         * Delayed recirculated exhaust heat raises the rack inlet above
+         * ambient:
+         *
+         *     T_in = T_ambient + Q_recirculated / (m_dot * c_p)
+         *
+         * AIRFLOW_HEAT_CAPACITY_W_K represents m_dot * c_p.
          */
-        double inlet_target =
+        double next_inlet =
                 AMBIENT_TEMP_C +
-                incoming_heat_watts / AIRFLOW_W_K;
+                incoming_heat_watts /
+                        AIRFLOW_HEAT_CAPACITY_W_K;
 
         /*
-         * Rack outlet lumped-RC equation:
+         * Heat transported out of the rack by its airflow:
          *
-         * C_rack dT_out/dt =
-         *      electrical_power
-         *    + incoming_heat
-         *    - UA (T_out - T_coolant)
+         *     Q_air = (m_dot * c_p) * (T_out - T_in)
          */
-        double rack_removed =
-                RACK_UA_W_K *
-                (rack->outlet_temp_c - rack->coolant_temp_c);
+        double heat_to_air =
+                AIRFLOW_HEAT_CAPACITY_W_K *
+                (rack->outlet_temp_c - next_inlet);
 
+        /*
+         * Conductive/convective heat transfer to the coolant loop:
+         *
+         *     Q_coolant = UA * (T_out - T_coolant)
+         *
+         * This value is intentionally signed to preserve the energy balance.
+         */
+        double heat_to_coolant =
+                RACK_TO_COOLANT_UA_W_K *
+                (rack->outlet_temp_c -
+                 rack->coolant_temp_c);
+
+        /*
+         * Rack energy balance:
+         *
+         *     C_rack dT_out/dt =
+         *         P_IT - Q_air - Q_coolant
+         *
+         * Recirculated heat is not added separately here: it has already
+         * entered the balance through T_in. Adding it again would count the
+         * same heat twice.
+         */
         double outlet_derivative =
-                (rack->total_power_watts +
-                 incoming_heat_watts -
-                 rack_removed) /
+                (rack->total_power_watts -
+                 heat_to_air -
+                 heat_to_coolant) /
                 RACK_HEAT_CAPACITY_J_K;
 
         double next_outlet =
@@ -913,25 +983,19 @@ static void integrate_rack_thermal(struct rack_state *rack,
                 DT_SECONDS * outlet_derivative;
 
         /*
-         * First-order inlet response. This avoids an instantaneous jump
-         * while still using a one-second integration step.
-         */
-        double next_inlet =
-                rack->inlet_temp_c +
-                0.5 * (inlet_target - rack->inlet_temp_c);
-
-        /*
-         * Cooling controller:
+         * Reset the coolant setpoint from the inlet-temperature error.
          *
-         * A hot inlet lowers the coolant setpoint. The rate limiter models
-         * finite cooling-system response.
+         * This is an absolute reset around INITIAL_SETPOINT_C rather than an
+         * accumulation into the previous setpoint. Consequently, a constant
+         * error does not cause unintended integral windup.
          */
         double temperature_error =
                 next_inlet - TARGET_INLET_TEMP_C;
 
         double requested_setpoint =
-                rack->cooling_setpoint_c -
-                COOLING_CONTROL_KP * temperature_error;
+                INITIAL_SETPOINT_C -
+                COOLING_SETPOINT_RESET_C_C *
+                        temperature_error;
 
         requested_setpoint =
                 clamp_double(requested_setpoint,
@@ -939,30 +1003,63 @@ static void integrate_rack_thermal(struct rack_state *rack,
                              MAX_COOLING_SETPOINT_C);
 
         double setpoint_delta =
-                requested_setpoint - rack->cooling_setpoint_c;
+                requested_setpoint -
+                rack->cooling_setpoint_c;
 
         setpoint_delta =
-                clamp_double(setpoint_delta,
-                             -COOLING_SETPOINT_RATE_C_S * DT_SECONDS,
-                             COOLING_SETPOINT_RATE_C_S * DT_SECONDS);
+                clamp_double(
+                        setpoint_delta,
+                        -COOLING_SETPOINT_RATE_C_S * DT_SECONDS,
+                        COOLING_SETPOINT_RATE_C_S * DT_SECONDS);
 
         double next_setpoint =
-                rack->cooling_setpoint_c + setpoint_delta;
+                rack->cooling_setpoint_c +
+                setpoint_delta;
 
         /*
-         * Coolant-loop RC equation:
-         *
-         * C_coolant dT_coolant/dt =
-         *      rack_to_coolant_heat
-         *    - cooling_system_removal
+         * Requested cooling removal is proportional to coolant temperature
+         * above its setpoint and is limited by plant capacity.
          */
-        double cooling_removed =
-                COOLING_GAIN_W_K *
+        double requested_cooling =
+                COOLING_PROPORTIONAL_W_K *
                 rack->coolant_flow *
-                fmax(rack->coolant_temp_c - next_setpoint, 0.0);
+                fmax(rack->coolant_temp_c -
+                     next_setpoint,
+                     0.0);
 
+        requested_cooling =
+                clamp_double(requested_cooling,
+                             0.0,
+                             MAX_COOLING_REMOVAL_W);
+
+        /*
+         * First-order cooling-plant actuator:
+         *
+         *     tau dQ_cooling/dt = Q_requested - Q_cooling
+         */
+        double cooling_derivative =
+                (requested_cooling -
+                 rack->cooling_removal_w) /
+                COOLING_ACTUATOR_TIME_S;
+
+        double next_cooling =
+                rack->cooling_removal_w +
+                DT_SECONDS * cooling_derivative;
+
+        next_cooling =
+                clamp_double(next_cooling,
+                             0.0,
+                             MAX_COOLING_REMOVAL_W);
+
+        /*
+         * Coolant-loop energy balance:
+         *
+         *     C_coolant dT_coolant/dt =
+         *         Q_rack_to_coolant - Q_cooling
+         */
         double coolant_derivative =
-                (rack_removed - cooling_removed) /
+                (heat_to_coolant -
+                 rack->cooling_removal_w) /
                 COOLANT_HEAT_CAPACITY_J_K;
 
         double next_coolant =
@@ -973,6 +1070,20 @@ static void integrate_rack_thermal(struct rack_state *rack,
         rack->outlet_temp_c = next_outlet;
         rack->coolant_temp_c = next_coolant;
         rack->cooling_setpoint_c = next_setpoint;
+        rack->cooling_removal_w = next_cooling;
+
+        double average_cooling =
+                0.5 * (rack->cooling_removal_w +
+                       next_cooling);
+
+        rack->inlet_temp_c = next_inlet;
+        rack->outlet_temp_c = next_outlet;
+        rack->coolant_temp_c = next_coolant;
+        rack->cooling_setpoint_c = next_setpoint;
+        rack->cooling_removal_w = next_cooling;
+
+        return (average_cooling / COOLING_COP) *
+               DT_SECONDS;
 }
 
 /*******************************************************************************
@@ -1014,12 +1125,24 @@ static void send_delayed_heat(struct sim *s, dstm_time_t t)
                 };
 
                 /*
-                 * Split recirculated power evenly between both neighboring
-                 * racks.
+                 * Excess exhaust-air enthalpy relative to ambient:
+                 *
+                 *     Q_exhaust = (m_dot * c_p) *
+                 *                 max(T_out - T_ambient, 0)
+                 *
+                 * A fixed fraction is recirculated and divided evenly
+                 * between the two neighboring racks. The DSTM edge delay
+                 * represents its physical propagation time.
                  */
+                double exhaust_heat =
+                        AIRFLOW_HEAT_CAPACITY_W_K *
+                        fmax(s->racks[i].outlet_temp_c -
+                             AMBIENT_TEMP_C,
+                             0.0);
+
                 double heat_per_neighbor =
                         HEAT_RECIRCULATION_FRACTION *
-                        s->racks[i].total_power_watts / 2.0;
+                        exhaust_heat / 2.0;
 
                 for (int n = 0; n < 2; n++) {
                         size_t destination = neighbors[n];
@@ -1067,7 +1190,8 @@ static void run_step(struct sim *s, dstm_time_t t)
         for (size_t r = 0; r < s->local_racks; r++) {
                 double heat = receive_neighbor_heat(s, r, t);
 
-                integrate_rack_thermal(&s->racks[r], heat);
+                s->cooling_energy_joules += integrate_rack_thermal(
+                                                &s->racks[r], heat);
 
                 if (s->racks[r].inlet_temp_c >
                     s->max_inlet_temp_c)
@@ -1195,18 +1319,20 @@ static void print_statistics(const struct sim *s)
                    0,
                    MPI_COMM_WORLD);
 
-        double local_values[3] = {
-                s->energy_joules,
+        double local_values[4] = {
+                s->it_energy_joules,
+                s->cooling_energy_joules,
                 s->max_inlet_temp_c,
                 s->max_outlet_temp_c,
         };
 
-        double total_energy = 0.0;
+        double total_it_energy = 0.0;
+        double total_cooling_energy = 0.0;
         double max_inlet = 0.0;
         double max_outlet = 0.0;
 
         MPI_Reduce(&local_values[0],
-                   &total_energy,
+                   &total_it_energy,
                    1,
                    MPI_DOUBLE,
                    MPI_SUM,
@@ -1214,6 +1340,14 @@ static void print_statistics(const struct sim *s)
                    MPI_COMM_WORLD);
 
         MPI_Reduce(&local_values[1],
+                   &total_cooling_energy,
+                   1,
+                   MPI_DOUBLE,
+                   MPI_SUM,
+                   0,
+                   MPI_COMM_WORLD);
+
+        MPI_Reduce(&local_values[2],
                    &max_inlet,
                    1,
                    MPI_DOUBLE,
@@ -1221,7 +1355,7 @@ static void print_statistics(const struct sim *s)
                    0,
                    MPI_COMM_WORLD);
 
-        MPI_Reduce(&local_values[2],
+        MPI_Reduce(&local_values[3],
                    &max_outlet,
                    1,
                    MPI_DOUBLE,
@@ -1235,8 +1369,13 @@ static void print_statistics(const struct sim *s)
                        global_counts[0]);
                 printf("jobs completed     : %" PRIu64 "\n",
                        global_counts[1]);
-                printf("energy             : %.3f kWh\n",
-                       total_energy / 3600000.0);
+                printf("IT energy          : %.3f kWh\n",
+                       total_it_energy / 3600000.0);
+                printf("cooling energy     : %.3f kWh\n",
+                       total_cooling_energy / 3600000.0);
+                printf("facility energy    : %.3f kWh\n",
+                       (total_it_energy +
+                        total_cooling_energy) / 3600000.0);
                 printf("maximum inlet temp : %.3f C\n",
                        max_inlet);
                 printf("maximum outlet temp: %.3f C\n",
