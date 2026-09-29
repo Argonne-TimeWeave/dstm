@@ -38,6 +38,11 @@ static constexpr double AIRFLOW = 8000.0;
 static constexpr double COOLING_GAIN = 12000.0;
 static constexpr double CONTROL_KP = 0.10;
 static constexpr double SETPOINT_RATE = 0.25;
+
+static constexpr double MAX_COOLING_W = 100000.0;
+static constexpr double COOLING_ACTUATOR_TIME_S = 20.0;
+static constexpr double COOLING_COP = 4.0;
+
 static constexpr double RECIRCULATION = 0.04;
 
 static double clamp(double x, double low, double high)
@@ -61,14 +66,21 @@ public:
     int arrival = 0;
     double heat = 0.0;
 
-    HeatEvent() = default;
+    static constexpr int HEAT_EVENT_PRIORITY = CLOCKPRIORITY - 1;
+
+    HeatEvent()
+    {
+        setPriority(HEAT_EVENT_PRIORITY);
+    }
 
     HeatEvent(int src, int dst, int when, double value) :
         source(src),
         destination(dst),
         arrival(when),
         heat(value)
-    {}
+    {
+        setPriority(HEAT_EVENT_PRIORITY);
+    }
 
     void serialize_order(
         SST::Core::Serialization::serializer& ser) override
@@ -109,6 +121,7 @@ struct Rack {
     double outlet = INITIAL_OUTLET_C;
     double coolant = INITIAL_COOLANT_C;
     double setpoint = INITIAL_SETPOINT_C;
+    double coolingRemoval = 0.0;
 };
 
 struct Allocation {
@@ -219,11 +232,15 @@ public:
     {
         std::printf(
             "domain=%d jobs_started=%llu jobs_completed=%llu "
-            "energy_kwh=%.6f max_inlet=%.3f max_outlet=%.3f\n",
+            "it_energy_kwh=%.6f cooling_energy_kwh=%.6f "
+            "facility_energy_kwh=%.6f "
+            "max_inlet=%.3f max_outlet=%.3f\n",
             domain_,
             static_cast<unsigned long long>(jobsStarted_),
             static_cast<unsigned long long>(jobsCompleted_),
             energyJ_ / 3600000.0,
+            coolingEnergyJ_ / 3600000.0,
+            (energyJ_ + coolingEnergyJ_) / 3600000.0,
             maxInlet_,
             maxOutlet_);
     }
@@ -251,6 +268,7 @@ private:
     uint64_t jobsCompleted_ = 0;
 
     double energyJ_ = 0.0;
+    double coolingEnergyJ_ = 0.0;
     double maxInlet_ = -INFINITY;
     double maxOutlet_ = -INFINITY;
 
@@ -402,8 +420,11 @@ private:
     void scheduleJobs()
     {
         for (Job& job : jobs_) {
-            if (job.status == JobStatus::QUEUED)
-                startJob(job);
+            if (job.status != JobStatus::QUEUED)
+                continue;
+
+            if (!startJob(job))
+                break;
         }
     }
 
@@ -455,22 +476,25 @@ private:
 
     void integrateThermal(Rack& rack, double incomingHeat)
     {
-        double inletTarget =
+        double nextInlet =
             AMBIENT_C + incomingHeat / AIRFLOW;
 
-        double rackRemoved =
+        double heatToAir =
+            AIRFLOW * (rack.outlet - nextInlet);
+
+        double heatToCoolant =
             RACK_UA * (rack.outlet - rack.coolant);
 
         double nextOutlet =
             rack.outlet +
-            (rack.power + incomingHeat - rackRemoved) /
+            (rack.power - heatToAir - heatToCoolant) /
                 RACK_CAPACITY;
 
-        double nextInlet =
-            rack.inlet + 0.5 * (inletTarget - rack.inlet);
-
+        /*
+         * Absolute reset around INITIAL_SETPOINT_C.
+         */
         double requestedSetpoint =
-            rack.setpoint -
+            INITIAL_SETPOINT_C -
             CONTROL_KP * (nextInlet - TARGET_INLET_C);
 
         requestedSetpoint =
@@ -483,18 +507,42 @@ private:
 
         double nextSetpoint = rack.setpoint + setpointDelta;
 
-        double coolingRemoved =
+        double requestedCooling =
             COOLING_GAIN *
             std::max(rack.coolant - nextSetpoint, 0.0);
 
+        requestedCooling =
+            clamp(requestedCooling, 0.0, MAX_COOLING_W);
+
+        double previousCooling = rack.coolingRemoval;
+
+        double nextCooling =
+            previousCooling +
+            (requestedCooling - previousCooling) /
+                COOLING_ACTUATOR_TIME_S;
+
+        nextCooling =
+            clamp(nextCooling, 0.0, MAX_COOLING_W);
+
+        /*
+         * DSTM uses the previous actuator output for this tick's
+         * coolant integration.
+         */
         double nextCoolant =
             rack.coolant +
-            (rackRemoved - coolingRemoved) / COOLANT_CAPACITY;
+            (heatToCoolant - previousCooling) /
+                COOLANT_CAPACITY;
+
+        double averageCooling =
+            0.5 * (previousCooling + nextCooling);
+
+        coolingEnergyJ_ += averageCooling / COOLING_COP;
 
         rack.inlet = nextInlet;
         rack.outlet = nextOutlet;
         rack.coolant = nextCoolant;
         rack.setpoint = nextSetpoint;
+        rack.coolingRemoval = nextCooling;
 
         maxInlet_ = std::max(maxInlet_, rack.inlet);
         maxOutlet_ = std::max(maxOutlet_, rack.outlet);
@@ -507,7 +555,12 @@ private:
         int delay = thermalDelay(source, destination);
         int arrival = currentStep_ + delay;
 
-        double heat = RECIRCULATION * sourceRack.power / 2.0;
+        double exhaustHeat =
+            AIRFLOW *
+            std::max(sourceRack.outlet - AMBIENT_C, 0.0);
+
+        double heat =
+            RECIRCULATION * exhaustHeat / 2.0;
 
         if (destination >= rackOffset_ &&
             destination < rackOffset_ + localRacks_) {
