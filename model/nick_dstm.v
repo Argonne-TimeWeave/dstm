@@ -116,7 +116,7 @@ Definition visible
   ~ pending_write np l t.
 
 Inductive mem_status := Writeable | Readable (*| Discardable*).
-Definition mem := gmap (loc * timestamp) (val * mem_status).
+Definition mem := gmap (loc * timestamp) (val * mem_status). (* revisit this *)
 Definition config := (node_pool * mem)%type.
 
 Inductive step : config -> config -> Prop :=
@@ -134,6 +134,8 @@ Inductive step : config -> config -> Prop :=
   step (np, m) (np, <[(l, t) := (v, Readable)]>m)
 (* It's the runtime's responsibility to ensure that this is done at the right time to make the program work. *)
 .
+
+Definition init_config (prog : gmap node_id (list instr)) : config := ((λ i, (i, ∅)) <$> prog, ∅).
 
 (* I added some proofs for some random basic properties *)
 
@@ -297,6 +299,8 @@ Proof.
   reflexivity.
 Qed.
 
+Definition finished (c : config) := map_Forall (λ _ '(is, _), is = []) (fst c).
+
 End semantics.
 
 (* Examples 
@@ -307,6 +311,44 @@ for some number of timestamps t:
   at t, load n t , make sure the value is t
 
 *)
+Definition ring (n : nat) : gmap node_id (list instr) :=
+  foldr (λ i prog, <[i := [Store 0 (i + 1 `mod` n) 1 1%Z; (*Load 0 "x"%string i 0;*)
+                           Store 1 (i + 1 `mod` n) 2 2%Z; Load 1 "x"%string i 1]]>prog) ∅ (seq 0 n).
+
+Definition neighbor n n1 n2 : bool := (n2 =? n1 + 1 `mod` n) || (n2 =? n1 - 1 `mod` n).
+
+Program Definition ring_graph n : comm_graph := {|
+  world_size := n;
+  channel_lag n1 n2 := if neighbor n n1 n2 then Some 1 else None
+|}.
+Next Obligation.
+Admitted.
+Next Obligation.
+Admitted.
+Next Obligation.
+Admitted.
+
+Lemma ring_can_terminate n : exists c, rtc (step id (ring_graph n)) (init_config (ring n)) c /\ finished c.
+Proof.
+  (* define a three-part schedule (running each instruction); prove each by induction on n *)
+Abort.
+
+(* maybe we won't prove this *)
+Lemma ring_can_always_terminate n : forall c, rtc (step id (ring_graph n)) (init_config (ring n)) c ->
+  exists c', rtc (step id (ring_graph n)) c c' /\ finished c'.
+Proof.
+Abort.
+
+Lemma ring_correct n : forall c, rtc (step id (ring_graph n)) (init_config (ring n)) c -> finished c ->
+  map_Forall (λ _ '(_, e), e !! "x"%string = Some 1%Z) (fst c).
+Proof.
+  (* define an invariant, prove that it's preserved inductively *)
+  (* Invariant: for each node i, either:
+       it has all its instructions left, env is empty, location i+1@1 is 0
+       it has 2 instructions left, env is empty, location i+1@1 is 1
+       it has 1 instruction left, env is empty, location i+1@2 is 2
+       it has no instructions left, env is "x" ↦ 1 *)
+Abort.
 
 Section status_semantics.
 
