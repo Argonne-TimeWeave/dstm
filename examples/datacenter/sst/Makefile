@@ -1,5 +1,5 @@
 SST_CONFIG ?= sst-config
-CXX := $(shell $(SST_CONFIG) --CXX)
+CXX := mpicxx
 
 CXXFLAGS := $(shell $(SST_CONFIG) --ELEMENT_CXXFLAGS) \
 	-O2 -std=c++17 -fPIC

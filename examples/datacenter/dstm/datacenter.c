@@ -1768,6 +1768,7 @@ int main(int argc, char **argv)
                 fflush(stdout);
         }
 
+        
         double start = MPI_Wtime();
 
         for (dstm_time_t t = 0; t < sim.steps; t++)
@@ -1794,7 +1795,7 @@ int main(int argc, char **argv)
         print_statistics(&sim);
 
         if (g_rank == 0)
-                printf("wall-clock runtime  : %.6f seconds\n", end - start);
+                printf("simulation runtime  : %.6f seconds\n", end - start);
 
         teardown_local(&sim);
 
