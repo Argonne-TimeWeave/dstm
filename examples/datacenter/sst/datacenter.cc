@@ -14,6 +14,8 @@
 #include <utility>
 #include <vector>
 
+#include <mpi.h>
+
 namespace dcbench {
 
 static constexpr int MAX_THERMAL_DELAY = 3;
@@ -44,6 +46,11 @@ static constexpr double COOLING_ACTUATOR_TIME_S = 20.0;
 static constexpr double COOLING_COP = 4.0;
 
 static constexpr double RECIRCULATION = 0.04;
+
+double simulationStart_ = 0.0;
+double simulationEnd_ = 0.0;
+bool simulationTimerStarted_ = false;
+bool simulationTimerStopped_ = false;
 
 static double clamp(double x, double low, double high)
 {
@@ -356,6 +363,15 @@ public:
 
     void finish() override
     {
+        double simulationSeconds = simulationTimerStopped_
+            ? simulationEnd_ - simulationStart_
+            : 0.0;
+
+        std::printf(
+            "domain=%d simulation_runtime_seconds=%.9f\n",
+            domain_,
+            simulationSeconds);
+
         std::printf(
             "domain=%d jobs_started=%llu jobs_completed=%llu "
             "it_energy_kwh=%.6f cooling_energy_kwh=%.6f "
@@ -1002,6 +1018,11 @@ private:
 
     bool clockTick(SST::Cycle_t)
     {
+        if (!simulationTimerStarted_) {
+            simulationStart_ = MPI_Wtime();
+            simulationTimerStarted_ = true;
+        }
+
         if (currentStep_ < steps_) {
             /*
              * Consume the schedule published by domain 0 during the
@@ -1036,6 +1057,11 @@ private:
                 rebuildSchedulerUtilization();
                 publishSchedules(effectiveTime);
             }
+
+            if (currentStep_ == steps_ - 1) {
+                simulationEnd_ = MPI_Wtime();
+                simulationTimerStopped_ = true;
+            }
         }
 
         currentStep_++;
@@ -1043,8 +1069,7 @@ private:
         /*
          * Drain both heat and final schedule events.
          */
-        if (currentStep_ >=
-            steps_ + MAX_THERMAL_DELAY + 1) {
+        if (currentStep_ >= steps_ + MAX_THERMAL_DELAY + 1) {
             primaryComponentOKToEndSim();
             return true;
         }
