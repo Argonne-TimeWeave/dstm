@@ -213,7 +213,7 @@ struct rack_state {
 };
 
 struct allocation {
-        int local_rack;
+        int global_rack;
         int node;
 };
 
@@ -249,6 +249,34 @@ struct heat_message {
         double heat_watts;
 };
 
+/*
+ * Rank 0 is the only runtime writer of schedule slots.
+ *
+ * Each rank owns one dstm_darray element. Rank 0 writes element r at
+ * (t, +1), and rank r reads its local element at (t + 1, 0).
+ */
+struct scheduled_node {
+        int cpu_used;
+        int gpu_used;
+        int running_jobs;
+
+        double cpu_utilization;
+        double gpu_utilization;
+};
+
+struct schedule_header {
+        int effective_time;
+        int rack_count;
+        int nodes_per_rack;
+};
+
+/*
+ * The schedule element has variable-sized trailing storage:
+ *
+ *   struct schedule_header
+ *   struct scheduled_node nodes[local_racks * nodes_per_rack]
+ */
+
 /*******************************************************************************
  * Simulation context
  ******************************************************************************/
@@ -263,18 +291,32 @@ struct sim {
 
         struct rack_state *racks;
 
+        /*
+         * Only rank 0 has real jobs. Other ranks have no job records.
+         */
         struct job_state *jobs;
-        size_t local_job_slots;
-        size_t local_real_jobs;
+        size_t job_count;
+
+        /*
+         * Authoritative reservation model, present only on rank 0.
+         * Indexed by:
+         *
+         *   global_rack * nodes_per_rack + node
+         */
+        struct node_state *scheduler_nodes;
 
         dstm_distance_t *distance;
         dstm_dgraph_t *thermal_graph;
-        dstm_darray_t *job_array;
+
+        /*
+         * One fixed-size schedule element per rank.
+         */
+        dstm_darray_t *schedule_array;
+        size_t schedule_global_offset;
+        void *schedule_buffer;
 
         size_t *degrees;
         size_t *destinations;
-
-        size_t job_global_offset;
 
         uint64_t jobs_started;
         uint64_t jobs_completed;
@@ -327,6 +369,73 @@ static int thermal_delay(size_t a, size_t b)
                         (uint64_t)hi * 2246822519ULL;
 
         return 1 + (int)(hash % MAX_THERMAL_DELAY);
+}
+
+static size_t schedule_node_count(const struct sim *s)
+{
+        return s->local_racks * (size_t)s->nodes_per_rack;
+}
+
+static size_t schedule_element_size(const struct sim *s)
+{
+        return sizeof(struct schedule_header) +
+               schedule_node_count(s) * sizeof(struct scheduled_node);
+}
+
+static struct scheduled_node *schedule_nodes(void *buffer)
+{
+        return (struct scheduled_node *)
+                ((unsigned char *)buffer +
+                 sizeof(struct schedule_header));
+}
+
+static const struct scheduled_node *schedule_nodes_const(
+        const void *buffer)
+{
+        return (const struct scheduled_node *)
+                ((const unsigned char *)buffer +
+                 sizeof(struct schedule_header));
+}
+
+static struct node_state *scheduler_node(
+        struct sim *s,
+        size_t global_rack,
+        int node)
+{
+        REQUIRE(g_rank == 0, "scheduler state accessed outside rank 0");
+        REQUIRE(global_rack < (size_t)s->total_racks,
+                "invalid global scheduler rack");
+        REQUIRE(node >= 0 && node < s->nodes_per_rack,
+                "invalid global scheduler node");
+
+        return &s->scheduler_nodes[
+                global_rack * (size_t)s->nodes_per_rack +
+                (size_t)node];
+}
+
+static void initialize_global_scheduler(struct sim *s)
+{
+        if (g_rank != 0)
+                return;
+
+        size_t count =
+                (size_t)s->total_racks *
+                (size_t)s->nodes_per_rack;
+
+        s->scheduler_nodes =
+                calloc(count, sizeof(*s->scheduler_nodes));
+
+        REQUIRE(s->scheduler_nodes != NULL,
+                "global scheduler node allocation");
+
+        for (size_t i = 0; i < count; i++) {
+                s->scheduler_nodes[i].cpu_capacity =
+                        NODE_CPU_CAPACITY;
+                s->scheduler_nodes[i].gpu_capacity =
+                        NODE_GPU_CAPACITY;
+                s->scheduler_nodes[i].power_watts =
+                        NODE_IDLE_POWER_W;
+        }
 }
 
 /*******************************************************************************
@@ -392,7 +501,7 @@ static int load_local_jobs(struct sim *s, const char *path)
                  * synchronization bottleneck while preserving explicit
                  * arrival/allocation/start/completion semantics.
                  */
-                if ((id % g_world_size) == g_rank) {
+                if (g_rank == 0) {
                         if (count == capacity) {
                                 capacity = capacity ? capacity * 2 : 32;
                                 jobs = realloc(jobs,
@@ -426,18 +535,13 @@ static int load_local_jobs(struct sim *s, const char *path)
 
         fclose(file);
 
-        /*
-         * dstm_darray_create requires every rank to own at least one element.
-         * A rank with no real jobs therefore receives one unused slot.
-         */
-        s->local_real_jobs = count;
-        s->local_job_slots = count ? count : 1;
-        s->jobs = calloc(s->local_job_slots, sizeof(*s->jobs));
+        s->job_count = count;
 
-        REQUIRE(s->jobs != NULL, "local job storage");
-
-        if (count > 0)
+        if (count > 0) {
+                s->jobs = malloc(count * sizeof(*s->jobs));
+                REQUIRE(s->jobs != NULL, "global job storage");
                 memcpy(s->jobs, jobs, count * sizeof(*jobs));
+        }
 
         free(jobs);
         return 0;
@@ -486,7 +590,7 @@ static void build_local_thermal_topology(struct sim *s)
 
 static int build_distance_matrix(struct sim *s)
 {
-        dstm_distance_t *parts[MAX_THERMAL_DELAY] = {0};
+        dstm_distance_t *parts[MAX_THERMAL_DELAY + 1] = {0};
         int *matrices[MAX_THERMAL_DELAY] = {0};
         int ws = g_world_size;
 
@@ -538,17 +642,46 @@ static int build_distance_matrix(struct sim *s)
                         return -1;
         }
 
-        const dstm_distance_t *inputs[MAX_THERMAL_DELAY];
+        /*
+         * Global scheduler control network.
+         *
+         * Rank 0 must be able to write every rank's schedule with a
+         * one-tick delay.
+         */
+        int *control =
+                malloc((size_t)ws * (size_t)ws * sizeof(*control));
 
-        for (int i = 0; i < MAX_THERMAL_DELAY; i++)
+        if (control == NULL)
+                return -1;
+
+        for (int i = 0; i < ws; i++) {
+                for (int j = 0; j < ws; j++) {
+                        control[(size_t)i * ws + j] =
+                                (i == j) ? 0 : 1;
+                }
+        }
+
+        int control_rc = dstm_distance_create_from_matrix(
+                &parts[MAX_THERMAL_DELAY],
+                (size_t)ws,
+                control);
+
+        free(control);
+
+        if (control_rc != DSTM_SUCCESS)
+                return -1;
+
+        const dstm_distance_t *inputs[MAX_THERMAL_DELAY + 1];
+
+        for (int i = 0; i < MAX_THERMAL_DELAY + 1; i++)
                 inputs[i] = parts[i];
 
         int rc = dstm_distance_combine(
                 &s->distance,
                 inputs,
-                MAX_THERMAL_DELAY);
+                MAX_THERMAL_DELAY + 1);
 
-        for (int i = 0; i < MAX_THERMAL_DELAY; i++)
+        for (int i = 0; i < MAX_THERMAL_DELAY + 1; i++)
                 dstm_distance_destroy(&parts[i]);
 
         return rc == DSTM_SUCCESS ? 0 : -1;
@@ -627,30 +760,12 @@ static void prefill_heat_pipeline(struct sim *s)
         }
 }
 
-static void publish_initial_jobs(struct sim *s)
-{
-        for (size_t i = 0; i < s->local_job_slots; i++) {
-                size_t global_index = s->job_global_offset + i;
-
-                CHECK(dstm_darray_put(s->job_array,
-                                      global_index,
-                                      &s->jobs[i],
-                                      0,
-                                      0),
-                      "initial job put");
-        }
-}
-
 /*******************************************************************************
  * Version reads
  ******************************************************************************/
 
-static void read_current_versions(struct sim *s, dstm_time_t t)
+static void read_current_racks(struct sim *s, dstm_time_t t)
 {
-        /*
-         * Read rack versions owned by this rank. A delta-zero access is
-         * legal because every vertex is local.
-         */
         for (size_t i = 0; i < s->local_racks; i++) {
                 size_t rack_id = s->rack_offset + i;
 
@@ -661,39 +776,161 @@ static void read_current_versions(struct sim *s, dstm_time_t t)
                                              0),
                       "rack vertex get");
         }
+}
 
-        for (size_t i = 0; i < s->local_job_slots; i++) {
-                size_t global_index = s->job_global_offset + i;
+static void receive_global_schedule(struct sim *s, dstm_time_t t)
+{
+        memset(s->schedule_buffer, 0,
+               schedule_element_size(s));
 
-                CHECK(dstm_darray_get(s->job_array,
-                                      global_index,
-                                      &s->jobs[i],
-                                      t,
-                                      0),
-                      "job state get");
+        CHECK(dstm_darray_get(
+                      s->schedule_array,
+                      s->schedule_global_offset,
+                      s->schedule_buffer,
+                      t,
+                      0),
+              "schedule get");
+
+        const struct schedule_header *header =
+                (const struct schedule_header *)s->schedule_buffer;
+
+        /*
+         * Ignore a stale/default version. Rank 0 populates every effective
+         * timestamp after time zero.
+         */
+        if (header->effective_time != (int)t)
+                return;
+
+        REQUIRE(header->rack_count == (int)s->local_racks,
+                "schedule rack count mismatch");
+        REQUIRE(header->nodes_per_rack == s->nodes_per_rack,
+                "schedule node count mismatch");
+
+        const struct scheduled_node *input =
+                schedule_nodes_const(s->schedule_buffer);
+
+        size_t index = 0;
+
+        for (size_t r = 0; r < s->local_racks; r++) {
+                for (int n = 0; n < s->nodes_per_rack; n++, index++) {
+                        struct node_state *node =
+                                &s->racks[r].nodes[n];
+
+                        node->cpu_used =
+                                input[index].cpu_used;
+                        node->gpu_used =
+                                input[index].gpu_used;
+                        node->running_jobs =
+                                input[index].running_jobs;
+
+                        node->cpu_utilization =
+                                input[index].cpu_utilization;
+                        node->gpu_utilization =
+                                input[index].gpu_utilization;
+                }
         }
+}
+
+static void publish_global_schedule(struct sim *s, dstm_time_t t)
+{
+        REQUIRE(g_rank == 0,
+                "only rank 0 may publish schedules");
+
+        int effective_time = (int)t + 1;
+        size_t bytes = schedule_element_size(s);
+        void *buffer = calloc(1, bytes);
+
+        REQUIRE(buffer != NULL,
+                "schedule publication buffer");
+
+        struct schedule_header *header =
+                (struct schedule_header *)buffer;
+
+        header->effective_time = effective_time;
+        header->rack_count = (int)s->local_racks;
+        header->nodes_per_rack = s->nodes_per_rack;
+
+        struct scheduled_node *output =
+                schedule_nodes(buffer);
+
+        for (int destination_rank = 0;
+             destination_rank < g_world_size;
+             destination_rank++) {
+                size_t first_global_rack =
+                        (size_t)destination_rank *
+                        s->local_racks;
+
+                size_t index = 0;
+
+                for (size_t r = 0; r < s->local_racks; r++) {
+                        size_t global_rack =
+                                first_global_rack + r;
+
+                        for (int n = 0;
+                             n < s->nodes_per_rack;
+                             n++, index++) {
+                                const struct node_state *node =
+                                        scheduler_node(
+                                                s,
+                                                global_rack,
+                                                n);
+
+                                output[index].cpu_used =
+                                        node->cpu_used;
+                                output[index].gpu_used =
+                                        node->gpu_used;
+                                output[index].running_jobs =
+                                        node->running_jobs;
+
+                                output[index].cpu_utilization =
+                                        node->cpu_utilization;
+                                output[index].gpu_utilization =
+                                        node->gpu_utilization;
+                        }
+                }
+
+                /*
+                 * Every rank owns one element, and every rank contributes
+                 * exactly one element, so destination_rank is its global
+                 * array index.
+                 */
+                CHECK(dstm_darray_put(
+                              s->schedule_array,
+                              (size_t)destination_rank,
+                              buffer,
+                              t,
+                              1),
+                      "global schedule put");
+        }
+
+        free(buffer);
 }
 
 /*******************************************************************************
  * Scheduler
  ******************************************************************************/
 
-static void release_completed_jobs(struct sim *s, int t)
+static void release_completed_jobs(struct sim *s, int effective_time)
 {
-        for (size_t j = 0; j < s->local_real_jobs; j++) {
+        REQUIRE(g_rank == 0,
+                "only rank 0 may release global jobs");
+
+        for (size_t j = 0; j < s->job_count; j++) {
                 struct job_state *job = &s->jobs[j];
 
                 if (job->status != JOB_RUNNING)
                         continue;
-                if (job->completion_time > t)
+                if (job->completion_time > effective_time)
                         continue;
 
                 for (int a = 0; a < job->allocation_count; a++) {
-                        int r = job->allocations[a].local_rack;
-                        int n = job->allocations[a].node;
+                        int rack = job->allocations[a].global_rack;
+                        int node_index = job->allocations[a].node;
 
                         struct node_state *node =
-                                &s->racks[r].nodes[n];
+                                scheduler_node(s,
+                                               (size_t)rack,
+                                               node_index);
 
                         node->cpu_used -= job->cpu_per_node;
                         node->gpu_used -= job->gpu_per_node;
@@ -710,13 +947,16 @@ static void release_completed_jobs(struct sim *s, int t)
         }
 }
 
-static void admit_arrivals(struct sim *s, int t)
+static void admit_arrivals(struct sim *s, int arrival_time)
 {
-        for (size_t j = 0; j < s->local_real_jobs; j++) {
+        REQUIRE(g_rank == 0,
+                "only rank 0 may admit global jobs");
+
+        for (size_t j = 0; j < s->job_count; j++) {
                 struct job_state *job = &s->jobs[j];
 
                 if (job->status == JOB_FUTURE &&
-                    job->arrival_time <= t)
+                    job->arrival_time <= arrival_time)
                         job->status = JOB_QUEUED;
         }
 }
@@ -731,28 +971,40 @@ static int node_can_host(const struct node_state *node,
                gpu_free >= job->gpu_per_node;
 }
 
-static int try_start_job(struct sim *s, struct job_state *job, int t)
+static int try_start_job(struct sim *s,
+                         struct job_state *job,
+                         int effective_time)
 {
         struct allocation candidates[MAX_JOB_NODES];
         int candidate_count = 0;
 
-        for (size_t r = 0;
-             r < s->local_racks &&
-             candidate_count < job->requested_nodes;
-             r++) {
-                struct rack_state *rack = &s->racks[r];
+        REQUIRE(g_rank == 0,
+                "only rank 0 may place global jobs");
 
-                for (int n = 0;
-                     n < rack->node_count &&
+        /*
+         * Deterministic global first-fit ordering:
+         *
+         *   global rack 0..N-1
+         *   node 0..nodes_per_rack-1
+         */
+        for (size_t rack = 0;
+             rack < (size_t)s->total_racks &&
+             candidate_count < job->requested_nodes;
+             rack++) {
+                for (int node_index = 0;
+                     node_index < s->nodes_per_rack &&
                      candidate_count < job->requested_nodes;
-                     n++) {
-                        if (!node_can_host(&rack->nodes[n], job))
+                     node_index++) {
+                        struct node_state *node =
+                                scheduler_node(s, rack, node_index);
+
+                        if (!node_can_host(node, job))
                                 continue;
 
                         candidates[candidate_count++] =
                                 (struct allocation) {
-                                        .local_rack = (int)r,
-                                        .node = n,
+                                        .global_rack = (int)rack,
+                                        .node = node_index,
                                 };
                 }
         }
@@ -761,48 +1013,43 @@ static int try_start_job(struct sim *s, struct job_state *job, int t)
                 return 0;
 
         for (int a = 0; a < candidate_count; a++) {
-                int r = candidates[a].local_rack;
-                int n = candidates[a].node;
-                struct node_state *node = &s->racks[r].nodes[n];
+                struct allocation allocation = candidates[a];
+
+                struct node_state *node =
+                        scheduler_node(
+                                s,
+                                (size_t)allocation.global_rack,
+                                allocation.node);
 
                 node->cpu_used += job->cpu_per_node;
                 node->gpu_used += job->gpu_per_node;
                 node->running_jobs++;
 
-                job->allocations[a] = candidates[a];
+                job->allocations[a] = allocation;
         }
 
         job->allocation_count = candidate_count;
-        job->start_time = t;
-        job->completion_time = t + job->duration;
+        job->start_time = effective_time;
+        job->completion_time =
+                effective_time + job->duration;
         job->status = JOB_RUNNING;
 
         s->jobs_started++;
         return 1;
 }
 
-static void schedule_queued_jobs(struct sim *s, int t)
+static void schedule_queued_jobs(struct sim *s, int effective_time)
 {
-        /*
-         * Deterministic per-domain FCFS semantics:
-         *
-         *   1. Jobs are ordered by trace/job id.
-         *   2. All arrivals at time t are admitted before scheduling.
-         *   3. The oldest queued job is considered first.
-         *   4. If it cannot start, later jobs cannot bypass it.
-         *   5. A job completing at t releases resources before arrivals and
-         *      scheduling at t.
-         *
-         * These are benchmark semantics, not semantics supplied by SST.
-         * The SST implementation must reproduce this event order exactly.
-         */
-        for (size_t j = 0; j < s->local_real_jobs; j++) {
+        REQUIRE(g_rank == 0,
+                "only rank 0 may schedule global jobs");
+
+        for (size_t j = 0; j < s->job_count; j++) {
                 struct job_state *job = &s->jobs[j];
 
                 if (job->status != JOB_QUEUED)
                         continue;
 
-                if (!try_start_job(s, job, t))
+                if (!try_start_job(s, job, effective_time))
                         break;
         }
 }
@@ -811,50 +1058,62 @@ static void schedule_queued_jobs(struct sim *s, int t)
  * Utilization and power
  ******************************************************************************/
 
-static void update_utilization_and_power(struct sim *s)
+static void rebuild_global_scheduler_utilization(struct sim *s)
 {
-        /*
-         * Capacity reservation and utilization are kept separate:
-         *
-         *   cpu_used       reserves scheduler capacity;
-         *   utilization    describes the active workload fraction;
-         *   power          is calculated from utilization.
-         */
-        for (size_t r = 0; r < s->local_racks; r++) {
-                struct rack_state *rack = &s->racks[r];
+        REQUIRE(g_rank == 0,
+                "only rank 0 may rebuild global utilization");
 
-                for (int n = 0; n < rack->node_count; n++) {
-                        rack->nodes[n].cpu_utilization = 0.0;
-                        rack->nodes[n].gpu_utilization = 0.0;
-                }
+        size_t node_count =
+                (size_t)s->total_racks *
+                (size_t)s->nodes_per_rack;
+
+        for (size_t i = 0; i < node_count; i++) {
+                s->scheduler_nodes[i].cpu_utilization = 0.0;
+                s->scheduler_nodes[i].gpu_utilization = 0.0;
         }
 
-        for (size_t j = 0; j < s->local_real_jobs; j++) {
+        for (size_t j = 0; j < s->job_count; j++) {
                 const struct job_state *job = &s->jobs[j];
 
                 if (job->status != JOB_RUNNING)
                         continue;
 
                 for (int a = 0; a < job->allocation_count; a++) {
-                        int r = job->allocations[a].local_rack;
-                        int n = job->allocations[a].node;
-                        struct node_state *node = &s->racks[r].nodes[n];
+                        int rack = job->allocations[a].global_rack;
+                        int node_index = job->allocations[a].node;
 
-                        double cpu_share =
+                        struct node_state *node =
+                                scheduler_node(s,
+                                               (size_t)rack,
+                                               node_index);
+
+                        node->cpu_utilization +=
                                 ((double)job->cpu_per_node /
                                  (double)node->cpu_capacity) *
                                 job->cpu_utilization;
 
-                        double gpu_share =
+                        node->gpu_utilization +=
                                 ((double)job->gpu_per_node /
                                  (double)node->gpu_capacity) *
                                 job->gpu_utilization;
-
-                        node->cpu_utilization += cpu_share;
-                        node->gpu_utilization += gpu_share;
                 }
         }
 
+        for (size_t i = 0; i < node_count; i++) {
+                struct node_state *node = &s->scheduler_nodes[i];
+
+                node->cpu_utilization =
+                        clamp_double(node->cpu_utilization,
+                                     0.0, 1.0);
+
+                node->gpu_utilization =
+                        clamp_double(node->gpu_utilization,
+                                     0.0, 1.0);
+        }
+}
+
+static void update_local_power(struct sim *s)
+{
         for (size_t r = 0; r < s->local_racks; r++) {
                 struct rack_state *rack = &s->racks[r];
 
@@ -862,14 +1121,6 @@ static void update_utilization_and_power(struct sim *s)
 
                 for (int n = 0; n < rack->node_count; n++) {
                         struct node_state *node = &rack->nodes[n];
-
-                        node->cpu_utilization =
-                                clamp_double(node->cpu_utilization,
-                                             0.0, 1.0);
-
-                        node->gpu_utilization =
-                                clamp_double(node->gpu_utilization,
-                                             0.0, 1.0);
 
                         node->power_watts =
                                 NODE_IDLE_POWER_W +
@@ -1089,17 +1340,6 @@ static void publish_next_state(struct sim *s, dstm_time_t t)
                                              1),
                       "rack vertex put");
         }
-
-        for (size_t i = 0; i < s->local_job_slots; i++) {
-                size_t global_index = s->job_global_offset + i;
-
-                CHECK(dstm_darray_put(s->job_array,
-                                      global_index,
-                                      &s->jobs[i],
-                                      t,
-                                      1),
-                      "job state put");
-        }
 }
 
 static void send_delayed_heat(struct sim *s, dstm_time_t t)
@@ -1161,24 +1401,22 @@ static void send_delayed_heat(struct sim *s, dstm_time_t t)
 static void run_step(struct sim *s, dstm_time_t t)
 {
         /*
-         * All reads target effective time t. All state writes target t+1,
-         * while heat writes target t+physical_delay. This preserves DSTM's
-         * put-before-get rule for each effective timestamp.
+         * First load this rank's thermal state and the schedule that rank 0
+         * published during the preceding tick.
          */
-        read_current_versions(s, t);
+        read_current_racks(s, t);
+        receive_global_schedule(s, t);
 
-        /* SST-style event order. */
-        release_completed_jobs(s, (int)t);
-        admit_arrivals(s, (int)t);
-        schedule_queued_jobs(s, (int)t);
-
-        update_utilization_and_power(s);
+        /*
+         * The received utilization drives local IT power and thermal state.
+         */
+        update_local_power(s);
 
         for (size_t r = 0; r < s->local_racks; r++) {
                 double heat = receive_neighbor_heat(s, r, t);
 
-                s->cooling_energy_joules += integrate_rack_thermal(
-                                                &s->racks[r], heat);
+                s->cooling_energy_joules +=
+                        integrate_rack_thermal(&s->racks[r], heat);
 
                 if (s->racks[r].inlet_temp_c >
                     s->max_inlet_temp_c)
@@ -1189,6 +1427,23 @@ static void run_step(struct sim *s, dstm_time_t t)
                     s->max_outlet_temp_c)
                         s->max_outlet_temp_c =
                                 s->racks[r].outlet_temp_c;
+        }
+
+        /*
+         * Rank 0 computes the schedule for effective time t+1.
+         *
+         * Jobs arriving at t therefore begin consuming resources at t+1.
+         * A duration-D job started at S is absent from the snapshot for
+         * effective time S+D.
+         */
+        if (g_rank == 0) {
+                int effective_time = (int)t + 1;
+
+                release_completed_jobs(s, effective_time);
+                admit_arrivals(s, (int)t);
+                schedule_queued_jobs(s, effective_time);
+                rebuild_global_scheduler_utilization(s);
+                publish_global_schedule(s, t);
         }
 
         publish_next_state(s, t);
@@ -1221,6 +1476,7 @@ static int setup(struct sim *s, const char *job_path)
         s->max_outlet_temp_c = -INFINITY;
 
         initialize_racks(s);
+        initialize_global_scheduler(s);
         build_local_thermal_topology(s);
 
         if (load_local_jobs(s, job_path) != 0)
@@ -1251,25 +1507,52 @@ static int setup(struct sim *s, const char *job_path)
                       NULL),
               "thermal graph create");
 
+        /*
+         * Every rank owns exactly one schedule element, so the global
+         * index of rank r's element is r.
+         */
         CHECK(dstm_darray_create(
-                      &s->job_array,
-                      sizeof(struct job_state),
-                      s->local_job_slots),
-              "job array create");
+                      &s->schedule_array,
+                      schedule_element_size(s),
+                      1),
+              "schedule array create");
 
-        s->job_global_offset =
-                dstm_darray_global_offset(s->job_array);
+        s->schedule_global_offset =
+                dstm_darray_global_offset(s->schedule_array);
 
-        publish_initial_jobs(s);
+        REQUIRE(s->schedule_global_offset == (size_t)g_rank,
+                "schedule array rank/index mapping");
+
+        s->schedule_buffer =
+                calloc(1, schedule_element_size(s));
+
+        REQUIRE(s->schedule_buffer != NULL,
+                "schedule buffer allocation");
+
         prefill_heat_pipeline(s);
+
+        struct schedule_header *initial =
+                (struct schedule_header *)s->schedule_buffer;
+
+        initial->effective_time = 0;
+        initial->rack_count = (int)s->local_racks;
+        initial->nodes_per_rack = s->nodes_per_rack;
+
+        CHECK(dstm_darray_put(
+                      s->schedule_array,
+                      s->schedule_global_offset,
+                      s->schedule_buffer,
+                      0,
+                      0),
+              "initial schedule put");
 
         return 0;
 }
 
 static void teardown_dstm(struct sim *s)
 {
-        if (s->job_array != NULL)
-                dstm_darray_destroy(&s->job_array);
+        if (s->schedule_array != NULL)
+                dstm_darray_destroy(&s->schedule_array);
 
         if (s->thermal_graph != NULL)
                 dstm_dgraph_destroy(&s->thermal_graph);
@@ -1283,6 +1566,8 @@ static void teardown_local(struct sim *s)
         free(s->destinations);
         free(s->racks);
         free(s->jobs);
+        free(s->scheduler_nodes);
+        free(s->schedule_buffer);
 }
 
 /*******************************************************************************

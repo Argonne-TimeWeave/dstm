@@ -2,7 +2,7 @@
 #include <sst/core/event.h>
 #include <sst/core/link.h>
 #include <sst/core/params.h>
-#include <sst/core/serialization/serializer.h>
+#include <sst/core/serialization/serialize.h>
 
 #include <algorithm>
 #include <cmath>
@@ -95,6 +95,68 @@ public:
     ImplementSerializable(HeatEvent);
 };
 
+struct ScheduledNode {
+    int cpuUsed = 0;
+    int gpuUsed = 0;
+    int runningJobs = 0;
+
+    double cpuUtil = 0.0;
+    double gpuUtil = 0.0;
+};
+
+class ScheduleEvent : public SST::Event {
+public:
+    int destinationDomain = 0;
+    int effectiveTime = 0;
+    int rackCount = 0;
+    int nodesPerRack = 0;
+
+    std::vector<int> cpuUsed;
+    std::vector<int> gpuUsed;
+    std::vector<int> runningJobs;
+    std::vector<double> cpuUtil;
+    std::vector<double> gpuUtil;
+
+    static constexpr int SCHEDULE_EVENT_PRIORITY =
+        CLOCKPRIORITY - 1;
+
+    ScheduleEvent()
+    {
+        setPriority(SCHEDULE_EVENT_PRIORITY);
+    }
+
+    ScheduleEvent(int destination,
+                  int effective,
+                  int racks,
+                  int nodes) :
+        destinationDomain(destination),
+        effectiveTime(effective),
+        rackCount(racks),
+        nodesPerRack(nodes)
+    {
+        setPriority(SCHEDULE_EVENT_PRIORITY);
+    }
+
+    void serialize_order(
+        SST::Core::Serialization::serializer& ser) override
+    {
+        SST::Event::serialize_order(ser);
+
+        ser.primitive(destinationDomain);
+        ser.primitive(effectiveTime);
+        ser.primitive(rackCount);
+        ser.primitive(nodesPerRack);
+
+        SST_SER(cpuUsed);
+        SST_SER(gpuUsed);
+        SST_SER(runningJobs);
+        SST_SER(cpuUtil);
+        SST_SER(gpuUtil);
+    }
+
+    ImplementSerializable(ScheduleEvent);
+};
+
 enum class JobStatus {
     FUTURE,
     QUEUED,
@@ -125,7 +187,7 @@ struct Rack {
 };
 
 struct Allocation {
-    int rack = 0;
+    int globalRack = 0;
     int node = 0;
 };
 
@@ -167,8 +229,21 @@ public:
     )
 
     SST_ELI_DOCUMENT_PORTS(
-        {"left",  "Left neighboring domain",  {"dcbench.HeatEvent"}},
-        {"right", "Right neighboring domain", {"dcbench.HeatEvent"}}
+        {"left",
+         "Left neighboring thermal domain",
+         {"dcbench.HeatEvent"}},
+
+        {"right",
+         "Right neighboring thermal domain",
+         {"dcbench.HeatEvent"}},
+
+        /*
+         * Domain 0 uses schedule_1, schedule_2, ...
+         * Every nonzero domain receives on schedule_0.
+         */
+        {"schedule%(domains)d",
+         "Central scheduler control link",
+         {"dcbench.ScheduleEvent"}}
     )
 
     Datacenter(SST::ComponentId_t id, SST::Params& params) :
@@ -206,11 +281,62 @@ public:
                 CALL_INFO, 1, "left/right links are required\n");
         }
 
+        scheduleLinks_.resize(
+            static_cast<size_t>(domains_), nullptr);
+
+        if (domain_ == 0) {
+            for (int destination = 1;
+                 destination < domains_;
+                 ++destination) {
+                std::string port =
+                    "schedule" + std::to_string(destination);
+
+                scheduleLinks_[destination] = configureLink(
+                    port,
+                    new SST::Event::Handler2<
+                        Datacenter,
+                        &Datacenter::handleSchedule>(this));
+
+                if (!scheduleLinks_[destination]) {
+                    getSimulationOutput().fatal(
+                        CALL_INFO, 1,
+                        "scheduler link %s is required\n",
+                        port.c_str());
+                }
+            }
+        } else {
+            scheduleLinks_[0] = configureLink(
+                "schedule0",
+                new SST::Event::Handler2<
+                    Datacenter,
+                    &Datacenter::handleSchedule>(this));
+
+            if (!scheduleLinks_[0]) {
+                getSimulationOutput().fatal(
+                    CALL_INFO, 1,
+                    "schedule_0 link is required on domain %d\n",
+                    domain_);
+            }
+        }
+
         racks_.resize(localRacks_);
 
         for (int r = 0; r < localRacks_; ++r) {
             racks_[r].globalId = rackOffset_ + r;
             racks_[r].nodes.resize(nodesPerRack_);
+        }
+
+        pendingSchedules_.resize(
+            static_cast<size_t>(steps_ + MAX_THERMAL_DELAY + 2));
+
+        scheduleReady_.resize(
+            static_cast<size_t>(steps_ + MAX_THERMAL_DELAY + 2),
+            false);
+
+        if (domain_ == 0) {
+            schedulerNodes_.resize(
+                static_cast<size_t>(totalRacks_) *
+                static_cast<size_t>(nodesPerRack_));
         }
 
         pendingHeat_.resize(
@@ -264,6 +390,24 @@ private:
     std::vector<Job> jobs_;
     std::vector<std::vector<double>> pendingHeat_;
 
+    /*
+     * Only domain 0 owns and modifies these nodes. They represent the
+     * authoritative resource state for every rack in the datacenter.
+     */
+    std::vector<Node> schedulerNodes_;
+
+    /*
+     * Domain 0 has scheduleLinks_[d] for every d != 0.
+     * Other domains only have scheduleLinks_[0].
+     */
+    std::vector<SST::Link*> scheduleLinks_;
+
+    /*
+     * Schedules are indexed by their logical effective time.
+     */
+    std::vector<std::vector<ScheduledNode>> pendingSchedules_;
+    std::vector<bool> scheduleReady_;
+
     uint64_t jobsStarted_ = 0;
     uint64_t jobsCompleted_ = 0;
 
@@ -274,6 +418,9 @@ private:
 
     void loadJobs()
     {
+        if (domain_ != 0)
+            return;
+        
         std::ifstream input(jobPath_);
 
         if (!input) {
@@ -307,14 +454,31 @@ private:
                     "malformed job record: %s\n", line.c_str());
             }
 
-            if ((job.id % domains_) != domain_)
-                continue;
-
             job.cpuUtil = clamp(job.cpuUtil, 0.0, 1.0);
             job.gpuUtil = clamp(job.gpuUtil, 0.0, 1.0);
 
             jobs_.push_back(job);
         }
+    }
+
+    Node& schedulerNode(int globalRack, int node)
+    {
+        size_t index =
+            static_cast<size_t>(globalRack) *
+                static_cast<size_t>(nodesPerRack_) +
+            static_cast<size_t>(node);
+
+        return schedulerNodes_[index];
+    }
+
+    const Node& schedulerNode(int globalRack, int node) const
+    {
+        size_t index =
+            static_cast<size_t>(globalRack) *
+                static_cast<size_t>(nodesPerRack_) +
+            static_cast<size_t>(node);
+
+        return schedulerNodes_[index];
     }
 
     void handleHeat(SST::Event* event)
@@ -338,21 +502,31 @@ private:
         delete heat;
     }
 
-    void releaseCompletedJobs()
+    void releaseCompletedJobs(int effectiveTime)
     {
         for (Job& job : jobs_) {
             if (job.status != JobStatus::RUNNING ||
-                job.completion > currentStep_) {
+                job.completion > effectiveTime) {
                 continue;
             }
 
             for (const Allocation& allocation : job.allocations) {
                 Node& node =
-                    racks_[allocation.rack].nodes[allocation.node];
+                    schedulerNode(
+                        allocation.globalRack,
+                        allocation.node);
 
                 node.cpuUsed -= job.cpuPerNode;
                 node.gpuUsed -= job.gpuPerNode;
                 node.runningJobs--;
+
+                if (node.cpuUsed < 0 ||
+                    node.gpuUsed < 0 ||
+                    node.runningJobs < 0) {
+                    getSimulationOutput().fatal(
+                        CALL_INFO, 1,
+                        "negative scheduler reservation state\n");
+                }
             }
 
             job.allocations.clear();
@@ -361,11 +535,11 @@ private:
         }
     }
 
-    void admitJobs()
+    void admitJobs(int arrivalTime)
     {
         for (Job& job : jobs_) {
             if (job.status == JobStatus::FUTURE &&
-                job.arrival <= currentStep_) {
+                job.arrival <= arrivalTime) {
                 job.status = JobStatus::QUEUED;
             }
         }
@@ -377,21 +551,33 @@ private:
                GPU_CAPACITY - node.gpuUsed >= job.gpuPerNode;
     }
 
-    bool startJob(Job& job)
+    bool startJob(Job& job, int effectiveTime)
     {
         std::vector<Allocation> candidates;
 
-        for (int r = 0;
-             r < localRacks_ &&
-             static_cast<int>(candidates.size()) < job.requestedNodes;
-             ++r) {
-            for (int n = 0;
-                 n < nodesPerRack_ &&
+        /*
+         * Same deterministic first-fit order as the centralized DSTM
+         * scheduler:
+         *
+         *   global rack 0..totalRacks-1
+         *   node 0..nodesPerRack-1
+         */
+        for (int rack = 0;
+             rack < totalRacks_ &&
+             static_cast<int>(candidates.size()) <
+                 job.requestedNodes;
+             ++rack) {
+            for (int nodeIndex = 0;
+                 nodeIndex < nodesPerRack_ &&
                  static_cast<int>(candidates.size()) <
                      job.requestedNodes;
-                 ++n) {
-                if (canHost(racks_[r].nodes[n], job))
-                    candidates.push_back({r, n});
+                 ++nodeIndex) {
+                if (canHost(
+                        schedulerNode(rack, nodeIndex),
+                        job)) {
+                    candidates.push_back(
+                        {rack, nodeIndex});
+                }
             }
         }
 
@@ -402,7 +588,9 @@ private:
 
         for (const Allocation& allocation : candidates) {
             Node& node =
-                racks_[allocation.rack].nodes[allocation.node];
+                schedulerNode(
+                    allocation.globalRack,
+                    allocation.node);
 
             node.cpuUsed += job.cpuPerNode;
             node.gpuUsed += job.gpuPerNode;
@@ -410,20 +598,20 @@ private:
         }
 
         job.allocations = std::move(candidates);
-        job.completion = currentStep_ + job.duration;
+        job.completion = effectiveTime + job.duration;
         job.status = JobStatus::RUNNING;
         jobsStarted_++;
 
         return true;
     }
 
-    void scheduleJobs()
+    void scheduleJobs(int effectiveTime)
     {
         for (Job& job : jobs_) {
             if (job.status != JobStatus::QUEUED)
                 continue;
 
-            if (!startJob(job))
+            if (!startJob(job, effectiveTime))
                 break;
         }
     }
@@ -434,33 +622,11 @@ private:
             rack.power = 0.0;
 
             for (Node& node : rack.nodes) {
-                node.cpuUtil = 0.0;
-                node.gpuUtil = 0.0;
-            }
-        }
+                node.cpuUtil =
+                    clamp(node.cpuUtil, 0.0, 1.0);
 
-        for (const Job& job : jobs_) {
-            if (job.status != JobStatus::RUNNING)
-                continue;
-
-            for (const Allocation& allocation : job.allocations) {
-                Node& node =
-                    racks_[allocation.rack].nodes[allocation.node];
-
-                node.cpuUtil +=
-                    (static_cast<double>(job.cpuPerNode) /
-                     CPU_CAPACITY) * job.cpuUtil;
-
-                node.gpuUtil +=
-                    (static_cast<double>(job.gpuPerNode) /
-                     GPU_CAPACITY) * job.gpuUtil;
-            }
-        }
-
-        for (Rack& rack : racks_) {
-            for (Node& node : rack.nodes) {
-                node.cpuUtil = clamp(node.cpuUtil, 0.0, 1.0);
-                node.gpuUtil = clamp(node.gpuUtil, 0.0, 1.0);
+                node.gpuUtil =
+                    clamp(node.gpuUtil, 0.0, 1.0);
 
                 node.power =
                     IDLE_POWER_W +
@@ -471,6 +637,239 @@ private:
             }
 
             energyJ_ += rack.power;
+        }
+    }
+
+    void rebuildSchedulerUtilization()
+    {
+        for (Node& node : schedulerNodes_) {
+            node.cpuUtil = 0.0;
+            node.gpuUtil = 0.0;
+        }
+
+        for (const Job& job : jobs_) {
+            if (job.status != JobStatus::RUNNING)
+                continue;
+
+            for (const Allocation& allocation : job.allocations) {
+                Node& node =
+                    schedulerNode(
+                        allocation.globalRack,
+                        allocation.node);
+
+                node.cpuUtil +=
+                    (static_cast<double>(job.cpuPerNode) /
+                     CPU_CAPACITY) *
+                    job.cpuUtil;
+
+                node.gpuUtil +=
+                    (static_cast<double>(job.gpuPerNode) /
+                     GPU_CAPACITY) *
+                    job.gpuUtil;
+            }
+        }
+
+        for (Node& node : schedulerNodes_) {
+            node.cpuUtil = clamp(node.cpuUtil, 0.0, 1.0);
+            node.gpuUtil = clamp(node.gpuUtil, 0.0, 1.0);
+        }
+    }
+
+    void handleSchedule(SST::Event* event)
+    {
+        auto* schedule =
+            dynamic_cast<ScheduleEvent*>(event);
+
+        if (!schedule) {
+            delete event;
+            return;
+        }
+
+        if (schedule->destinationDomain != domain_) {
+            getSimulationOutput().fatal(
+                CALL_INFO, 1,
+                "schedule for domain %d delivered to domain %d\n",
+                schedule->destinationDomain,
+                domain_);
+        }
+
+        size_t expected =
+            static_cast<size_t>(localRacks_) *
+            static_cast<size_t>(nodesPerRack_);
+
+        if (schedule->rackCount != localRacks_ ||
+            schedule->nodesPerRack != nodesPerRack_ ||
+            schedule->cpuUsed.size() != expected ||
+            schedule->gpuUsed.size() != expected ||
+            schedule->runningJobs.size() != expected ||
+            schedule->cpuUtil.size() != expected ||
+            schedule->gpuUtil.size() != expected) {
+            getSimulationOutput().fatal(
+                CALL_INFO, 1,
+                "invalid schedule payload for domain %d\n",
+                domain_);
+        }
+
+        if (schedule->effectiveTime < 0 ||
+            schedule->effectiveTime >=
+                static_cast<int>(pendingSchedules_.size())) {
+            getSimulationOutput().fatal(
+                CALL_INFO, 1,
+                "invalid schedule effective time %d\n",
+                schedule->effectiveTime);
+        }
+
+        std::vector<ScheduledNode>& snapshot =
+            pendingSchedules_[schedule->effectiveTime];
+
+        snapshot.resize(expected);
+
+        for (size_t i = 0; i < expected; ++i) {
+            snapshot[i].cpuUsed = schedule->cpuUsed[i];
+            snapshot[i].gpuUsed = schedule->gpuUsed[i];
+            snapshot[i].runningJobs =
+                schedule->runningJobs[i];
+            snapshot[i].cpuUtil = schedule->cpuUtil[i];
+            snapshot[i].gpuUtil = schedule->gpuUtil[i];
+        }
+
+        scheduleReady_[schedule->effectiveTime] = true;
+
+        delete schedule;
+    }
+
+    void applySchedule(int effectiveTime)
+    {
+        /*
+         * Time zero uses the initial empty Node state. Every later modeled
+         * timestamp must have a schedule produced during the previous tick.
+         */
+        if (effectiveTime == 0)
+            return;
+
+        if (effectiveTime < 0 ||
+            effectiveTime >=
+                static_cast<int>(scheduleReady_.size()) ||
+            !scheduleReady_[effectiveTime]) {
+            getSimulationOutput().fatal(
+                CALL_INFO, 1,
+                "domain %d has no schedule for time %d\n",
+                domain_,
+                effectiveTime);
+        }
+
+        const std::vector<ScheduledNode>& snapshot =
+            pendingSchedules_[effectiveTime];
+
+        size_t index = 0;
+
+        for (int rack = 0; rack < localRacks_; ++rack) {
+            for (int nodeIndex = 0;
+                 nodeIndex < nodesPerRack_;
+                 ++nodeIndex, ++index) {
+                Node& node =
+                    racks_[rack].nodes[nodeIndex];
+
+                node.cpuUsed = snapshot[index].cpuUsed;
+                node.gpuUsed = snapshot[index].gpuUsed;
+                node.runningJobs =
+                    snapshot[index].runningJobs;
+                node.cpuUtil = snapshot[index].cpuUtil;
+                node.gpuUtil = snapshot[index].gpuUtil;
+            }
+        }
+
+        scheduleReady_[effectiveTime] = false;
+        pendingSchedules_[effectiveTime].clear();
+    }
+
+    std::vector<ScheduledNode> buildScheduleForDomain(
+        int destinationDomain) const
+    {
+        std::vector<ScheduledNode> snapshot;
+
+        size_t count =
+            static_cast<size_t>(localRacks_) *
+            static_cast<size_t>(nodesPerRack_);
+
+        snapshot.reserve(count);
+
+        int firstRack =
+            destinationDomain * localRacks_;
+
+        for (int localRack = 0;
+             localRack < localRacks_;
+             ++localRack) {
+            int globalRack = firstRack + localRack;
+
+            for (int nodeIndex = 0;
+                 nodeIndex < nodesPerRack_;
+                 ++nodeIndex) {
+                const Node& node =
+                    schedulerNode(globalRack, nodeIndex);
+
+                snapshot.push_back({
+                    node.cpuUsed,
+                    node.gpuUsed,
+                    node.runningJobs,
+                    node.cpuUtil,
+                    node.gpuUtil
+                });
+            }
+        }
+
+        return snapshot;
+    }
+
+    void publishSchedules(int effectiveTime)
+    {
+        for (int destination = 0;
+             destination < domains_;
+             ++destination) {
+            std::vector<ScheduledNode> snapshot =
+                buildScheduleForDomain(destination);
+
+            if (destination == 0) {
+                /*
+                 * DSTM's write to rank 0's own schedule slot is local.
+                 * Preserve the same logical one-tick delay without sending
+                 * an SST event to ourselves.
+                 */
+                pendingSchedules_[effectiveTime] =
+                    std::move(snapshot);
+
+                scheduleReady_[effectiveTime] = true;
+                continue;
+            }
+
+            auto* event = new ScheduleEvent(
+                destination,
+                effectiveTime,
+                localRacks_,
+                nodesPerRack_);
+
+            size_t count = snapshot.size();
+
+            event->cpuUsed.reserve(count);
+            event->gpuUsed.reserve(count);
+            event->runningJobs.reserve(count);
+            event->cpuUtil.reserve(count);
+            event->gpuUtil.reserve(count);
+
+            for (const ScheduledNode& node : snapshot) {
+                event->cpuUsed.push_back(node.cpuUsed);
+                event->gpuUsed.push_back(node.gpuUsed);
+                event->runningJobs.push_back(
+                    node.runningJobs);
+                event->cpuUtil.push_back(node.cpuUtil);
+                event->gpuUtil.push_back(node.gpuUtil);
+            }
+
+            /*
+             * The SST link itself has one second of latency. A zero
+             * additional delay therefore delivers at logical time t+1.
+             */
+            scheduleLinks_[destination]->send(0, event);
         }
     }
 
@@ -604,9 +1003,16 @@ private:
     bool clockTick(SST::Cycle_t)
     {
         if (currentStep_ < steps_) {
-            releaseCompletedJobs();
-            admitJobs();
-            scheduleJobs();
+            /*
+             * Consume the schedule published by domain 0 during the
+             * preceding logical second.
+             */
+            applySchedule(currentStep_);
+
+            /*
+             * The received utilization drives this timestamp's power and
+             * thermal integration.
+             */
             updatePower();
 
             for (int r = 0; r < localRacks_; ++r) {
@@ -616,14 +1022,29 @@ private:
             }
 
             publishHeat();
+
+            /*
+             * Domain 0 computes the global schedule for time t+1 after
+             * modeling time t.
+             */
+            if (domain_ == 0) {
+                int effectiveTime = currentStep_ + 1;
+
+                releaseCompletedJobs(effectiveTime);
+                admitJobs(currentStep_);
+                scheduleJobs(effectiveTime);
+                rebuildSchedulerUtilization();
+                publishSchedules(effectiveTime);
+            }
         }
 
         currentStep_++;
 
         /*
-         * Drain delayed events after the final simulated second.
+         * Drain both heat and final schedule events.
          */
-        if (currentStep_ >= steps_ + MAX_THERMAL_DELAY + 1) {
+        if (currentStep_ >=
+            steps_ + MAX_THERMAL_DELAY + 1) {
             primaryComponentOKToEndSim();
             return true;
         }

@@ -49,3 +49,15 @@ for domain in range(args.domains):
         (components[domain], "right", "1s"),
         (components[neighbor], "left", "1s")
     )
+
+# Central scheduling/control network.
+#
+# Domain 0 sends one schedule directly to every other domain. The 1s
+# latency matches the DSTM scheduler's put at (t, +1).
+for domain in range(1, args.domains):
+    link = sst.Link(f"schedule_link_0_{domain}")
+
+    link.connect(
+        (components[0], f"schedule{domain}", "1s"),
+        (components[domain], "schedule0", "1s")
+    )
