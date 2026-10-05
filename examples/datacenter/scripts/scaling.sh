@@ -9,13 +9,25 @@ set -uo pipefail
 # Optional environment variables:
 #   REPEATS=3 STEPS=300 STRONG_JOBS=1250 WEAK_JOBS_PER_RANK=125
 #   MPIRUN_ARGS="--oversubscribe"
+#
+# RANKS denotes simulation ranks:
+#
+#   dstm         : RANKS total MPI ranks
+#   sst          : RANKS total MPI ranks
+#   auction_dstm : RANKS thermal ranks + 1 dedicated scheduler rank
+#
+# auction_dstm reserves one node exclusively for scheduler rank 0.
 
 MODE="${1:-both}"
 RANKS=(2 4 8 16 32 64 128 256)
+#RANKS=(4 8)
 
 REPEATS="${REPEATS:-2}"
 STEPS="${STEPS:-1000}"
 NODES_PER_RACK="${NODES_PER_RACK:-32}"
+
+SCHEDULE_WINDOW="${SCHEDULE_WINDOW:-180}"
+CONTROL_LATENCY="${CONTROL_LATENCY:-90}"
 
 STRONG_RACKS="${STRONG_RACKS:-512}"
 STRONG_JOBS="${STRONG_JOBS:-32768}"
@@ -29,12 +41,16 @@ MPIRUN_ARGS="${MPIRUN_ARGS:-}"
 MPI_PREFIX="${MPI_PREFIX:-}"
 MPI_ENV_VARS="${MPI_ENV_VARS:-LD_LIBRARY_PATH PATH}"
 MAX_PPN="${MAX_PPN:-32}"
-MAX_NODES="${MAX_NODES:-8}"
+
+# Maximum nodes used by simulation/thermal ranks. auction_dstm may use one
+# additional node for its dedicated scheduler.
+MAX_WORKER_NODES="${MAX_WORKER_NODES:-${MAX_NODES:-8}}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 DSTM_EXE="${ROOT_DIR}/dstm/datacenter"
+AUCTION_DSTM_EXE="${ROOT_DIR}/auction_dstm/datacenter"
 SST_DIR="${ROOT_DIR}/sst"
 GENERATOR="${ROOT_DIR}/jobs/gen.py"
 
@@ -75,8 +91,17 @@ else
     ALLOC_SRC="localhost"
 fi
 
-AVAIL_NODES=${#NODELIST[@]}
-(( AVAIL_NODES > MAX_NODES )) && AVAIL_NODES=${MAX_NODES}
+ALLOCATED_NODES=${#NODELIST[@]}
+
+if (( ALLOCATED_NODES < MAX_WORKER_NODES + 1 )); then
+    echo "Warning: allocated ${ALLOCATED_NODES} nodes; auction_dstm reserves one scheduler node and can use at most $((ALLOCATED_NODES - 1)) worker nodes" >&2
+fi
+
+# Baseline runs use at most MAX_WORKER_NODES. The epoch implementation may
+# use one additional allocated node for its scheduler.
+AVAIL_WORKER_NODES="${ALLOCATED_NODES}"
+(( AVAIL_WORKER_NODES > MAX_WORKER_NODES )) &&
+    AVAIL_WORKER_NODES="${MAX_WORKER_NODES}"
 
 # Open MPI needs its installation prefix on remote nodes so it can locate
 # its helper executables, including orted/prted.
@@ -102,11 +127,13 @@ done
 place_for()
 {
     local ranks="$1"
+    local available_nodes="$2"
+    local node_limit="$3"
     local nodes ppn capacity
 
     nodes="${ranks}"
-    (( nodes > AVAIL_NODES )) && nodes="${AVAIL_NODES}"
-    (( nodes > MAX_NODES )) && nodes="${MAX_NODES}"
+    (( nodes > available_nodes )) && nodes="${available_nodes}"
+    (( nodes > node_limit )) && nodes="${node_limit}"
     (( nodes < 1 )) && nodes=1
 
     ppn=$(( (ranks + nodes - 1) / nodes ))
@@ -131,10 +158,10 @@ make_mpi_launch()
     local nodes="" ppn=""
     local mpi_args=()
 
-    read -r nodes ppn < <(place_for "${ranks}")
+    read -r nodes ppn < <(place_for "${ranks}" "${AVAIL_WORKER_NODES}" "${MAX_WORKER_NODES}")
 
     if [[ -z "${nodes}" ]]; then
-        echo "Rank count ${ranks} cannot fit on ${AVAIL_NODES} nodes at ${MAX_PPN} ranks/node" >&2
+        echo "Rank count ${ranks} cannot fit on ${AVAIL_WORKER_NODES} worker nodes at ${MAX_PPN} ranks/node" >&2
         exit 1
     fi
 
@@ -159,10 +186,96 @@ make_mpi_launch()
     fi
 }
 
+AUCTION_MPI_LAUNCH=()
+AUCTION_RANKFILE=""
+
+make_auction_mpi_launch()
+{
+    local worker_ranks="$1"
+    local worker_nodes ppn capacity
+    local total_ranks
+    local mpi_args=()
+    local worker worker_node_index worker_slot mpi_rank
+
+    if (( ALLOCATED_NODES < 2 )); then
+        echo "auction_dstm requires at least two allocated nodes: one scheduler node and one or more worker nodes" >&2
+        return 1
+    fi
+
+    worker_nodes="${worker_ranks}"
+
+    (( worker_nodes > MAX_WORKER_NODES )) &&
+        worker_nodes="${MAX_WORKER_NODES}"
+
+    # NODELIST[0] is reserved exclusively for scheduler rank 0.
+    (( worker_nodes > ALLOCATED_NODES - 1 )) &&
+        worker_nodes=$((ALLOCATED_NODES - 1))
+
+    (( worker_nodes < 1 )) && worker_nodes=1
+
+    ppn=$(( (worker_ranks + worker_nodes - 1) / worker_nodes ))
+    capacity=$(( worker_nodes * MAX_PPN ))
+
+    if (( worker_ranks > capacity || ppn > MAX_PPN )); then
+        echo "auction_dstm cannot fit ${worker_ranks} thermal ranks on ${worker_nodes} worker nodes at ${MAX_PPN} ranks/node" >&2
+        return 1
+    fi
+
+    total_ranks=$((worker_ranks + 1))
+
+    AUCTION_RANKFILE="${RESULT_DIR}/auction_r${worker_ranks}.rankfile"
+    : > "${AUCTION_RANKFILE}"
+
+    # Scheduler rank 0 is alone on the first allocated node.
+    printf 'rank 0=%s slot=0\n' \
+        "${NODELIST[0]}" \
+        >> "${AUCTION_RANKFILE}"
+
+    # Spread thermal ranks across nodes 1..worker_nodes. No thermal rank is
+    # placed on the scheduler node.
+    for ((worker = 0; worker < worker_ranks; worker++)); do
+        mpi_rank=$((worker + 1))
+        worker_node_index=$((1 + worker % worker_nodes))
+        worker_slot=$((worker / worker_nodes))
+
+        printf 'rank %d=%s slot=%d\n' \
+            "${mpi_rank}" \
+            "${NODELIST[worker_node_index]}" \
+            "${worker_slot}" \
+            >> "${AUCTION_RANKFILE}"
+    done
+
+    # Preserve the existing MPIRUN_ARGS environment variable.
+    # shellcheck disable=SC2206
+    mpi_args=( ${MPIRUN_ARGS} )
+
+    AUCTION_MPI_LAUNCH=(
+        "${MPIRUN}"
+        "${mpi_args[@]}"
+        -n "${total_ranks}"
+        --rankfile "${AUCTION_RANKFILE}"
+    )
+
+    if [[ "${ALLOC_SRC}" != "localhost" ]]; then
+        AUCTION_MPI_LAUNCH+=(--hostfile "${ALLOC_NODEFILE}")
+
+        if [[ -n "${MPI_PREFIX}" ]]; then
+            AUCTION_MPI_LAUNCH+=(--prefix "${MPI_PREFIX}")
+        fi
+
+        AUCTION_MPI_LAUNCH+=("${MPI_X_FLAGS[@]}")
+    fi
+}
+
 mkdir -p "${TRACE_DIR}" "${LOG_DIR}"
 
 if [[ ! -x "${DSTM_EXE}" ]]; then
     echo "Missing executable: ${DSTM_EXE}" >&2
+    exit 1
+fi
+
+if [[ ! -x "${AUCTION_DSTM_EXE}" ]]; then
+    echo "Missing executable: ${AUCTION_DSTM_EXE}" >&2
     exit 1
 fi
 
@@ -184,7 +297,7 @@ if [[ "${MODE}" != "strong" &&
 fi
 
 printf '%s\n' \
-    "mode,system,ranks,racks,jobs,steps,repeat,runtime_seconds,status" \
+    "mode,system,ranks,mpi_ranks,racks,jobs,steps,repeat,runtime_seconds,status" \
     > "${RESULT_CSV}"
 
 generate_trace()
@@ -244,12 +357,85 @@ run_dstm()
         status="failed"
     fi
 
-    printf '%s,%s,%d,%d,%d,%d,%d,%s,%s\n' \
-        "${scaling_mode}" "dstm" "${ranks}" "${racks}" \
-        "${jobs}" "${STEPS}" "${repeat}" "${elapsed}" "${status}" \
+    printf '%s,%s,%d,%d,%d,%d,%d,%d,%s,%s\n' \
+        "${scaling_mode}" "dstm" \
+        "${ranks}" "${ranks}" \
+        "${racks}" "${jobs}" "${STEPS}" "${repeat}" \
+        "${elapsed}" "${status}" \
         >> "${RESULT_CSV}"
 
     echo "${scaling_mode}, dstm, ranks=${ranks}, run=${repeat}: ${elapsed}s (${status})"
+
+    [[ "${status}" == "ok" ]]
+}
+
+run_auction_dstm()
+{
+    local scaling_mode="$1"
+    local worker_ranks="$2"
+    local racks="$3"
+    local jobs="$4"
+    local trace="$5"
+    local repeat="$6"
+
+    local mpi_ranks=$((worker_ranks + 1))
+    local log="${LOG_DIR}/${scaling_mode}_auction_dstm_r${worker_ranks}_run${repeat}.log"
+
+    local elapsed="nan"
+    local status
+
+    if ! make_auction_mpi_launch "${worker_ranks}"; then
+        status="placement_failed"
+
+        printf '%s,%s,%d,%d,%d,%d,%d,%d,%s,%s\n' \
+            "${scaling_mode}" "auction_dstm" \
+            "${worker_ranks}" "${mpi_ranks}" \
+            "${racks}" "${jobs}" "${STEPS}" "${repeat}" \
+            "${elapsed}" "${status}" \
+            >> "${RESULT_CSV}"
+
+        echo "${scaling_mode}, auction_dstm, thermal_ranks=${worker_ranks}, mpi_ranks=${mpi_ranks}, run=${repeat}: ${elapsed}s (${status})"
+        return 1
+    fi
+
+    if "${AUCTION_MPI_LAUNCH[@]}" \
+        "${AUCTION_DSTM_EXE}" \
+        --racks "${racks}" \
+        --nodes-per-rack "${NODES_PER_RACK}" \
+        --steps "${STEPS}" \
+        --schedule-window "${SCHEDULE_WINDOW}" \
+        --control-latency "${CONTROL_LATENCY}" \
+        --jobs "${trace}" >"${log}" 2>&1; then
+
+        if elapsed="$(
+            awk '
+                /^(simulation runtime|wall-clock runtime)[[:space:]]*:/ {
+                    value = $(NF - 1)
+                    found = 1
+                }
+                END {
+                    if (!found)
+                        exit 1
+                    printf "%.9f\n", value
+                }
+            ' "${log}"
+        )"; then
+            status="ok"
+        else
+            status="missing_timing"
+        fi
+    else
+        status="failed"
+    fi
+
+    printf '%s,%s,%d,%d,%d,%d,%d,%d,%s,%s\n' \
+        "${scaling_mode}" "auction_dstm" \
+        "${worker_ranks}" "${mpi_ranks}" \
+        "${racks}" "${jobs}" "${STEPS}" "${repeat}" \
+        "${elapsed}" "${status}" \
+        >> "${RESULT_CSV}"
+
+    echo "${scaling_mode}, auction_dstm, thermal_ranks=${worker_ranks}, mpi_ranks=${mpi_ranks}, run=${repeat}: ${elapsed}s (${status})"
 
     [[ "${status}" == "ok" ]]
 }
@@ -310,9 +496,11 @@ run_sst()
         status="failed"
     fi
 
-    printf '%s,%s,%d,%d,%d,%d,%d,%s,%s\n' \
-        "${scaling_mode}" "sst" "${ranks}" "${racks}" \
-        "${jobs}" "${STEPS}" "${repeat}" "${elapsed}" "${status}" \
+    printf '%s,%s,%d,%d,%d,%d,%d,%d,%s,%s\n' \
+        "${scaling_mode}" "sst" \
+        "${ranks}" "${ranks}" \
+        "${racks}" "${jobs}" "${STEPS}" "${repeat}" \
+        "${elapsed}" "${status}" \
         >> "${RESULT_CSV}"
 
     echo "${scaling_mode}, sst, ranks=${ranks}, run=${repeat}: ${elapsed}s (${status})"
@@ -345,6 +533,10 @@ run_case()
 
     for ((repeat = 1; repeat <= REPEATS; repeat++)); do
         run_dstm \
+            "${scaling_mode}" "${ranks}" "${racks}" \
+            "${jobs}" "${trace}" "${repeat}" || true
+
+        run_auction_dstm \
             "${scaling_mode}" "${ranks}" "${racks}" \
             "${jobs}" "${trace}" "${repeat}" || true
 
