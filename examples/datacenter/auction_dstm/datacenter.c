@@ -46,6 +46,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <limits.h>
+#include <stdint.h>
 
 #include "dstm.h"
 
@@ -228,6 +230,16 @@ struct schedule_block_header {
         int destination_rank;
         int rack_count;
         int nodes_per_rack;
+
+        int event_count;
+        int event_capacity;
+};
+
+struct schedule_event {
+        int tick_offset;
+        int local_node_index;
+
+        struct scheduled_node state;
 };
 
 struct rack_feedback {
@@ -270,6 +282,20 @@ struct sim {
         struct job_state *jobs;
         size_t job_count;
 
+        /*
+         * Jobs are sorted by (arrival_time, id). These cursors prevent
+         * rescanning the full trace at every simulated tick.
+         */
+        size_t next_arrival_job;
+        size_t next_queued_job;
+
+        /*
+         * Min-heap of indices into jobs[], ordered by completion_time.
+         */
+        size_t *completion_heap;
+        size_t completion_heap_size;
+        size_t completion_heap_capacity;
+
         struct node_state *scheduler_nodes;
         struct rack_feedback *scheduler_feedback;
 
@@ -301,6 +327,13 @@ struct sim {
         void *schedule_buffer;
         void *feedback_buffer;
 
+        /*
+         * Maximum number of node-state changes in one worker's schedule
+         * block. The darray element size is fixed at setup.
+         */
+        size_t schedule_event_capacity;
+        size_t schedule_event_cursor;
+
         size_t thermal_vertex_count;
         struct rack_state *thermal_vertices;
 
@@ -312,6 +345,12 @@ struct sim {
 
         uint64_t jobs_started;
         uint64_t jobs_completed;
+
+        double scheduler_planning_seconds;
+        double scheduler_publication_seconds;
+
+        uint64_t schedule_events_emitted;
+        uint64_t schedule_event_capacity_total;
 
         double it_energy_joules;
         double cooling_energy_joules;
@@ -393,9 +432,8 @@ static size_t worker_node_count(const struct sim *s)
 static size_t schedule_block_size(const struct sim *s)
 {
         return sizeof(struct schedule_block_header) +
-               (size_t)s->schedule_window *
-               worker_node_count(s) *
-               sizeof(struct scheduled_node);
+               s->schedule_event_capacity *
+               sizeof(struct schedule_event);
 }
 
 static size_t feedback_block_size(const struct sim *s)
@@ -405,17 +443,17 @@ static size_t feedback_block_size(const struct sim *s)
                sizeof(struct rack_feedback);
 }
 
-static struct scheduled_node *schedule_block_states(void *buffer)
+static struct schedule_event *schedule_block_events(void *buffer)
 {
-        return (struct scheduled_node *)
+        return (struct schedule_event *)
                 ((unsigned char *)buffer +
                  sizeof(struct schedule_block_header));
 }
 
-static const struct scheduled_node *schedule_block_states_const(
+static const struct schedule_event *schedule_block_events_const(
         const void *buffer)
 {
-        return (const struct scheduled_node *)
+        return (const struct schedule_event *)
                 ((const unsigned char *)buffer +
                  sizeof(struct schedule_block_header));
 }
@@ -482,9 +520,57 @@ static int thermal_delay(size_t a, size_t b)
         return 1 + (int)(hash % MAX_THERMAL_DELAY);
 }
 
+static struct scheduled_node make_scheduled_node(
+        const struct node_state *node)
+{
+        return (struct scheduled_node) {
+                .cpu_used = node->cpu_used,
+                .gpu_used = node->gpu_used,
+                .running_jobs = node->running_jobs,
+                .cpu_utilization = node->cpu_utilization,
+                .gpu_utilization = node->gpu_utilization,
+        };
+}
+
+static int scheduled_node_equal(
+        const struct scheduled_node *a,
+        const struct scheduled_node *b)
+{
+        return a->cpu_used == b->cpu_used &&
+               a->gpu_used == b->gpu_used &&
+               a->running_jobs == b->running_jobs &&
+               a->cpu_utilization == b->cpu_utilization &&
+               a->gpu_utilization == b->gpu_utilization;
+}
+
 /*******************************************************************************
  * Job loading
  ******************************************************************************/
+
+static int compare_jobs_by_arrival(
+        const void *lhs,
+        const void *rhs)
+{
+        const struct job_state *a =
+                (const struct job_state *)lhs;
+
+        const struct job_state *b =
+                (const struct job_state *)rhs;
+
+        if (a->arrival_time < b->arrival_time)
+                return -1;
+
+        if (a->arrival_time > b->arrival_time)
+                return 1;
+
+        if (a->id < b->id)
+                return -1;
+
+        if (a->id > b->id)
+                return 1;
+
+        return 0;
+}
 
 static int load_scheduler_jobs(struct sim *s, const char *path)
 {
@@ -602,8 +688,32 @@ static int load_scheduler_jobs(struct sim *s, const char *path)
 
         fclose(file);
 
+        /*
+         * Preserve deterministic FCFS ordering while permitting cursor-based
+         * arrival and queue processing.
+         */
+        qsort(jobs,
+              count,
+              sizeof(*jobs),
+              compare_jobs_by_arrival);
+
         s->jobs = jobs;
         s->job_count = count;
+
+        s->next_arrival_job = 0;
+        s->next_queued_job = 0;
+
+        s->completion_heap_capacity = count;
+        s->completion_heap_size = 0;
+
+        if (count > 0) {
+                s->completion_heap =
+                        malloc(count *
+                               sizeof(*s->completion_heap));
+
+                REQUIRE(s->completion_heap != NULL,
+                        "completion heap allocation");
+        }
 
         return 0;
 }
@@ -964,6 +1074,230 @@ static int build_distance_matrix(struct sim *s)
                -1;
 }
 
+static int completion_job_less(
+        const struct sim *s,
+        size_t lhs_index,
+        size_t rhs_index)
+{
+        const struct job_state *lhs =
+                &s->jobs[lhs_index];
+
+        const struct job_state *rhs =
+                &s->jobs[rhs_index];
+
+        if (lhs->completion_time <
+            rhs->completion_time) {
+                return 1;
+        }
+
+        if (lhs->completion_time >
+            rhs->completion_time) {
+                return 0;
+        }
+
+        return lhs->id < rhs->id;
+}
+
+static void completion_heap_push(
+        struct sim *s,
+        size_t job_index)
+{
+        REQUIRE(s->completion_heap_size <
+                        s->completion_heap_capacity,
+                "completion heap capacity exceeded");
+
+        size_t position =
+                s->completion_heap_size++;
+
+        s->completion_heap[position] =
+                job_index;
+
+        while (position > 0) {
+                size_t parent =
+                        (position - 1) / 2;
+
+                if (!completion_job_less(
+                            s,
+                            s->completion_heap[position],
+                            s->completion_heap[parent])) {
+                        break;
+                }
+
+                size_t temporary =
+                        s->completion_heap[parent];
+
+                s->completion_heap[parent] =
+                        s->completion_heap[position];
+
+                s->completion_heap[position] =
+                        temporary;
+
+                position = parent;
+        }
+}
+
+static size_t completion_heap_pop(
+        struct sim *s)
+{
+        REQUIRE(s->completion_heap_size > 0,
+                "completion heap underflow");
+
+        size_t result =
+                s->completion_heap[0];
+
+        s->completion_heap_size--;
+
+        if (s->completion_heap_size == 0)
+                return result;
+
+        s->completion_heap[0] =
+                s->completion_heap[
+                        s->completion_heap_size];
+
+        size_t position = 0;
+
+        for (;;) {
+                size_t left =
+                        position * 2 + 1;
+
+                size_t right =
+                        left + 1;
+
+                size_t smallest =
+                        position;
+
+                if (left <
+                            s->completion_heap_size &&
+                    completion_job_less(
+                            s,
+                            s->completion_heap[left],
+                            s->completion_heap[smallest])) {
+                        smallest = left;
+                }
+
+                if (right <
+                            s->completion_heap_size &&
+                    completion_job_less(
+                            s,
+                            s->completion_heap[right],
+                            s->completion_heap[smallest])) {
+                        smallest = right;
+                }
+
+                if (smallest == position)
+                        break;
+
+                size_t temporary =
+                        s->completion_heap[position];
+
+                s->completion_heap[position] =
+                        s->completion_heap[smallest];
+
+                s->completion_heap[smallest] =
+                        temporary;
+
+                position = smallest;
+        }
+
+        return result;
+}
+
+static double job_cpu_utilization_contribution(
+        const struct node_state *node,
+        const struct job_state *job)
+{
+        return ((double)job->cpu_per_node /
+                (double)node->cpu_capacity) *
+               job->cpu_utilization;
+}
+
+static double job_gpu_utilization_contribution(
+        const struct node_state *node,
+        const struct job_state *job)
+{
+        return ((double)job->gpu_per_node /
+                (double)node->gpu_capacity) *
+               job->gpu_utilization;
+}
+
+static void add_job_to_node(
+        struct node_state *node,
+        const struct job_state *job)
+{
+        node->cpu_used +=
+                job->cpu_per_node;
+
+        node->gpu_used +=
+                job->gpu_per_node;
+
+        node->running_jobs++;
+
+        node->cpu_utilization +=
+                job_cpu_utilization_contribution(
+                        node,
+                        job);
+
+        node->gpu_utilization +=
+                job_gpu_utilization_contribution(
+                        node,
+                        job);
+
+        node->cpu_utilization =
+                clamp_double(
+                        node->cpu_utilization,
+                        0.0,
+                        1.0);
+
+        node->gpu_utilization =
+                clamp_double(
+                        node->gpu_utilization,
+                        0.0,
+                        1.0);
+}
+
+static void remove_job_from_node(
+        struct node_state *node,
+        const struct job_state *job)
+{
+        node->cpu_utilization -=
+                job_cpu_utilization_contribution(
+                        node,
+                        job);
+
+        node->gpu_utilization -=
+                job_gpu_utilization_contribution(
+                        node,
+                        job);
+
+        node->cpu_used -=
+                job->cpu_per_node;
+
+        node->gpu_used -=
+                job->gpu_per_node;
+
+        node->running_jobs--;
+
+        /*
+         * Remove small negative values introduced by floating-point
+         * subtraction.
+         */
+        node->cpu_utilization =
+                clamp_double(
+                        node->cpu_utilization,
+                        0.0,
+                        1.0);
+
+        node->gpu_utilization =
+                clamp_double(
+                        node->gpu_utilization,
+                        0.0,
+                        1.0);
+
+        assert(node->cpu_used >= 0);
+        assert(node->gpu_used >= 0);
+        assert(node->running_jobs >= 0);
+}
+
 /*******************************************************************************
  * Scheduler job processing
  ******************************************************************************/
@@ -975,19 +1309,26 @@ static void release_completed_jobs(
         REQUIRE(s->is_scheduler,
                 "job release outside scheduler");
 
-        for (size_t j = 0;
-             j < s->job_count;
-             j++) {
-                struct job_state *job =
-                        &s->jobs[j];
+        while (s->completion_heap_size > 0) {
+                size_t job_index =
+                        s->completion_heap[0];
 
-                if (job->status != JOB_RUNNING)
-                        continue;
+                struct job_state *job =
+                        &s->jobs[job_index];
 
                 if (job->completion_time >
                     effective_time) {
-                        continue;
+                        break;
                 }
+
+                size_t popped_index =
+                        completion_heap_pop(s);
+
+                REQUIRE(popped_index == job_index,
+                        "completion heap root changed");
+
+                REQUIRE(job->status == JOB_RUNNING,
+                        "completed heap job is not running");
 
                 for (int a = 0;
                      a < job->allocation_count;
@@ -1006,17 +1347,9 @@ static void release_completed_jobs(
                                         (size_t)rack,
                                         node_index);
 
-                        node->cpu_used -=
-                                job->cpu_per_node;
-
-                        node->gpu_used -=
-                                job->gpu_per_node;
-
-                        node->running_jobs--;
-
-                        assert(node->cpu_used >= 0);
-                        assert(node->gpu_used >= 0);
-                        assert(node->running_jobs >= 0);
+                        remove_job_from_node(
+                                node,
+                                job);
                 }
 
                 job->allocation_count = 0;
@@ -1033,19 +1366,23 @@ static void admit_arrivals(
         REQUIRE(s->is_scheduler,
                 "job admission outside scheduler");
 
-        for (size_t j = 0;
-             j < s->job_count;
-             j++) {
+        while (s->next_arrival_job <
+               s->job_count) {
                 struct job_state *job =
-                        &s->jobs[j];
+                        &s->jobs[
+                                s->next_arrival_job];
 
-                if (job->status ==
-                            JOB_FUTURE &&
-                    job->arrival_time <=
-                            effective_time) {
-                        job->status =
-                                JOB_QUEUED;
+                if (job->arrival_time >
+                    effective_time) {
+                        break;
                 }
+
+                REQUIRE(job->status == JOB_FUTURE,
+                        "arrival cursor found non-future job");
+
+                job->status = JOB_QUEUED;
+
+                s->next_arrival_job++;
         }
 }
 
@@ -1168,13 +1505,9 @@ static int try_start_job(
                                 (size_t)allocation.global_rack,
                                 allocation.node);
 
-                node->cpu_used +=
-                        job->cpu_per_node;
-
-                node->gpu_used +=
-                        job->gpu_per_node;
-
-                node->running_jobs++;
+                add_job_to_node(
+                        node,
+                        job);
 
                 job->allocations[a] =
                         allocation;
@@ -1193,6 +1526,16 @@ static int try_start_job(
         job->status =
                 JOB_RUNNING;
 
+        size_t job_index =
+                (size_t)(job - s->jobs);
+
+        REQUIRE(job_index < s->job_count,
+                "invalid started job index");
+
+        completion_heap_push(
+                s,
+                job_index);
+
         s->jobs_started++;
 
         return 1;
@@ -1205,100 +1548,34 @@ static void schedule_queued_jobs(
         REQUIRE(s->is_scheduler,
                 "job scheduling outside scheduler");
 
-        for (size_t j = 0;
-             j < s->job_count;
-             j++) {
+        while (s->next_queued_job <
+               s->job_count) {
                 struct job_state *job =
-                        &s->jobs[j];
+                        &s->jobs[
+                                s->next_queued_job];
 
-                if (job->status != JOB_QUEUED)
-                        continue;
+                /*
+                 * This job has not arrived yet. Since jobs are sorted by
+                 * arrival time, no later job can be ready.
+                 */
+                if (job->status == JOB_FUTURE)
+                        break;
 
+                REQUIRE(job->status == JOB_QUEUED,
+                        "queue cursor found invalid job state");
+
+                /*
+                 * Preserve the original strict FCFS behavior: if the first
+                 * queued job does not fit, do not backfill later jobs.
+                 */
                 if (!try_start_job(
                             s,
                             job,
                             effective_time)) {
                         break;
                 }
-        }
-}
 
-static void rebuild_scheduler_utilization(
-        struct sim *s)
-{
-        REQUIRE(s->is_scheduler,
-                "utilization rebuild outside scheduler");
-
-        size_t node_count =
-                (size_t)s->total_racks *
-                (size_t)s->nodes_per_rack;
-
-        for (size_t i = 0;
-             i < node_count;
-             i++) {
-                s->scheduler_nodes[i]
-                        .cpu_utilization = 0.0;
-
-                s->scheduler_nodes[i]
-                        .gpu_utilization = 0.0;
-        }
-
-        for (size_t j = 0;
-             j < s->job_count;
-             j++) {
-                const struct job_state *job =
-                        &s->jobs[j];
-
-                if (job->status != JOB_RUNNING)
-                        continue;
-
-                for (int a = 0;
-                     a < job->allocation_count;
-                     a++) {
-                        int rack =
-                                job->allocations[a]
-                                   .global_rack;
-
-                        int node_index =
-                                job->allocations[a]
-                                   .node;
-
-                        struct node_state *node =
-                                scheduler_node(
-                                        s,
-                                        (size_t)rack,
-                                        node_index);
-
-                        node->cpu_utilization +=
-                                ((double)job->cpu_per_node /
-                                 (double)node->cpu_capacity) *
-                                job->cpu_utilization;
-
-                        node->gpu_utilization +=
-                                ((double)job->gpu_per_node /
-                                 (double)node->gpu_capacity) *
-                                job->gpu_utilization;
-                }
-        }
-
-        for (size_t i = 0;
-             i < node_count;
-             i++) {
-                s->scheduler_nodes[i]
-                        .cpu_utilization =
-                        clamp_double(
-                                s->scheduler_nodes[i]
-                                        .cpu_utilization,
-                                0.0,
-                                1.0);
-
-                s->scheduler_nodes[i]
-                        .gpu_utilization =
-                        clamp_double(
-                                s->scheduler_nodes[i]
-                                        .gpu_utilization,
-                                0.0,
-                                1.0);
+                s->next_queued_job++;
         }
 }
 
@@ -1463,59 +1740,67 @@ static void collect_feedback(
  * Push schedule channel
  ******************************************************************************/
 
-static void write_worker_schedule_tick(
+static void append_worker_schedule_events(
         struct sim *s,
         void *buffer,
         int destination_rank,
-        int tick_offset)
+        int tick_offset,
+        struct scheduled_node *previous)
 {
-        struct scheduled_node *states =
-                schedule_block_states(buffer);
+        struct schedule_block_header *header =
+                (struct schedule_block_header *)buffer;
+
+        struct schedule_event *events =
+                schedule_block_events(buffer);
 
         size_t first_rack =
                 (size_t)(destination_rank - 1) *
                 s->local_racks;
 
-        size_t nodes_per_worker =
-                worker_node_count(s);
-
-        size_t base =
-                (size_t)tick_offset *
-                nodes_per_worker;
-
-        size_t output_index = 0;
+        size_t local_node_index = 0;
 
         for (size_t local_rack = 0;
              local_rack < s->local_racks;
              local_rack++) {
                 size_t global_rack =
-                        first_rack +
-                        local_rack;
+                        first_rack + local_rack;
 
                 for (int node_index = 0;
-                     node_index <
-                             s->nodes_per_rack;
-                     node_index++,
-                     output_index++) {
+                     node_index < s->nodes_per_rack;
+                     node_index++, local_node_index++) {
+                        size_t global_node_index =
+                                global_rack *
+                                (size_t)s->nodes_per_rack +
+                                (size_t)node_index;
+
                         const struct node_state *node =
                                 scheduler_node(
                                         s,
                                         global_rack,
                                         node_index);
 
-                        states[base + output_index] =
-                                (struct scheduled_node) {
-                                        .cpu_used =
-                                                node->cpu_used,
-                                        .gpu_used =
-                                                node->gpu_used,
-                                        .running_jobs =
-                                                node->running_jobs,
-                                        .cpu_utilization =
-                                                node->cpu_utilization,
-                                        .gpu_utilization =
-                                                node->gpu_utilization,
+                        struct scheduled_node current =
+                                make_scheduled_node(node);
+
+                        if (scheduled_node_equal(
+                                    &current,
+                                    &previous[global_node_index])) {
+                                continue;
+                        }
+
+                        REQUIRE(header->event_count <
+                                        header->event_capacity,
+                                "schedule event capacity exceeded");
+
+                        events[header->event_count++] =
+                                (struct schedule_event) {
+                                        .tick_offset = tick_offset,
+                                        .local_node_index =
+                                                (int)local_node_index,
+                                        .state = current,
                                 };
+
+                        previous[global_node_index] = current;
                 }
         }
 }
@@ -1582,14 +1867,53 @@ static void plan_and_publish_epoch(
 
                 header->nodes_per_rack =
                         s->nodes_per_rack;
+                
+                header->event_count = 0;
+                header->event_capacity = (int)s->schedule_event_capacity;
         }
+
+        size_t total_node_count =
+                (size_t)s->total_racks *
+                (size_t)s->nodes_per_rack;
+
+        struct scheduled_node *previous =
+                calloc(total_node_count, sizeof(*previous));
+
+        REQUIRE(previous != NULL,
+                "previous schedule state allocation");
+
+        /*
+         * Initialize the comparison state from the state at the end of the
+         * preceding epoch. Workers already retain this state locally.
+         */
+        for (size_t global_rack = 0;
+             global_rack < (size_t)s->total_racks;
+             global_rack++) {
+                for (int node_index = 0;
+                     node_index < s->nodes_per_rack;
+                     node_index++) {
+                        size_t global_node_index =
+                                global_rack *
+                                (size_t)s->nodes_per_rack +
+                                (size_t)node_index;
+
+                        previous[global_node_index] =
+                                make_scheduled_node(
+                                        scheduler_node(
+                                                s,
+                                                global_rack,
+                                                node_index));
+                }
+        }
+
+        double planning_start =
+                MPI_Wtime();
 
         for (int offset = 0;
              offset < tick_count;
              offset++) {
                 int effective_time =
-                        epoch_start +
-                        offset;
+                        epoch_start + offset;
 
                 release_completed_jobs(
                         s,
@@ -1603,19 +1927,26 @@ static void plan_and_publish_epoch(
                         s,
                         effective_time);
 
-                rebuild_scheduler_utilization(s);
-
                 for (int destination_rank = 1;
-                     destination_rank <
-                             g_world_size;
+                     destination_rank < g_world_size;
                      destination_rank++) {
-                        write_worker_schedule_tick(
+                        append_worker_schedule_events(
                                 s,
                                 blocks[destination_rank],
                                 destination_rank,
-                                offset);
+                                offset,
+                                previous);
                 }
         }
+
+        free(previous);
+
+        s->scheduler_planning_seconds +=
+                MPI_Wtime() -
+                planning_start;
+
+        double publication_start =
+                MPI_Wtime();
 
         int schedule_delay =
                 epoch_start -
@@ -1631,6 +1962,17 @@ static void plan_and_publish_epoch(
                  * Every rank owns one schedule element, so the worker's MPI
                  * rank is its global schedule-array index.
                  */
+
+                const struct schedule_block_header *published_header =
+                        (const struct schedule_block_header *)
+                        blocks[destination_rank];
+
+                s->schedule_events_emitted +=
+                        (uint64_t)published_header->event_count;
+
+                s->schedule_event_capacity_total +=
+                        (uint64_t)published_header->event_capacity;                
+
                 CHECK(dstm_darray_put(
                               s->schedule_array,
                               (size_t)destination_rank,
@@ -1643,6 +1985,10 @@ static void plan_and_publish_epoch(
         }
 
         free(blocks);
+
+        s->scheduler_publication_seconds +=
+                MPI_Wtime() -
+                publication_start;
 }
 
 static void receive_schedule_block(
@@ -1688,6 +2034,17 @@ static void receive_schedule_block(
                 header->tick_count <=
                         s->schedule_window,
                 "invalid schedule tick count");
+
+        REQUIRE(header->event_count >= 0 &&
+                header->event_count <=
+                        header->event_capacity,
+                "invalid schedule event count");
+
+        REQUIRE(header->event_capacity ==
+                        (int)s->schedule_event_capacity,
+                "schedule event capacity mismatch");
+
+        s->schedule_event_cursor = 0;
 }
 
 static void apply_schedule_tick(
@@ -1709,51 +2066,56 @@ static void apply_schedule_tick(
                 header->start_time;
 
         REQUIRE(offset >= 0 &&
-                offset <
-                        header->tick_count,
+                offset < header->tick_count,
                 "schedule tick outside block");
 
-        const struct scheduled_node *states =
-                schedule_block_states_const(
+        const struct schedule_event *events =
+                schedule_block_events_const(
                         s->schedule_buffer);
 
-        size_t nodes_per_worker =
-                worker_node_count(s);
+        while (s->schedule_event_cursor <
+               (size_t)header->event_count) {
+                const struct schedule_event *event =
+                        &events[s->schedule_event_cursor];
 
-        size_t base =
-                (size_t)offset *
-                nodes_per_worker;
+                if (event->tick_offset > offset)
+                        break;
 
-        size_t index = 0;
+                REQUIRE(event->tick_offset == offset,
+                        "missed schedule event");
 
-        for (size_t r = 0;
-             r < s->local_racks;
-             r++) {
-                for (int n = 0;
-                     n < s->nodes_per_rack;
-                     n++,
-                     index++) {
-                        struct node_state *node =
-                                &s->racks[r].nodes[n];
+                REQUIRE(event->local_node_index >= 0 &&
+                        (size_t)event->local_node_index <
+                                worker_node_count(s),
+                        "invalid schedule event node");
 
-                        const struct scheduled_node *input =
-                                &states[base + index];
+                size_t local_rack =
+                        (size_t)event->local_node_index /
+                        (size_t)s->nodes_per_rack;
 
-                        node->cpu_used =
-                                input->cpu_used;
+                int node_index =
+                        event->local_node_index %
+                        s->nodes_per_rack;
 
-                        node->gpu_used =
-                                input->gpu_used;
+                struct node_state *node =
+                        &s->racks[local_rack].nodes[node_index];
 
-                        node->running_jobs =
-                                input->running_jobs;
+                node->cpu_used =
+                        event->state.cpu_used;
 
-                        node->cpu_utilization =
-                                input->cpu_utilization;
+                node->gpu_used =
+                        event->state.gpu_used;
 
-                        node->gpu_utilization =
-                                input->gpu_utilization;
-                }
+                node->running_jobs =
+                        event->state.running_jobs;
+
+                node->cpu_utilization =
+                        event->state.cpu_utilization;
+
+                node->gpu_utilization =
+                        event->state.gpu_utilization;
+
+                s->schedule_event_cursor++;
         }
 }
 
@@ -2347,11 +2709,29 @@ static int setup(
                 (size_t)s->total_racks /
                 (size_t)s->thermal_rank_count;
 
-        s->rack_offset =
+                s->rack_offset =
                 s->is_scheduler ?
                 0 :
                 s->local_racks *
                         (size_t)s->thermal_rank;
+
+        /*
+         * append_worker_schedule_events() emits at most one event per node
+         * per tick. Therefore this is the strict worst-case capacity for one
+         * worker's scheduling window.
+         */
+        REQUIRE((size_t)s->schedule_window <=
+                        SIZE_MAX / worker_node_count(s),
+                "schedule event capacity overflow");
+
+        s->schedule_event_capacity =
+                (size_t)s->schedule_window *
+                worker_node_count(s);
+
+        REQUIRE(s->schedule_event_capacity <= (size_t)INT_MAX,
+                "schedule event capacity exceeds header representation");
+
+        s->schedule_event_cursor = 0;
 
         s->max_inlet_temp_c =
                 -INFINITY;
@@ -2604,6 +2984,7 @@ static void teardown_local(struct sim *s)
 
         free(s->racks);
         free(s->jobs);
+        free(s->completion_heap);
 
         free(s->scheduler_nodes);
         free(s->scheduler_feedback);
@@ -2708,6 +3089,25 @@ static void print_statistics(const struct sim *s)
 
                 printf("maximum outlet temp: %.3f C\n",
                        max_outlet);
+
+                printf("scheduler planning : %.6f seconds\n",
+                       s->scheduler_planning_seconds);
+
+                printf("schedule publishing: %.6f seconds\n",
+                       s->scheduler_publication_seconds);
+
+                printf("schedule events    : %" PRIu64 "\n",
+                       s->schedule_events_emitted);
+
+                printf("event capacity     : %" PRIu64 "\n",
+                       s->schedule_event_capacity_total);
+
+                if (s->schedule_event_capacity_total > 0) {
+                        printf("event occupancy    : %.3f%%\n",
+                               100.0 *
+                               (double)s->schedule_events_emitted /
+                               (double)s->schedule_event_capacity_total);
+                }
 
                 printf("===============================\n");
         }
