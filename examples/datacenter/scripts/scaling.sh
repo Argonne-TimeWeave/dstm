@@ -15,6 +15,7 @@ set -uo pipefail
 #   dstm         : RANKS total MPI ranks
 #   sst          : RANKS total MPI ranks
 #   opt_dstm : RANKS thermal ranks + 1 dedicated scheduler rank
+#   opt_sst  : RANKS thermal ranks + 1 dedicated scheduler rank
 #
 # opt_dstm reserves one node exclusively for scheduler rank 0.
 
@@ -50,8 +51,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 DSTM_EXE="${ROOT_DIR}/dstm/datacenter"
-AUCTION_DSTM_EXE="${ROOT_DIR}/opt_dstm/datacenter"
+OPT_DSTM_EXE="${ROOT_DIR}/opt_dstm/datacenter"
+
 SST_DIR="${ROOT_DIR}/sst"
+OPT_SST_DIR="${ROOT_DIR}/opt_sst"
+
 GENERATOR="${ROOT_DIR}/jobs/gen.py"
 
 RESULT_DIR="${SCRIPT_DIR}/results"
@@ -186,8 +190,8 @@ make_mpi_launch()
     fi
 }
 
-AUCTION_MPI_LAUNCH=()
-AUCTION_RANKFILE=""
+OPT_MPI_LAUNCH=()
+OPT_RANKFILE=""
 
 make_opt_mpi_launch()
 {
@@ -223,13 +227,13 @@ make_opt_mpi_launch()
 
     total_ranks=$((worker_ranks + 1))
 
-    AUCTION_RANKFILE="${RESULT_DIR}/opt_r${worker_ranks}.rankfile"
-    : > "${AUCTION_RANKFILE}"
+    OPT_RANKFILE="${RESULT_DIR}/opt_r${worker_ranks}.rankfile"
+    : > "${OPT_RANKFILE}"
 
     # Scheduler rank 0 is alone on the first allocated node.
     printf 'rank 0=%s slot=0\n' \
         "${NODELIST[0]}" \
-        >> "${AUCTION_RANKFILE}"
+        >> "${OPT_RANKFILE}"
 
     # Spread thermal ranks across nodes 1..worker_nodes. No thermal rank is
     # placed on the scheduler node.
@@ -242,28 +246,28 @@ make_opt_mpi_launch()
             "${mpi_rank}" \
             "${NODELIST[worker_node_index]}" \
             "${worker_slot}" \
-            >> "${AUCTION_RANKFILE}"
+            >> "${OPT_RANKFILE}"
     done
 
     # Preserve the existing MPIRUN_ARGS environment variable.
     # shellcheck disable=SC2206
     mpi_args=( ${MPIRUN_ARGS} )
 
-    AUCTION_MPI_LAUNCH=(
+    OPT_MPI_LAUNCH=(
         "${MPIRUN}"
         "${mpi_args[@]}"
         -n "${total_ranks}"
-        --rankfile "${AUCTION_RANKFILE}"
+        --rankfile "${OPT_RANKFILE}"
     )
 
     if [[ "${ALLOC_SRC}" != "localhost" ]]; then
-        AUCTION_MPI_LAUNCH+=(--hostfile "${ALLOC_NODEFILE}")
+        OPT_MPI_LAUNCH+=(--hostfile "${ALLOC_NODEFILE}")
 
         if [[ -n "${MPI_PREFIX}" ]]; then
-            AUCTION_MPI_LAUNCH+=(--prefix "${MPI_PREFIX}")
+            OPT_MPI_LAUNCH+=(--prefix "${MPI_PREFIX}")
         fi
 
-        AUCTION_MPI_LAUNCH+=("${MPI_X_FLAGS[@]}")
+        OPT_MPI_LAUNCH+=("${MPI_X_FLAGS[@]}")
     fi
 }
 
@@ -274,13 +278,18 @@ if [[ ! -x "${DSTM_EXE}" ]]; then
     exit 1
 fi
 
-if [[ ! -x "${AUCTION_DSTM_EXE}" ]]; then
-    echo "Missing executable: ${AUCTION_DSTM_EXE}" >&2
+if [[ ! -x "${OPT_DSTM_EXE}" ]]; then
+    echo "Missing executable: ${OPT_DSTM_EXE}" >&2
     exit 1
 fi
 
 if [[ ! -f "${SST_DIR}/run.py" ]]; then
     echo "Missing SST model: ${SST_DIR}/run.py" >&2
+    exit 1
+fi
+
+if [[ ! -f "${OPT_SST_DIR}/run.py" ]]; then
+    echo "Missing optimized SST model: ${OPT_SST_DIR}/run.py" >&2
     exit 1
 fi
 
@@ -398,8 +407,8 @@ run_opt_dstm()
         return 1
     fi
 
-    if "${AUCTION_MPI_LAUNCH[@]}" \
-        "${AUCTION_DSTM_EXE}" \
+    if "${OPT_MPI_LAUNCH[@]}" \
+        "${OPT_DSTM_EXE}" \
         --racks "${racks}" \
         --nodes-per-rack "${NODES_PER_RACK}" \
         --steps "${STEPS}" \
@@ -462,8 +471,8 @@ run_sst()
 
     if (
         cd "${SST_DIR}" &&
-        SST_MODEL_OPTIONS="${options}" \
-            "${MPI_LAUNCH[@]}" sst run.py
+        export SST_MODEL_OPTIONS="${options}" &&
+            "${MPI_LAUNCH[@]}" -x SST_MODEL_OPTIONS sst run.py
     ) >"${log}" 2>&1; then
         
         if elapsed="$(
@@ -508,6 +517,93 @@ run_sst()
     [[ "${status}" == "ok" ]]
 }
 
+run_opt_sst()
+{
+    local scaling_mode="$1"
+    local worker_ranks="$2"
+    local racks="$3"
+    local jobs="$4"
+    local trace="$5"
+    local repeat="$6"
+
+    local mpi_ranks=$((worker_ranks + 1))
+    local log="${LOG_DIR}/${scaling_mode}_opt_sst_r${worker_ranks}_run${repeat}.log"
+
+    local options
+    options="--racks ${racks}"
+    options+=" --domains ${worker_ranks}"
+    options+=" --sst-ranks ${mpi_ranks}"
+    options+=" --nodes-per-rack ${NODES_PER_RACK}"
+    options+=" --steps ${STEPS}"
+    options+=" --schedule-window ${SCHEDULE_WINDOW}"
+    options+=" --control-latency ${CONTROL_LATENCY}"
+    options+=" --jobs ${trace}"
+
+    local elapsed="nan"
+    local status
+
+    if ! make_opt_mpi_launch "${worker_ranks}"; then
+        status="placement_failed"
+
+        printf '%s,%s,%d,%d,%d,%d,%d,%d,%s,%s\n' \
+            "${scaling_mode}" "opt_sst" \
+            "${worker_ranks}" "${mpi_ranks}" \
+            "${racks}" "${jobs}" "${STEPS}" "${repeat}" \
+            "${elapsed}" "${status}" \
+            >> "${RESULT_CSV}"
+
+        echo "${scaling_mode}, opt_sst, thermal_ranks=${worker_ranks}, mpi_ranks=${mpi_ranks}, run=${repeat}: ${elapsed}s (${status})"
+        return 1
+    fi
+
+    if (
+        cd "${OPT_SST_DIR}" &&
+        SST_MODEL_OPTIONS="${options}" && 
+            "${OPT_MPI_LAUNCH[@]}" -x SST_MODEL_OPTIONS sst run.py
+    ) >"${log}" 2>&1; then
+
+        if elapsed="$(
+            awk '
+                {
+                    for (i = 1; i <= NF; i++) {
+                        if ($i ~ /^simulation_runtime_seconds=/) {
+                            split($i, value, "=")
+                            time = value[2] + 0.0
+
+                            if (!found || time > maximum)
+                                maximum = time
+
+                            found = 1
+                        }
+                    }
+                }
+                END {
+                    if (!found)
+                        exit 1
+                    printf "%.9f\n", maximum
+                }
+            ' "${log}"
+        )"; then
+            status="ok"
+        else
+            status="missing_timing"
+        fi
+    else
+        status="failed"
+    fi
+
+    printf '%s,%s,%d,%d,%d,%d,%d,%d,%s,%s\n' \
+        "${scaling_mode}" "opt_sst" \
+        "${worker_ranks}" "${mpi_ranks}" \
+        "${racks}" "${jobs}" "${STEPS}" "${repeat}" \
+        "${elapsed}" "${status}" \
+        >> "${RESULT_CSV}"
+
+    echo "${scaling_mode}, opt_sst, thermal_ranks=${worker_ranks}, mpi_ranks=${mpi_ranks}, run=${repeat}: ${elapsed}s (${status})"
+
+    [[ "${status}" == "ok" ]]
+}
+
 run_case()
 {
     local scaling_mode="$1"
@@ -541,6 +637,10 @@ run_case()
             "${jobs}" "${trace}" "${repeat}" || true
 
         run_sst \
+            "${scaling_mode}" "${ranks}" "${racks}" \
+            "${jobs}" "${trace}" "${repeat}" || true
+
+        run_opt_sst \
             "${scaling_mode}" "${ranks}" "${racks}" \
             "${jobs}" "${trace}" "${repeat}" || true
     done
