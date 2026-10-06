@@ -1,1 +1,1 @@
-SUBDIRS = dstm auction_dstm
+SUBDIRS = dstm opt_dstm

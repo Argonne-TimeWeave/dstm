@@ -14,26 +14,26 @@ set -uo pipefail
 #
 #   dstm         : RANKS total MPI ranks
 #   sst          : RANKS total MPI ranks
-#   auction_dstm : RANKS thermal ranks + 1 dedicated scheduler rank
+#   opt_dstm : RANKS thermal ranks + 1 dedicated scheduler rank
 #
-# auction_dstm reserves one node exclusively for scheduler rank 0.
+# opt_dstm reserves one node exclusively for scheduler rank 0.
 
 MODE="${1:-both}"
 RANKS=(2 4 8 16 32 64 128 256)
-#RANKS=(4 8)
+#RANKS=(128)
 
 REPEATS="${REPEATS:-2}"
 STEPS="${STEPS:-1000}"
 NODES_PER_RACK="${NODES_PER_RACK:-32}"
 
-SCHEDULE_WINDOW="${SCHEDULE_WINDOW:-180}"
-CONTROL_LATENCY="${CONTROL_LATENCY:-90}"
+SCHEDULE_WINDOW="${SCHEDULE_WINDOW:-60}"
+CONTROL_LATENCY="${CONTROL_LATENCY:-30}"
 
 STRONG_RACKS="${STRONG_RACKS:-512}"
 STRONG_JOBS="${STRONG_JOBS:-32768}"
 
-WEAK_RACKS_PER_RANK="${WEAK_RACKS_PER_RANK:-16}"
-WEAK_JOBS_PER_RANK="${WEAK_JOBS_PER_RANK:-1024}"
+WEAK_RACKS_PER_RANK="${WEAK_RACKS_PER_RANK:-8}"
+WEAK_JOBS_PER_RANK="${WEAK_JOBS_PER_RANK:-512}"
 
 MPIRUN="${MPIRUN:-mpirun}"
 MPIRUN_ARGS="${MPIRUN_ARGS:-}"
@@ -42,7 +42,7 @@ MPI_PREFIX="${MPI_PREFIX:-}"
 MPI_ENV_VARS="${MPI_ENV_VARS:-LD_LIBRARY_PATH PATH}"
 MAX_PPN="${MAX_PPN:-32}"
 
-# Maximum nodes used by simulation/thermal ranks. auction_dstm may use one
+# Maximum nodes used by simulation/thermal ranks. opt_dstm may use one
 # additional node for its dedicated scheduler.
 MAX_WORKER_NODES="${MAX_WORKER_NODES:-${MAX_NODES:-8}}"
 
@@ -50,7 +50,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 DSTM_EXE="${ROOT_DIR}/dstm/datacenter"
-AUCTION_DSTM_EXE="${ROOT_DIR}/auction_dstm/datacenter"
+AUCTION_DSTM_EXE="${ROOT_DIR}/opt_dstm/datacenter"
 SST_DIR="${ROOT_DIR}/sst"
 GENERATOR="${ROOT_DIR}/jobs/gen.py"
 
@@ -94,7 +94,7 @@ fi
 ALLOCATED_NODES=${#NODELIST[@]}
 
 if (( ALLOCATED_NODES < MAX_WORKER_NODES + 1 )); then
-    echo "Warning: allocated ${ALLOCATED_NODES} nodes; auction_dstm reserves one scheduler node and can use at most $((ALLOCATED_NODES - 1)) worker nodes" >&2
+    echo "Warning: allocated ${ALLOCATED_NODES} nodes; opt_dstm reserves one scheduler node and can use at most $((ALLOCATED_NODES - 1)) worker nodes" >&2
 fi
 
 # Baseline runs use at most MAX_WORKER_NODES. The epoch implementation may
@@ -189,7 +189,7 @@ make_mpi_launch()
 AUCTION_MPI_LAUNCH=()
 AUCTION_RANKFILE=""
 
-make_auction_mpi_launch()
+make_opt_mpi_launch()
 {
     local worker_ranks="$1"
     local worker_nodes ppn capacity
@@ -198,7 +198,7 @@ make_auction_mpi_launch()
     local worker worker_node_index worker_slot mpi_rank
 
     if (( ALLOCATED_NODES < 2 )); then
-        echo "auction_dstm requires at least two allocated nodes: one scheduler node and one or more worker nodes" >&2
+        echo "opt_dstm requires at least two allocated nodes: one scheduler node and one or more worker nodes" >&2
         return 1
     fi
 
@@ -217,13 +217,13 @@ make_auction_mpi_launch()
     capacity=$(( worker_nodes * MAX_PPN ))
 
     if (( worker_ranks > capacity || ppn > MAX_PPN )); then
-        echo "auction_dstm cannot fit ${worker_ranks} thermal ranks on ${worker_nodes} worker nodes at ${MAX_PPN} ranks/node" >&2
+        echo "opt_dstm cannot fit ${worker_ranks} thermal ranks on ${worker_nodes} worker nodes at ${MAX_PPN} ranks/node" >&2
         return 1
     fi
 
     total_ranks=$((worker_ranks + 1))
 
-    AUCTION_RANKFILE="${RESULT_DIR}/auction_r${worker_ranks}.rankfile"
+    AUCTION_RANKFILE="${RESULT_DIR}/opt_r${worker_ranks}.rankfile"
     : > "${AUCTION_RANKFILE}"
 
     # Scheduler rank 0 is alone on the first allocated node.
@@ -369,7 +369,7 @@ run_dstm()
     [[ "${status}" == "ok" ]]
 }
 
-run_auction_dstm()
+run_opt_dstm()
 {
     local scaling_mode="$1"
     local worker_ranks="$2"
@@ -379,22 +379,22 @@ run_auction_dstm()
     local repeat="$6"
 
     local mpi_ranks=$((worker_ranks + 1))
-    local log="${LOG_DIR}/${scaling_mode}_auction_dstm_r${worker_ranks}_run${repeat}.log"
+    local log="${LOG_DIR}/${scaling_mode}_opt_dstm_r${worker_ranks}_run${repeat}.log"
 
     local elapsed="nan"
     local status
 
-    if ! make_auction_mpi_launch "${worker_ranks}"; then
+    if ! make_opt_mpi_launch "${worker_ranks}"; then
         status="placement_failed"
 
         printf '%s,%s,%d,%d,%d,%d,%d,%d,%s,%s\n' \
-            "${scaling_mode}" "auction_dstm" \
+            "${scaling_mode}" "opt_dstm" \
             "${worker_ranks}" "${mpi_ranks}" \
             "${racks}" "${jobs}" "${STEPS}" "${repeat}" \
             "${elapsed}" "${status}" \
             >> "${RESULT_CSV}"
 
-        echo "${scaling_mode}, auction_dstm, thermal_ranks=${worker_ranks}, mpi_ranks=${mpi_ranks}, run=${repeat}: ${elapsed}s (${status})"
+        echo "${scaling_mode}, opt_dstm, thermal_ranks=${worker_ranks}, mpi_ranks=${mpi_ranks}, run=${repeat}: ${elapsed}s (${status})"
         return 1
     fi
 
@@ -429,13 +429,13 @@ run_auction_dstm()
     fi
 
     printf '%s,%s,%d,%d,%d,%d,%d,%d,%s,%s\n' \
-        "${scaling_mode}" "auction_dstm" \
+        "${scaling_mode}" "opt_dstm" \
         "${worker_ranks}" "${mpi_ranks}" \
         "${racks}" "${jobs}" "${STEPS}" "${repeat}" \
         "${elapsed}" "${status}" \
         >> "${RESULT_CSV}"
 
-    echo "${scaling_mode}, auction_dstm, thermal_ranks=${worker_ranks}, mpi_ranks=${mpi_ranks}, run=${repeat}: ${elapsed}s (${status})"
+    echo "${scaling_mode}, opt_dstm, thermal_ranks=${worker_ranks}, mpi_ranks=${mpi_ranks}, run=${repeat}: ${elapsed}s (${status})"
 
     [[ "${status}" == "ok" ]]
 }
@@ -536,7 +536,7 @@ run_case()
             "${scaling_mode}" "${ranks}" "${racks}" \
             "${jobs}" "${trace}" "${repeat}" || true
 
-        run_auction_dstm \
+        run_opt_dstm \
             "${scaling_mode}" "${ranks}" "${racks}" \
             "${jobs}" "${trace}" "${repeat}" || true
 
