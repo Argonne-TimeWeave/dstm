@@ -91,11 +91,10 @@ int dstm_finalize(void);
 
 #define DSTM_LOG_QUIET 0
 #define DSTM_LOG_ERROR 1
-#define DSTM_LOG_PROFILE 2
-#define DSTM_LOG_WARNING 3
-#define DSTM_LOG_NORMAL 4
-#define DSTM_LOG_INFO 5
-#define DSTM_LOG_DEBUG 6
+#define DSTM_LOG_WARNING 2
+#define DSTM_LOG_NORMAL 3
+#define DSTM_LOG_INFO 4
+#define DSTM_LOG_DEBUG 5
 
 /**
  * Set to one by the library if at least one dstm_log_init has
@@ -138,9 +137,6 @@ extern int dstm_log_level;
 
 #define dstm_log_error(...)                                                    \
 	dstm_log_printf(DSTM_LOG_ERROR, __FILE__, __func__, __LINE__,          \
-	                __VA_ARGS__)
-#define dstm_log_profile(...)                                                  \
-	dstm_log_printf(DSTM_LOG_PROFILE, __FILE__, __func__, __LINE__,        \
 	                __VA_ARGS__)
 #define dstm_log_warning(...)                                                  \
 	dstm_log_printf(DSTM_LOG_WARNING, __FILE__, __func__, __LINE__,        \
