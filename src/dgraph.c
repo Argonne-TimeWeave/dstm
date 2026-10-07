@@ -669,13 +669,14 @@ consensus_setup:
                         uint8_t *tmp_s = calloc((size_t)world_size, 1);
                         uint8_t *tmp_r = calloc((size_t)world_size *
                                                 (size_t)world_size, 1);
-                        if (tmp_s && tmp_r)
+                        if (tmp_s && tmp_r) {
                                 MPI_Allgather(tmp_s, world_size, MPI_UINT8_T,
                                               tmp_r, world_size, MPI_UINT8_T,
                                               comm);
                                 dstm_profile_record_collective(
                                         DSTM_PROFILE_MPI_ALLGATHER,
                                         (size_t)world_size * sizeof(uint8_t));
+                        }
                         free(tmp_s);
                         free(tmp_r);
                 }
