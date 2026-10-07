@@ -27,7 +27,7 @@ FILE *dstm_log_fd = NULL;
 static const char *dstm_log_namespace;
 
 static const char *dstm_log_level_string[] = {
-        "quiet", "error", "warning", "normal", "info", "debug",
+        "quiet", "error", "profile", "warning", "normal", "info", "debug",
 };
 
 int dstm_log_init(FILE *f, const char *nm)

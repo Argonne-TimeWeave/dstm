@@ -180,7 +180,7 @@ void dstm_profile_finish_and_log(MPI_Comm comm, int rank)
 
         if (!allocation_ok) {
                 if (rank == 0) {
-                        dstm_log_normal(
+                        dstm_log_profile(
                                 "DSTM_PROFILE "
                                 "status=unavailable "
                                 "reason=out_of_memory\n");
@@ -234,7 +234,7 @@ void dstm_profile_finish_and_log(MPI_Comm comm, int rank)
                                 total_bytes += bytes[i];
                         }
 
-                        dstm_log_normal(
+                        dstm_log_profile(
                                 "DSTM_PROFILE "
                                 "scope=rank "
                                 "rank=%d "
