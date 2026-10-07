@@ -13,6 +13,8 @@
 #include <inttypes.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include <mpi.h>
@@ -22,12 +24,29 @@
 #include "internal/globals.h"
 #include "internal/profile.h"
 
+/*
+ * Process-local configuration, persistent across sessions. All ranks must
+ * set the same value before entering dstm_start.
+ */
+static int dstm_profile_enabled = 0;
+
+int dstm_profile_set_enabled(int enabled)
+{
+        dstm_profile_enabled = (enabled != 0);
+        return DSTM_SUCCESS;
+}
+
 void dstm_profile_start(void)
 {
-        memset(&dstm_global_context.profile, 0,
-               sizeof(dstm_global_context.profile));
-        dstm_global_context.profile.start_time = MPI_Wtime();
-        dstm_global_context.profile.active = 1;
+        dstm_profile_t *profile = &dstm_global_context.profile;
+
+        memset(profile, 0, sizeof(*profile));
+
+        if (!dstm_profile_enabled)
+                return;
+
+        profile->start_time = MPI_Wtime();
+        profile->active = 1;
 }
 
 void dstm_profile_cancel(void)
@@ -180,7 +199,7 @@ void dstm_profile_finish_and_log(MPI_Comm comm, int rank)
 
         if (!allocation_ok) {
                 if (rank == 0) {
-                        dstm_log_normal(
+                        dstm_profile_log(
                                 "DSTM_PROFILE "
                                 "status=unavailable "
                                 "reason=out_of_memory\n");
@@ -234,7 +253,7 @@ void dstm_profile_finish_and_log(MPI_Comm comm, int rank)
                                 total_bytes += bytes[i];
                         }
 
-                        dstm_log_normal(
+                        dstm_profile_log(
                                 "DSTM_PROFILE "
                                 "scope=rank "
                                 "rank=%d "
@@ -286,4 +305,36 @@ void dstm_profile_finish_and_log(MPI_Comm comm, int rank)
         free(rank_bytes);
         free(rank_versions);
         free(rank_runtimes);
+}
+
+void dstm_profile_log_printf(const char *file,
+                             const char *func,
+                             unsigned int line,
+                             const char *format,
+                             ...)
+{
+        va_list ap;
+        FILE *fd = dstm_log_fd != NULL ? dstm_log_fd : stderr;
+        int rank = dstm_global_context.rank;
+        int world_size = dstm_global_context.world_size;
+
+        if (!dstm_profile_enabled)
+                return;
+
+        /*
+         * This deliberately does not inspect dstm_log_level. "profile" is
+         * an independently enabled output category, not a log priority.
+         */
+        fprintf(fd, "dstm:\tprofile:%d/%d:\t", rank, world_size);
+
+        /*
+         * Match ordinary logging's additional source context in debug mode,
+         * without making profile emission depend on that mode.
+         */
+        if (dstm_log_level == DSTM_LOG_DEBUG)
+                fprintf(fd, "%s:\t%s:\t%u:\t", file, func, line);
+
+        va_start(ap, format);
+        vfprintf(fd, format, ap);
+        va_end(ap);
 }

@@ -61,6 +61,12 @@ void dstm_profile_version_destroyed(void);
 
 void dstm_profile_finish_and_log(MPI_Comm comm, int rank);
 
+void dstm_profile_log_printf(const char *file, const char *func, unsigned int line,
+                             const char *format, ...);
+
+#define dstm_profile_log(...)                                                  \
+        dstm_profile_log_printf(__FILE__, __func__, __LINE__, __VA_ARGS__)
+
 #ifdef __cplusplus
 }
 #endif
