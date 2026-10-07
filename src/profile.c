@@ -62,14 +62,55 @@ void dstm_profile_record_collective(dstm_profile_mpi_call_t call,
         dstm_profile_record(call, (size_t)bytes);
 }
 
+void dstm_profile_version_created(void)
+{
+        dstm_profile_t *profile = &dstm_global_context.profile;
+
+        if (!profile->active)
+                return;
+
+        profile->versions_created++;
+        profile->versions_active++;
+
+        if (profile->versions_active > profile->versions_active_max)
+                profile->versions_active_max = profile->versions_active;
+}
+
+void dstm_profile_version_destroyed(void)
+{
+        dstm_profile_t *profile = &dstm_global_context.profile;
+
+        if (!profile->active)
+                return;
+
+        profile->versions_destroyed++;
+
+        /*
+         * Every version created during a normal session should have a
+         * matching active count. Keep this guarded so profiling cannot
+         * underflow if a pre-profile version is ever destroyed.
+         */
+        if (profile->versions_active > 0)
+                profile->versions_active--;
+}
+
 void dstm_profile_finish_and_log(MPI_Comm comm, int rank)
 {
+        enum {
+                DSTM_PROFILE_VERSION_CREATED = 0,
+                DSTM_PROFILE_VERSION_DESTROYED,
+                DSTM_PROFILE_VERSION_ACTIVE_MAX,
+                DSTM_PROFILE_VERSION_METRIC_MAX
+        };
+
         dstm_profile_t *profile = &dstm_global_context.profile;
         uint64_t local_calls[DSTM_PROFILE_MPI_CALL_MAX] = {0};
         uint64_t local_bytes[DSTM_PROFILE_MPI_CALL_MAX] = {0};
+        uint64_t local_versions[DSTM_PROFILE_VERSION_METRIC_MAX] = {0};
 
         uint64_t *rank_calls = NULL;
         uint64_t *rank_bytes = NULL;
+        uint64_t *rank_versions = NULL;
         double *rank_runtimes = NULL;
 
         double local_runtime;
@@ -81,16 +122,23 @@ void dstm_profile_finish_and_log(MPI_Comm comm, int rank)
 
         local_runtime = MPI_Wtime() - profile->start_time;
 
+        for (int i = 0; i < DSTM_PROFILE_MPI_CALL_MAX; i++) {
+                local_calls[i] = profile->mpi_calls[i];
+                local_bytes[i] = profile->mpi_bytes[i];
+        }
+
+        local_versions[DSTM_PROFILE_VERSION_CREATED] =
+                profile->versions_created;
+        local_versions[DSTM_PROFILE_VERSION_DESTROYED] =
+                profile->versions_destroyed;
+        local_versions[DSTM_PROFILE_VERSION_ACTIVE_MAX] =
+                profile->versions_active_max;
+
         /*
          * Disable collection before gathering results so the profiling
          * collectives do not count themselves.
          */
         profile->active = 0;
-
-        for (int i = 0; i < DSTM_PROFILE_MPI_CALL_MAX; i++) {
-                local_calls[i] = profile->mpi_calls[i];
-                local_bytes[i] = profile->mpi_bytes[i];
-        }
 
         MPI_Comm_size(comm, &world_size);
 
@@ -105,14 +153,20 @@ void dstm_profile_finish_and_log(MPI_Comm comm, int rank)
         if (rank == 0) {
                 size_t counter_count =
                         (size_t)world_size * DSTM_PROFILE_MPI_CALL_MAX;
+                size_t version_metric_count =
+                        (size_t)world_size *
+                        DSTM_PROFILE_VERSION_METRIC_MAX;
 
                 rank_calls = calloc(counter_count, sizeof(*rank_calls));
                 rank_bytes = calloc(counter_count, sizeof(*rank_bytes));
+                rank_versions = calloc(version_metric_count,
+                                       sizeof(*rank_versions));
                 rank_runtimes =
                         calloc((size_t)world_size, sizeof(*rank_runtimes));
 
                 if (rank_calls == NULL ||
                     rank_bytes == NULL ||
+                    rank_versions == NULL ||
                     rank_runtimes == NULL)
                         allocation_ok = 0;
         }
@@ -134,12 +188,19 @@ void dstm_profile_finish_and_log(MPI_Comm comm, int rank)
 
                 free(rank_calls);
                 free(rank_bytes);
+                free(rank_versions);
                 free(rank_runtimes);
                 return;
         }
 
         MPI_Gather(local_calls, DSTM_PROFILE_MPI_CALL_MAX, MPI_UINT64_T,
                    rank_calls, DSTM_PROFILE_MPI_CALL_MAX, MPI_UINT64_T,
+                   0, comm);
+
+        MPI_Gather(local_versions, DSTM_PROFILE_VERSION_METRIC_MAX,
+                   MPI_UINT64_T,
+                   rank_versions, DSTM_PROFILE_VERSION_METRIC_MAX,
+                   MPI_UINT64_T,
                    0, comm);
 
         MPI_Gather(local_bytes, DSTM_PROFILE_MPI_CALL_MAX, MPI_UINT64_T,
@@ -158,6 +219,10 @@ void dstm_profile_finish_and_log(MPI_Comm comm, int rank)
                         const uint64_t *bytes =
                                 rank_bytes +
                                 (size_t)r * DSTM_PROFILE_MPI_CALL_MAX;
+                        const uint64_t *versions =
+                                rank_versions +
+                                (size_t)r *
+                                DSTM_PROFILE_VERSION_METRIC_MAX;
 
                         uint64_t total_calls = 0;
                         uint64_t total_bytes = 0;
@@ -174,6 +239,9 @@ void dstm_profile_finish_and_log(MPI_Comm comm, int rank)
                                 "scope=rank "
                                 "rank=%d "
                                 "runtime_wall_seconds=%.9f "
+                                "versions_created=%" PRIu64 " "
+                                "versions_destroyed=%" PRIu64 " "
+                                "versions_active_max=%" PRIu64 " "
                                 "mpi_calls_total=%" PRIu64 " "
                                 "mpi_send_calls=%" PRIu64 " "
                                 "mpi_isend_calls=%" PRIu64 " "
@@ -192,6 +260,9 @@ void dstm_profile_finish_and_log(MPI_Comm comm, int rank)
                                 "mpi_barrier_bytes=%" PRIu64 "\n",
                                 r,
                                 rank_runtimes[r],
+                                versions[DSTM_PROFILE_VERSION_CREATED],
+                                versions[DSTM_PROFILE_VERSION_DESTROYED],
+                                versions[DSTM_PROFILE_VERSION_ACTIVE_MAX],
                                 total_calls,
                                 calls[DSTM_PROFILE_MPI_SEND],
                                 calls[DSTM_PROFILE_MPI_ISEND],
@@ -213,5 +284,6 @@ void dstm_profile_finish_and_log(MPI_Comm comm, int rank)
 
         free(rank_calls);
         free(rank_bytes);
+        free(rank_versions);
         free(rank_runtimes);
 }
