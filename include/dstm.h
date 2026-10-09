@@ -1039,6 +1039,155 @@ int dstm_dgraph_derive_distance_weighted(
         dstm_dgraph_t *g, dstm_distance_t **ret, int default_delta,
         dstm_dgraph_edge_weight_fn weight_fn, void *user);
 
+/************************
+ * DQUEUE
+ *
+ * A sparse, neighbor-scoped distributed queue on top of the darray
+ * substrate. Each rank has ONE logical incoming queue, assembled from one
+ * physical block per incoming neighbor so distinct remote producers never
+ * share (and thus clobber) a single version slot. "Neighbor" is derived
+ * from the distance matrix passed at create time: s neighbors self iff
+ * dstm_distance_get(dist, self, s) != -1 (self always included). Distances
+ * are symmetric, so incoming and outgoing neighbor sets coincide.
+ *
+ * push == put (delta >= 0): stage an element into the local outbox for a
+ *   destination neighbor. Staged elements are published by flush as one put
+ *   per destination per (time, delta).
+ *
+ * pop_incoming == get (delta <= 0): read every incoming neighbor block at a
+ *   single (time, delta) version and concatenate all live elements into one
+ *   buffer -- the whole incoming queue, drained at once.
+ *
+ * Elements are fixed-size POD (no embedded pointers); each block holds at
+ * most `capacity` elements.
+ ***********************/
+
+struct dstm_dqueue_s;
+typedef struct dstm_dqueue_s dstm_dqueue_t;
+
+/**
+ * Create a sparse distributed queue over the neighbors implied by @p dist.
+ *
+ * Collective over dstm_global_context.comm. @p dist must have size equal to
+ * world_size (typically the same matrix handed to dstm_start). Only
+ * reachable (dest, src) blocks are allocated.
+ *
+ * @param[out] ret           handle to populate on success (non-NULL)
+ * @param[in]  element_size   bytes per queued element (> 0)
+ * @param[in]  capacity       max elements per neighbor block (> 0)
+ * @param[in]  dist           distance matrix defining neighbor reachability
+ * @return DSTM_SUCCESS, -DSTM_EINVAL, -DSTM_ENOMEM, -DSTM_FAILURE.
+ */
+int dstm_dqueue_create(dstm_dqueue_t **ret,
+                       size_t element_size,
+                       size_t capacity,
+                       dstm_distance_t *dist);
+
+/* Like dstm_dqueue_create, but back this rank's blocks on local region
+ * @p region_id instead of the default region 0. Collective. */
+int dstm_dqueue_create_on_region(dstm_dqueue_t **ret,
+                                 size_t element_size,
+                                 size_t capacity,
+                                 dstm_distance_t *dist,
+                                 int region_id);
+
+/**
+ * Destroy a dqueue and free all resources. Safe on NULL or a handle
+ * pointing to NULL. Sets *dqueue to NULL.
+ */
+void dstm_dqueue_destroy(dstm_dqueue_t **dqueue);
+
+/*******************************************************************************
+ * Introspection
+ ******************************************************************************/
+
+/** Bytes per element. */
+size_t dstm_dqueue_element_size(dstm_dqueue_t *dqueue);
+
+/** Max elements per neighbor block. */
+size_t dstm_dqueue_capacity(dstm_dqueue_t *dqueue);
+
+/**
+ * Upper bound on the number of elements a single dstm_dqueue_pop_incoming
+ * can return: (number of incoming neighbors, self included) * capacity.
+ * Size a pop buffer to this once at setup to avoid the two-call pattern.
+ */
+size_t dstm_dqueue_max_incoming(dstm_dqueue_t *dqueue);
+
+/** Elements currently staged (not yet flushed) for @p dest_rank. */
+size_t dstm_dqueue_pending(dstm_dqueue_t *dqueue, int dest_rank);
+
+/*******************************************************************************
+ * Push / flush  (producer side, == put)
+ ******************************************************************************/
+
+/**
+ * Stage one element (element_size bytes) into the local outbox destined for
+ * @p dest_rank. Nothing is sent until dstm_dqueue_flush.
+ *
+ * @return DSTM_SUCCESS, -DSTM_EINVAL (NULL args, or @p dest_rank is not a
+ *         neighbor), -DSTM_ENOMEM if that outbox is already at capacity.
+ */
+int dstm_dqueue_push(dstm_dqueue_t *dqueue,
+                     int dest_rank,
+                     const void *element);
+
+/**
+ * Flush every non-empty outbox: one put per destination neighbor with
+ * staged elements, publishing the block at (time + delta), then clear the
+ * staged outboxes. Mirrors dstm_darray_put delta rules: @p delta >= 0, and
+ * a remote flush requires @p delta > 0.
+ *
+ * @return DSTM_SUCCESS, -DSTM_EINVAL, or the first underlying dstm_put
+ *         error. Already-flushed destinations are not rolled back on error.
+ */
+int dstm_dqueue_flush(dstm_dqueue_t *dqueue,
+                      dstm_time_t time,
+                      dstm_time_t delta);
+
+/**
+ * Push @p element to @p dest_rank then immediately flush only that
+ * destination at (time + delta).
+ */
+int dstm_dqueue_push_flush(dstm_dqueue_t *dqueue,
+                           int dest_rank,
+                           const void *element,
+                           dstm_time_t time,
+                           dstm_time_t delta);
+
+/*******************************************************************************
+ * Pop  (consumer side, == get) : the single-queue surface
+ ******************************************************************************/
+
+/**
+ * Drain this rank's ENTIRE incoming queue at the version (time + delta):
+ * read every incoming neighbor block and concatenate all live elements
+ * contiguously into @p out_elements, writing the total element count to
+ * *@p io_count. Producers (sources) are not visible to the caller.
+ *
+ * Mirrors dstm_darray_get delta rules: @p delta <= 0; a pop that reads any
+ * remote block requires @p delta < 0.
+ *
+ * Buffer sizing, two supported styles:
+ *   - size @p out_elements to dstm_dqueue_max_incoming() and it never
+ *     overflows; or
+ *   - two-call pattern: on entry *@p io_count is the buffer capacity in
+ *     elements; if too small, returns -DSTM_ENOMEM with *@p io_count set to
+ *     the exact total required. Passing out_elements == NULL with
+ *     *io_count == 0 queries the count only.
+ *
+ * Early-tick fallback: if (time + delta) < 0, yields *@p io_count == 0 and
+ * DSTM_SUCCESS without any MPI traffic.
+ *
+ * @return DSTM_SUCCESS, -DSTM_EINVAL, -DSTM_ENOMEM (buffer too small), or
+ *         the underlying dstm_get error.
+ */
+int dstm_dqueue_pop_incoming(dstm_dqueue_t *dqueue,
+                             void *out_elements,
+                             size_t *io_count,
+                             dstm_time_t time,
+                             dstm_time_t delta);
+
 /* opaque type for pointers into regions */
 #define DSTM_REGIONID_INVALID -1
 #define DSTM_REGIONID_LOCAL -2
