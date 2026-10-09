@@ -1061,13 +1061,14 @@ int dstm_dgraph_derive_distance_weighted(
  * elements must be order-independent, or must carry their own key so the
  * consumer can sort after pop.
  *
- * push == append (delta >= 0): stage an element into the local outbox for
- *   a destination rank.  flush publishes staged elements as one
- *   dstm_append per destination that has data.
+ * push == append (delta >= 0): publish one element to the destination
+ *   owner's slot immediately with a single dstm_append at (time + delta).
+ *   No staging, no flush: appends from all producers accumulate on the
+ *   owner in MPI arrival order.
  *
- * pop_incoming == get (delta <= 0): ONE local dstm_get of this rank's slot
- *   at (time + delta), then read byte_count / element_size elements -- the
- *   whole incoming queue, drained at once.
+ * pop_incoming == get (delta <= 0): one local get of this rank's slot at a
+ *   single (time, delta) version; read all live elements into one buffer --
+ *   the whole incoming queue, drained at once.
  *
  * Elements are fixed-size POD (no embedded pointers).
  ***********************/
@@ -1126,46 +1127,32 @@ size_t dstm_dqueue_capacity(dstm_dqueue_t *dqueue);
  */
 size_t dstm_dqueue_max_incoming(dstm_dqueue_t *dqueue);
 
-/** Elements currently staged (not yet flushed) for @p dest_rank. */
-size_t dstm_dqueue_pending(dstm_dqueue_t *dqueue, int dest_rank);
-
 /*******************************************************************************
- * Push / flush  (producer side, == put)
+ * Push  (producer side, == append, issued immediately)
  ******************************************************************************/
 
 /**
- * Stage one element (element_size bytes) into the local outbox destined for
- * @p dest_rank. Nothing is sent until dstm_dqueue_flush.
+ * Publish one element (element_size bytes) to @p dest_rank's incoming queue
+ * at effective time (time + delta), with a single dstm_append. 
  *
- * @return DSTM_SUCCESS, -DSTM_EINVAL (NULL args, or @p dest_rank is not a
- *         neighbor), -DSTM_ENOMEM if that outbox is already at capacity.
+ * All producers targeting the same (owner, time + delta) accumulate into the
+ * same version slot in MPI arrival order; the order of distinct producers'
+ * elements is therefore nondeterministic (see the APPEND-ORDERING DECISION
+ * in the banner above).
+ *
+ * CAPACITY: the owner's single slot must hold the SUM over all producers of
+ * their per-tick contributions.  Overflow is enforced on the owning rank by
+ * the append handler.
+ *
+ * @return DSTM_SUCCESS, -DSTM_EINVAL (NULL args or @p dest_rank out of
+ *         range), -DSTM_EDOM (remote push with @p delta == 0), or the
+ *         underlying dstm_append error.
  */
 int dstm_dqueue_push(dstm_dqueue_t *dqueue,
                      int dest_rank,
-                     const void *element);
-
-/**
- * Flush every non-empty outbox: one put per destination neighbor with
- * staged elements, publishing the block at (time + delta), then clear the
- * staged outboxes. Mirrors dstm_darray_put delta rules: @p delta >= 0, and
- * a remote flush requires @p delta > 0.
- *
- * @return DSTM_SUCCESS, -DSTM_EINVAL, or the first underlying dstm_put
- *         error. Already-flushed destinations are not rolled back on error.
- */
-int dstm_dqueue_flush(dstm_dqueue_t *dqueue,
-                      dstm_time_t time,
-                      dstm_time_t delta);
-
-/**
- * Push @p element to @p dest_rank then immediately flush only that
- * destination at (time + delta).
- */
-int dstm_dqueue_push_flush(dstm_dqueue_t *dqueue,
-                           int dest_rank,
-                           const void *element,
-                           dstm_time_t time,
-                           dstm_time_t delta);
+                     const void *element,
+                     dstm_time_t time,
+                     dstm_time_t delta);
 
 /*******************************************************************************
  * Pop  (consumer side, == get) : the single-queue surface

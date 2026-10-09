@@ -333,18 +333,15 @@ static void airport_tick(dstm_dqueue_t *q, sim_ctx_t *ctx, dstm_time_t t)
                                  * it never enters the queue. */
                                 deliver_local(ctx, dst);
                         } else {
-                                /* Cross-rank: stage for the owning rank. */
-                                int rc = dstm_dqueue_push(q, owner, &msg);
+                                /* Cross-rank: push immediately to the owning
+                                 * rank for version t+1 (future push). */
+                                int rc = dstm_dqueue_push(q, owner, &msg,
+                                                          t, 1);
                                 REQUIRE(rc == DSTM_SUCCESS,
                                         "phase3 dqueue_push (queue full?)");
                         }
                 }
         }
-
-        /* Publish all staged cross-rank planes for version t+1. Flush
-         * publishes every outgoing block, so unreachable-to-us peers that
-         * got nothing still see a well-formed (empty) version. */
-        CHECK(dstm_dqueue_flush(q, t, 1), "phase3 flush");
 }
 
 /*******************************************************************************

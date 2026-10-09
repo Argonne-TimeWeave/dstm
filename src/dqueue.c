@@ -83,24 +83,11 @@ struct dstm_dqueue_s {
 
         /* Per-rank byte offset of the slot inside that rank's region. */
         intptr_t *rank_slot_off; /* [world_size] */
-
-        /* --- Staging: one outbox per destination rank. ---
-         * We keep a count of staged elements per destination.  Memory is
-         * element_size * capacity per destination; for a dense world this
-         * is world_size * capacity bytes of host staging, which is fine
-         * for the inter-rank traffic regime dqueue targets. */
-        char   *outbox;          /* world_size * (element_size*capacity) */
-        size_t *outbox_count;    /* [world_size] staged elements per dest */
 };
 
 /* ---------------------------------------------------------------------------
  * Helpers
  * ------------------------------------------------------------------------- */
-
-static inline char *outbox_for(dstm_dqueue_t *q, int dest)
-{
-        return q->outbox + (size_t)dest * q->element_size * q->capacity;
-}
 
 static inline dstm_ptr_t slot_ptr_of(const dstm_dqueue_t *q, int rank)
 {
@@ -115,8 +102,6 @@ static void dqueue_free_all(dstm_dqueue_t *q)
 {
         free(q->rank_region_id);
         free(q->rank_slot_off);
-        free(q->outbox);
-        free(q->outbox_count);
         free(q);
 }
 
@@ -159,11 +144,7 @@ int dstm_dqueue_create_on_region(dstm_dqueue_t **ret,
 
         q->rank_region_id = calloc((size_t)world_size, sizeof(int));
         q->rank_slot_off  = calloc((size_t)world_size, sizeof(intptr_t));
-        q->outbox_count   = calloc((size_t)world_size, sizeof(size_t));
-        q->outbox         = calloc((size_t)world_size,
-                                   element_size * capacity);
-        if (!q->rank_region_id || !q->rank_slot_off ||
-            !q->outbox_count || !q->outbox) {
+        if (!q->rank_region_id || !q->rank_slot_off) {
                 dqueue_free_all(q);
                 return -DSTM_ENOMEM;
         }
@@ -254,112 +235,28 @@ size_t dstm_dqueue_max_incoming(dstm_dqueue_t *q)
         return q ? q->capacity : 0;
 }
 
-size_t dstm_dqueue_pending(dstm_dqueue_t *q, int dest_rank)
-{
-        if (q == NULL || dest_rank < 0 || dest_rank >= q->world_size)
-                return 0;
-        return q->outbox_count[dest_rank];
-}
-
 /* ---------------------------------------------------------------------------
- * Push / flush  (== append)
+ * Push  (== append, issued immediately)
  * ------------------------------------------------------------------------- */
 
-int dstm_dqueue_push(dstm_dqueue_t *q, int dest_rank, const void *element)
+int dstm_dqueue_push(dstm_dqueue_t *q, int dest_rank, const void *element,
+                     dstm_time_t time, dstm_time_t delta)
 {
         if (q == NULL || element == NULL)
                 return -DSTM_EINVAL;
         if (dest_rank < 0 || dest_rank >= q->world_size)
                 return -DSTM_EINVAL;
 
-        /* Bound-check against the aggregate slot capacity.  This is a
-         * conservative per-destination check: the receiver's slot holds
-         * the SUM of all producers, so even if this one producer fits,
-         * aggregate overflow is caught at apply time by the append
-         * handler.  Here we simply prevent a single producer from
-         * staging more than the slot could ever hold. */
-        if (q->outbox_count[dest_rank] >= q->capacity)
+        /* Up-front sanity guard: a single element must at least fit the
+         * slot.  True aggregate overflow (sum over producers) is enforced
+         * by the append handler on the owning rank. */
+        if (q->capacity == 0)
                 return -DSTM_ENOMEM;
 
-        char *ob = outbox_for(q, dest_rank);
-        memcpy(ob + q->outbox_count[dest_rank] * q->element_size,
-               element, q->element_size);
-        q->outbox_count[dest_rank]++;
-        return DSTM_SUCCESS;
-}
-
-/* Append one destination's staged elements to that owner's slot.  The
- * owner's slot offset is the base (count field); dstm_append maintains
- * the byte count there and concatenates our payload bytes. */
-static int dqueue_flush_dest(dstm_dqueue_t *q, int dest,
-                             dstm_time_t time, dstm_time_t delta)
-{
-        size_t n = q->outbox_count[dest];
-        if (n == 0)
-                return DSTM_SUCCESS;   /* nothing staged; appends compose */
-
-        dstm_ptr_t dst = slot_ptr_of(q, dest);
-        int rc = dstm_append(dest, q->rank_region_id[dest], time, delta,
-                             dst, outbox_for(q, dest),
-                             n * q->element_size);
-        if (rc != DSTM_SUCCESS)
-                return rc;
-
-        q->outbox_count[dest] = 0;
-        return DSTM_SUCCESS;
-}
-
-int dstm_dqueue_flush(dstm_dqueue_t *q, dstm_time_t time, dstm_time_t delta)
-{
-        if (q == NULL)
-                return -DSTM_EINVAL;
-
-        /* Ensure the (self, time+delta) version exists even if no producer
-         * (including us) sends anything, so a consumer's pop at this
-         * version never blocks.  A zero-byte local append creates the
-         * version and leaves it WRITABLE until the phase rule promotes it.
-         *
-         * delta applies only to remote destinations; the owner always
-         * seeds its own slot at the SAME effective time the consumer will
-         * read.  We seed at the local rank with delta so effective time
-         * matches producers' (time + delta). */
-        {
-                dstm_ptr_t dst = slot_ptr_of(q, q->self);
-                int rc = dstm_append(q->self, q->region_id, time, delta,
-                                     dst, q->outbox /* unused: size 0 */, 0);
-                if (rc != DSTM_SUCCESS)
-                        return rc;
-        }
-
-        /* Append only where we actually have data; appends compose, so no
-         * empty-block-to-everyone requirement remains. */
-        for (int d = 0; d < q->world_size; d++) {
-                if (d == q->self)
-                        continue;   /* self handled below via local append */
-                int rc = dqueue_flush_dest(q, d, time, delta);
-                if (rc != DSTM_SUCCESS)
-                        return rc;
-        }
-        /* Self-destined staged elements: local append at the same
-         * effective time. */
-        {
-                int rc = dqueue_flush_dest(q, q->self, time, delta);
-                if (rc != DSTM_SUCCESS)
-                        return rc;
-        }
-        return DSTM_SUCCESS;
-}
-
-int dstm_dqueue_push_flush(dstm_dqueue_t *q, int dest_rank,
-                           const void *element,
-                           dstm_time_t time, dstm_time_t delta)
-{
-        int rc = dstm_dqueue_push(q, dest_rank, element);
-        if (rc != DSTM_SUCCESS)
-                return rc;
-        /* With append semantics, flushing a single destination is safe
-         * and composes with any later flush at the same version. */
-        return dqueue_flush_dest(q, dest_rank, time, delta);
+        dstm_ptr_t dst = slot_ptr_of(q, dest_rank);
+        return dstm_append(dest_rank, q->rank_region_id[dest_rank],
+                           time, delta, dst, (void *)element,
+                           q->element_size);
 }
 
 /* ---------------------------------------------------------------------------
