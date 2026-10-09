@@ -73,7 +73,7 @@
 
 /* Max planes one neighbor block can carry in one tick. Oversized for the
  * traffic these settings produce. */
-#define QUEUE_CAPACITY    64
+#define QUEUE_CAPACITY    256
 
 /* Planes each airport can land per tick. */
 #define LANDINGS_PER_TICK 2
@@ -506,7 +506,7 @@ int main(int argc, char *argv[])
 {
         MPI_Init(&argc, &argv);
         dstm_init(&argc, &argv);
-        dstm_log_setlevel(DSTM_LOG_ERROR);
+        dstm_log_setlevel(DSTM_LOG_INFO);
 
         MPI_Comm_size(MPI_COMM_WORLD, &g_world_size);
         MPI_Comm_rank(MPI_COMM_WORLD, &g_rank);

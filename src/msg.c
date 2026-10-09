@@ -174,6 +174,7 @@ int dstm_msg_isend(dstm_msg_t *msg, int tag)
 	assert(msg != NULL);
 	switch (msg->header.type) {
 	case DSTM_MSG_TYPE_PUT:
+    case DSTM_MSG_TYPE_APPEND:
 	case DSTM_MSG_TYPE_GET_REP:
 		return dstm_msg_isend_with_data(msg, tag);
 	default:
@@ -306,6 +307,7 @@ int dstm_msg_recvany(MPI_Status status, dstm_msg_t *msg)
 
 	switch (msg->header.type) {
 	case DSTM_MSG_TYPE_PUT:
+    case DSTM_MSG_TYPE_APPEND:
 		MPI_Unpack(msg->packbuf, bufsz, &pos, &msg->u.putget, 1,
 		           dstm_msg_putget_dt, dstm_global_context.comm);
 		msg->data = (char *)msg->packbuf + pos;
@@ -369,6 +371,7 @@ int dstm_msg_consensus(MPI_Comm comm, int err)
 
 static const dstm_enum_table_t dstm_msg_type_table[] = {
         {DSTM_MSG_TYPE_PUT, "PUT"},
+        {DSTM_MSG_TYPE_APPEND, "APPEND"},
         {DSTM_MSG_TYPE_GET_REQ, "GET_REQ"},
         {DSTM_MSG_TYPE_GET_REP, "GET_REP"},
         {DSTM_MSG_TYPE_HEARTBEAT, "HEARTBEAT"},
@@ -399,8 +402,10 @@ json_t *dstm_msg_to_json(dstm_msg_t *msg)
 
 	switch (msg->header.type) {
 	case DSTM_MSG_TYPE_PUT:
+    case DSTM_MSG_TYPE_APPEND:
 		json_object_set_new(
-		        obj, "put",
+		        obj, (msg->header.type == DSTM_MSG_TYPE_APPEND)
+		                     ? "append" : "put",
 		        json_pack("{s:I, s:i, s:I}", "dst",
 		                  (json_int_t)msg->u.putget.ptr.offset, "region",
 		                  msg->u.putget.ptr.region, "size",

@@ -1042,24 +1042,34 @@ int dstm_dgraph_derive_distance_weighted(
 /************************
  * DQUEUE
  *
- * A sparse, neighbor-scoped distributed queue on top of the darray
- * substrate. Each rank has ONE logical incoming queue, assembled from one
- * physical block per incoming neighbor so distinct remote producers never
- * share (and thus clobber) a single version slot. "Neighbor" is derived
- * from the distance matrix passed at create time: s neighbors self iff
- * dstm_distance_get(dist, self, s) != -1 (self always included). Distances
- * are symmetric, so incoming and outgoing neighbor sets coincide.
+ * A distributed queue built on dstm_region_register + dstm_append /
+ * dstm_get.  Each rank owns ONE region holding ONE slot; each
+ * (rank, timestamp) is a distinct version of that slot.  All producers
+ * APPEND into the same slot (dstm_append accumulates in MPI arrival
+ * order), so there are no per-neighbor blocks and no wholesale-overwrite
+ * collisions.  "Neighbor" (reachability) still comes from the distance
+ * matrix handed at create time; it bounds who can ever push to whom.
  *
- * push == put (delta >= 0): stage an element into the local outbox for a
- *   destination neighbor. Staged elements are published by flush as one put
- *   per destination per (time, delta).
+ * CAPACITY SIZING RULE.  Because every producer appends into ONE slot,
+ * `capacity` must be the SUM over all producers of their maximum per-tick
+ * contribution to a single owner -- NOT one producer's worth.  push() and
+ * the append handler bound-check and return -DSTM_ENOMEM / abort on
+ * overflow.
  *
- * pop_incoming == get (delta <= 0): read every incoming neighbor block at a
- *   single (time, delta) version and concatenate all live elements into one
- *   buffer -- the whole incoming queue, drained at once.
+ * APPEND-ORDERING DECISION.  Concatenation order is MPI arrival order and
+ * is NONDETERMINISTIC across runs.  This dqueue does NOT sort: queued
+ * elements must be order-independent, or must carry their own key so the
+ * consumer can sort after pop.
  *
- * Elements are fixed-size POD (no embedded pointers); each block holds at
- * most `capacity` elements.
+ * push == append (delta >= 0): stage an element into the local outbox for
+ *   a destination rank.  flush publishes staged elements as one
+ *   dstm_append per destination that has data.
+ *
+ * pop_incoming == get (delta <= 0): ONE local dstm_get of this rank's slot
+ *   at (time + delta), then read byte_count / element_size elements -- the
+ *   whole incoming queue, drained at once.
+ *
+ * Elements are fixed-size POD (no embedded pointers).
  ***********************/
 
 struct dstm_dqueue_s;
@@ -1109,8 +1119,10 @@ size_t dstm_dqueue_capacity(dstm_dqueue_t *dqueue);
 
 /**
  * Upper bound on the number of elements a single dstm_dqueue_pop_incoming
- * can return: (number of incoming neighbors, self included) * capacity.
- * Size a pop buffer to this once at setup to avoid the two-call pattern.
+ * can return.  With the single append-based queue this equals `capacity`:
+ * the whole incoming queue is ONE slot holding at most `capacity`
+ * elements (down from the old n_neighbors * capacity).  Size a pop buffer
+ * to this once at setup to avoid the two-call pattern.
  */
 size_t dstm_dqueue_max_incoming(dstm_dqueue_t *dqueue);
 
@@ -1349,6 +1361,55 @@ int dstm_get_or_default(int rank,
                         dstm_ptr_t src,
                         size_t size,
                         const void *default_value);
+
+/**
+ * Append @p size bytes from @p src into an accumulating slot in the
+ * region identified by @p region_id, hosted on @p rank, taking effect
+ * at logical time (time + delta). 
+ *
+ * SLOT LAYOUT.  @p dst must point at the first byte of an accumulating
+ * slot shaped as:
+ *
+ *     [ uint64_t byte_count | <accumulated bytes> ]
+ *
+ * The byte_count field lives at dst.offset and is maintained by the
+ * append handler.  Each append copies its @p size payload bytes to
+ * dst.offset + sizeof(uint64_t) + byte_count, then adds @p size to
+ * byte_count.  The caller is responsible for ensuring the slot's region
+ * is large enough to hold sizeof(uint64_t) plus the SUM of all
+ * producers' per-tick payloads; an append that would overflow the slot
+ * is a programming error (see the data-structure layer, e.g. dqueue,
+ * which bound-checks and returns -DSTM_ENOMEM before issuing the op).
+ *
+ * Order is MPI arrival order and is therefore nondeterministic across runs.   
+ *
+ * All other rules mirror dstm_put exactly:
+ *   - @p region_id must equal @p dst.region.
+ *   - @p delta must be >= 0 (an append cannot target the past).
+ *   - @p delta == 0 requires @p rank to be the local rank; a remote
+ *     append with @p delta == 0 is rejected with -DSTM_EDOM.
+ *   - the target version must still be WRITABLE when the append applies
+ *     (put/append-before-get phase rule); a violation aborts the program.
+ *
+ * @param[in] rank       target MPI rank
+ * @param[in] region_id  region identifier (must be == @p dst.region)
+ * @param[in] time       base logical timestamp
+ * @param[in] delta      non-negative offset added to @p time
+ * @param[in] dst        opaque pointer to the first byte of the slot
+ * @param[in] src        source buffer of @p size bytes (must be non-NULL)
+ * @param[in] size       number of bytes to append
+ * @return DSTM_SUCCESS on success, -DSTM_EINVAL if @p src is NULL,
+ *         @p delta is negative, @p region_id is out of range, or
+ *         @p region_id != @p dst.region; -DSTM_EDOM if @p delta == 0
+ *         and @p rank is not the local rank.
+ */
+int dstm_append(int rank,
+                int region_id,
+                dstm_time_t time,
+                dstm_time_t delta,
+                dstm_ptr_t dst,
+                void *src,
+                size_t size);
 
 #ifdef __cplusplus
 }

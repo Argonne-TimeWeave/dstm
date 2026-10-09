@@ -18,149 +18,105 @@
 #include "dstm.h"
 
 #include "internal/globals.h"
+#include "internal/region.h"
 
 /*******************************************************************************
- * Internal layout (sparse, neighbor-only)
+ * Internal layout (single append-based queue per (rank, timestamp))
  *
- * A dqueue gives each rank one logical incoming queue, assembled from one
- * physical block per incoming neighbor so that distinct remote producers
- * never write the same version slot (a put overwrites a slot wholesale, so
- * two producers sharing a slot would clobber each other). "Neighbor" is
- * taken from the distance matrix: rank s is a neighbor of self iff
- * dstm_distance_get(dist, self, s) != -1. Distances are symmetric, so the
- * incoming set and outgoing set are the same.
+ * Each rank owns ONE region holding ONE slot.  Every (rank, timestamp)
+ * is a distinct version of that slot, managed by the region version list.
+ * The slot is:
  *
- * Storage. Each rank owns exactly its incoming blocks (one per neighbor,
- * including self), packed into a darray partition in ascending neighbor-rank
- * order. The darray is built with dstm_darray_create (NOT _equal) so
- * partitions may be uneven: edge ranks in a torus have fewer neighbors than
- * interior ranks.
+ *     [ uint64_t byte_count | element_size * capacity bytes ]
  *
- *   global darray layout:  [ rank 0's blocks | rank 1's blocks | ... ]
- *   within a rank:         blocks sorted by source neighbor rank ascending
+ * Producers APPEND into the slot via dstm_append: all producers targeting
+ * the same (owner, timestamp) accumulate into the same version buffer in
+ * MPI arrival order.  The owning rank is the concatenation point, so there
+ * are no per-neighbor blocks and no wholesale-overwrite collisions.
  *
- * To push to a remote rank d, a producer must address d's block whose source
- * is self. That is  rank_block_base[d] + (position of self within d's
- * sorted incoming-neighbor list). Both the per-rank base offsets and each
- * rank's sorted neighbor list are exchanged once at create time with two
- * Allgathers, mirroring dgraph.
+ *   push(dest, elem)      -> stage into the local outbox for dest
+ *   flush(time, delta)    -> one dstm_append per destination with staged
+ *                            data (delta >= 0; remote requires delta > 0)
+ *   pop_incoming(t, 0)    -> one local dstm_get of this rank's slot, then
+ *                            read byte_count/element_size elements
  *
- * Each block on the wire is a POD:
+ * CAPACITY SIZING RULE.  Because every producer appends into the SAME
+ * slot, `capacity` must be sized for the SUM over all producers of their
+ * maximum per-tick contribution, NOT one producer's worth.  push() and
+ * flush() bound-check against this and return -DSTM_ENOMEM on overflow.
  *
- *   [ uint64_t count | element_size * capacity bytes of payload ]
+ * ORDERING.  Concatenation order is MPI arrival order and is therefore
+ * nondeterministic.  Elements must be order-independent, or carry their
+ * own key and be sorted by the consumer after pop.  This dqueue does NOT
+ * sort.
  *
- * copied verbatim by put/get, so elements must not contain pointers.
- *
- * PUSH stages into a local outbox block per destination neighbor; FLUSH
- * publishes each non-empty outbox as one darray_put. POP_INCOMING issues one
- * darray_get per incoming neighbor and concatenates every block's live
- * elements into the caller's buffer -- the single-queue surface.
+ * VERSION EXISTENCE.  A consumer's pop reads one version of the slot.  To
+ * guarantee that version exists even when no producer sent anything this
+ * tick, flush() always performs a local self-append of ZERO elements to
+ * the owner's own slot, which creates (and keeps WRITABLE until the phase
+ * rule fires) the (self, time+delta) version.  Combined with the
+ * early-tick fallback (effective time < 0 -> empty), pop never blocks on a
+ * missing version.
  ******************************************************************************/
 
+/* The slot's count field counts BYTES (what dstm_append maintains). */
 typedef struct {
-        uint64_t count;
+        uint64_t byte_count;
         /* payload[element_size * capacity] follows */
-} dqueue_block_hdr_t;
+} dqueue_slot_hdr_t;
 
 struct dstm_dqueue_s {
-        dstm_darray_t *table;         /* sum over ranks of their neighbor count */
-        int            region_id;
+        int    region_id;        /* this rank's local region id */
+        dstm_ptr_t slot;         /* ptr to the slot base (count field) */
 
         size_t element_size;
-        size_t capacity;
-        size_t block_size;            /* sizeof(hdr) + element_size*capacity */
+        size_t capacity;         /* max elements in the aggregate slot */
+        size_t slot_bytes;       /* sizeof(hdr) + element_size*capacity */
 
         int world_size;
         int self;
 
-        /* --- Local neighbor set (sorted ascending, includes self) --- */
-        int  *neighbors;              /* [n_neighbors] sorted rank ids */
-        int   n_neighbors;
+        /* Per-rank region id of every owner's queue region, so we can
+         * address a remote owner's slot (region ids are a per-rank
+         * namespace, unrelated to MPI rank). */
+        int *rank_region_id;     /* [world_size] */
 
-        /* Map any global rank -> local slot in neighbors[], or -1.
-         * Length world_size. Lets push()/pop() go rank -> slot in O(1). */
-        int  *rank_to_slot;
+        /* Per-rank byte offset of the slot inside that rank's region. */
+        intptr_t *rank_slot_off; /* [world_size] */
 
-        /* --- Global addressing, from Allgather --- */
-        /* rank_block_base[r] = global darray index of r's first block. */
-        size_t *rank_block_base;      /* [world_size] */
-        /* rank_nbr_count[r] = number of incoming neighbors of rank r. */
-        int    *rank_nbr_count;       /* [world_size] */
-        /* rank_nbrs[r] = r's sorted incoming-neighbor rank list,
-         * length rank_nbr_count[r]. Needed to find self's position in a
-         * remote rank's block layout. Non-neighbor entries may be NULL. */
-        int   **rank_nbrs;            /* [world_size][rank_nbr_count[r]] */
-
-        /* --- Staging --- */
-        char *outbox;                 /* n_neighbors * block_size */
-        char *scratch;                /* block_size, reused by pop */
+        /* --- Staging: one outbox per destination rank. ---
+         * We keep a count of staged elements per destination.  Memory is
+         * element_size * capacity per destination; for a dense world this
+         * is world_size * capacity bytes of host staging, which is fine
+         * for the inter-rank traffic regime dqueue targets. */
+        char   *outbox;          /* world_size * (element_size*capacity) */
+        size_t *outbox_count;    /* [world_size] staged elements per dest */
 };
 
 /* ---------------------------------------------------------------------------
- * Layout helpers
+ * Helpers
  * ------------------------------------------------------------------------- */
 
-static inline dqueue_block_hdr_t *block_hdr(char *b)
+static inline char *outbox_for(dstm_dqueue_t *q, int dest)
 {
-        return (dqueue_block_hdr_t *)b;
+        return q->outbox + (size_t)dest * q->element_size * q->capacity;
 }
 
-static inline char *block_payload(char *b)
+static inline dstm_ptr_t slot_ptr_of(const dstm_dqueue_t *q, int rank)
 {
-        return b + sizeof(dqueue_block_hdr_t);
-}
-
-static inline char *outbox_block(dstm_dqueue_t *q, int slot)
-{
-        return q->outbox + (size_t)slot * q->block_size;
-}
-
-/* Binary search rank `r` in a sorted ascending int array of length n.
- * Returns index or -1. */
-static int find_sorted(const int *arr, int n, int r)
-{
-        int lo = 0, hi = n - 1;
-        while (lo <= hi) {
-                int mid = lo + (hi - lo) / 2;
-                if (arr[mid] == r)
-                        return mid;
-                if (arr[mid] < r)
-                        lo = mid + 1;
-                else
-                        hi = mid - 1;
-        }
-        return -1;
-}
-
-/* Global darray index of the block (dest=d, src=s), where s must be an
- * incoming neighbor of d. Returns (size_t)-1 if s is not d's neighbor. */
-static size_t block_index(const dstm_dqueue_t *q, int d, int s)
-{
-        int pos = find_sorted(q->rank_nbrs[d], q->rank_nbr_count[d], s);
-        if (pos < 0)
-                return (size_t)-1;
-        return q->rank_block_base[d] + (size_t)pos;
+        return dstm_ptr_make(q->rank_region_id[rank], q->rank_slot_off[rank]);
 }
 
 /* ---------------------------------------------------------------------------
- * Teardown (safe on partially built q)
+ * Teardown
  * ------------------------------------------------------------------------- */
 
 static void dqueue_free_all(dstm_dqueue_t *q)
 {
-        if (q->rank_nbrs) {
-                for (int r = 0; r < q->world_size; r++)
-                        free(q->rank_nbrs[r]);
-                free(q->rank_nbrs);
-        }
-        free(q->rank_block_base);
-        free(q->rank_nbr_count);
-        free(q->neighbors);
-        free(q->rank_to_slot);
+        free(q->rank_region_id);
+        free(q->rank_slot_off);
         free(q->outbox);
-        free(q->scratch);
-        if (q->table)
-                dstm_darray_destroy(&q->table);
+        free(q->outbox_count);
         free(q);
 }
 
@@ -185,6 +141,10 @@ int dstm_dqueue_create_on_region(dstm_dqueue_t **ret,
         if (dstm_distance_size(dist) != (size_t)world_size)
                 return -DSTM_EINVAL;
 
+        dstm_region_t *region = dstm_get_local_region(region_id);
+        if (region == NULL)
+                return -DSTM_EINVAL;
+
         dstm_dqueue_t *q = calloc(1, sizeof(*q));
         if (q == NULL)
                 return -DSTM_ENOMEM;
@@ -192,127 +152,60 @@ int dstm_dqueue_create_on_region(dstm_dqueue_t **ret,
         q->region_id    = region_id;
         q->element_size = element_size;
         q->capacity     = capacity;
-        q->block_size   = sizeof(dqueue_block_hdr_t) + element_size * capacity;
+        q->slot_bytes   = sizeof(dqueue_slot_hdr_t) +
+                          element_size * capacity;
         q->world_size   = world_size;
         q->self         = self;
 
-        q->rank_to_slot   = malloc((size_t)world_size * sizeof(int));
-        q->rank_block_base = calloc((size_t)world_size, sizeof(size_t));
-        q->rank_nbr_count  = calloc((size_t)world_size, sizeof(int));
-        q->rank_nbrs       = calloc((size_t)world_size, sizeof(int *));
-        if (!q->rank_to_slot || !q->rank_block_base ||
-            !q->rank_nbr_count || !q->rank_nbrs) {
+        q->rank_region_id = calloc((size_t)world_size, sizeof(int));
+        q->rank_slot_off  = calloc((size_t)world_size, sizeof(intptr_t));
+        q->outbox_count   = calloc((size_t)world_size, sizeof(size_t));
+        q->outbox         = calloc((size_t)world_size,
+                                   element_size * capacity);
+        if (!q->rank_region_id || !q->rank_slot_off ||
+            !q->outbox_count || !q->outbox) {
                 dqueue_free_all(q);
                 return -DSTM_ENOMEM;
         }
-        for (int r = 0; r < world_size; r++)
-                q->rank_to_slot[r] = -1;
 
-        /* --- Local incoming-neighbor set from the distance matrix. ---
-         * s is a neighbor of self iff reachable; self always included. */
-        {
-                int nc = 0;
-                for (int s = 0; s < world_size; s++) {
-                        if (s == self ||
-                            dstm_distance_get(dist, self, s) != -1)
-                                nc++;
-                }
-                q->neighbors   = malloc((size_t)nc * sizeof(int));
-                if (q->neighbors == NULL) {
-                        dqueue_free_all(q);
-                        return -DSTM_ENOMEM;
-                }
-                int j = 0;
-                for (int s = 0; s < world_size; s++) {
-                        if (s == self ||
-                            dstm_distance_get(dist, self, s) != -1)
-                                q->neighbors[j++] = s;   /* ascending */
-                }
-                q->n_neighbors = nc;
-                for (int i = 0; i < nc; i++)
-                        q->rank_to_slot[q->neighbors[i]] = i;
+        /* Allocate this rank's single slot in its region. */
+        dstm_ptr_t slot = dstm_region_malloc(region, q->slot_bytes);
+        if (dstm_ptr_isnull(slot)) {
+                dqueue_free_all(q);
+                return -DSTM_ENOMEM;
         }
+        q->slot = slot;
 
-        /* --- Exchange each rank's neighbor count, build base offsets. --- */
+        /* Exchange every rank's region id and slot offset so remote
+         * appends can address the right owner's slot.  slot.offset is an
+         * intptr_t; exchange as int64_t for width independence. */
         {
-                int mine = q->n_neighbors;
-                if (MPI_Allgather(&mine, 1, MPI_INT,
-                                  q->rank_nbr_count, 1, MPI_INT, comm)
-                    != MPI_SUCCESS) {
+                int rc = MPI_Allgather(&region_id, 1, MPI_INT,
+                                       q->rank_region_id, 1, MPI_INT, comm);
+                if (rc != MPI_SUCCESS) {
+                        dstm_region_free(region, slot);
                         dqueue_free_all(q);
                         return -DSTM_FAILURE;
                 }
-                size_t acc = 0;
-                for (int r = 0; r < world_size; r++) {
-                        q->rank_block_base[r] = acc;
-                        acc += (size_t)q->rank_nbr_count[r];
-                }
-                /* acc == total blocks across all ranks. */
-        }
 
-        /* --- Exchange each rank's sorted neighbor list (variable length). ---
-         * Use Allgatherv: displacements are the block bases, counts the
-         * per-rank neighbor counts. */
-        {
-                int *displs = malloc((size_t)world_size * sizeof(int));
-                int  total  = (int)(q->rank_block_base[world_size - 1] +
-                                    q->rank_nbr_count[world_size - 1]);
-                int *flat   = malloc((size_t)(total > 0 ? total : 1) *
-                                     sizeof(int));
-                if (displs == NULL || flat == NULL) {
-                        free(displs);
-                        free(flat);
+                int64_t  mine = (int64_t)slot.offset;
+                int64_t *offs = calloc((size_t)world_size, sizeof(int64_t));
+                if (offs == NULL) {
+                        dstm_region_free(region, slot);
                         dqueue_free_all(q);
                         return -DSTM_ENOMEM;
+                }
+                rc = MPI_Allgather(&mine, 1, MPI_INT64_T,
+                                   offs, 1, MPI_INT64_T, comm);
+                if (rc != MPI_SUCCESS) {
+                        free(offs);
+                        dstm_region_free(region, slot);
+                        dqueue_free_all(q);
+                        return -DSTM_FAILURE;
                 }
                 for (int r = 0; r < world_size; r++)
-                        displs[r] = (int)q->rank_block_base[r];
-
-                if (MPI_Allgatherv(q->neighbors, q->n_neighbors, MPI_INT,
-                                   flat, q->rank_nbr_count, displs, MPI_INT,
-                                   comm) != MPI_SUCCESS) {
-                        free(displs);
-                        free(flat);
-                        dqueue_free_all(q);
-                        return -DSTM_FAILURE;
-                }
-
-                for (int r = 0; r < world_size; r++) {
-                        int c = q->rank_nbr_count[r];
-                        if (c == 0)
-                                continue;
-                        q->rank_nbrs[r] = malloc((size_t)c * sizeof(int));
-                        if (q->rank_nbrs[r] == NULL) {
-                                free(displs);
-                                free(flat);
-                                dqueue_free_all(q);
-                                return -DSTM_ENOMEM;
-                        }
-                        memcpy(q->rank_nbrs[r], flat + displs[r],
-                               (size_t)c * sizeof(int));
-                }
-                free(displs);
-                free(flat);
-        }
-
-        /* --- Staging buffers. --- */
-        q->outbox  = calloc((size_t)q->n_neighbors, q->block_size);
-        q->scratch = calloc(1, q->block_size);
-        if (q->outbox == NULL || q->scratch == NULL) {
-                dqueue_free_all(q);
-                return -DSTM_ENOMEM;
-        }
-
-        /* --- Backing darray: this rank owns exactly its own blocks. ---
-         * Uneven partition, so create (not create_equal). Collective. */
-        {
-                int rc = dstm_darray_create_on_region(
-                        &q->table, q->block_size,
-                        (size_t)q->n_neighbors, region_id);
-                if (rc != DSTM_SUCCESS) {
-                        dqueue_free_all(q);
-                        return rc;
-                }
+                        q->rank_slot_off[r] = (intptr_t)offs[r];
+                free(offs);
         }
 
         *ret = q;
@@ -332,7 +225,11 @@ void dstm_dqueue_destroy(dstm_dqueue_t **dqueue)
 {
         if (dqueue == NULL || *dqueue == NULL)
                 return;
-        dqueue_free_all(*dqueue);
+        dstm_dqueue_t *q = *dqueue;
+        dstm_region_t *region = dstm_get_local_region(q->region_id);
+        if (region != NULL && !dstm_ptr_isnull(q->slot))
+                dstm_region_free(region, q->slot);
+        dqueue_free_all(q);
         *dqueue = NULL;
 }
 
@@ -350,23 +247,22 @@ size_t dstm_dqueue_capacity(dstm_dqueue_t *q)
         return q ? q->capacity : 0;
 }
 
+/* One queue, one slot: the whole queue holds at most `capacity`
+ * elements, so max_incoming collapses to capacity. */
 size_t dstm_dqueue_max_incoming(dstm_dqueue_t *q)
 {
-        return q ? (size_t)q->n_neighbors * q->capacity : 0;
+        return q ? q->capacity : 0;
 }
 
 size_t dstm_dqueue_pending(dstm_dqueue_t *q, int dest_rank)
 {
         if (q == NULL || dest_rank < 0 || dest_rank >= q->world_size)
                 return 0;
-        int slot = q->rank_to_slot[dest_rank];
-        if (slot < 0)
-                return 0;
-        return (size_t)block_hdr(outbox_block(q, slot))->count;
+        return q->outbox_count[dest_rank];
 }
 
 /* ---------------------------------------------------------------------------
- * Push / flush  (== put)
+ * Push / flush  (== append)
  * ------------------------------------------------------------------------- */
 
 int dstm_dqueue_push(dstm_dqueue_t *q, int dest_rank, const void *element)
@@ -376,37 +272,40 @@ int dstm_dqueue_push(dstm_dqueue_t *q, int dest_rank, const void *element)
         if (dest_rank < 0 || dest_rank >= q->world_size)
                 return -DSTM_EINVAL;
 
-        int slot = q->rank_to_slot[dest_rank];
-        if (slot < 0)
-                return -DSTM_EINVAL;    /* not a neighbor: unreachable dest */
+        /* Bound-check against the aggregate slot capacity.  This is a
+         * conservative per-destination check: the receiver's slot holds
+         * the SUM of all producers, so even if this one producer fits,
+         * aggregate overflow is caught at apply time by the append
+         * handler.  Here we simply prevent a single producer from
+         * staging more than the slot could ever hold. */
+        if (q->outbox_count[dest_rank] >= q->capacity)
+                return -DSTM_ENOMEM;
 
-        char               *blk = outbox_block(q, slot);
-        dqueue_block_hdr_t *hdr = block_hdr(blk);
-
-        if (hdr->count >= q->capacity)
-                return -DSTM_ENOMEM;    /* full; flush and retry later */
-
-        memcpy(block_payload(blk) + (size_t)hdr->count * q->element_size,
+        char *ob = outbox_for(q, dest_rank);
+        memcpy(ob + q->outbox_count[dest_rank] * q->element_size,
                element, q->element_size);
-        hdr->count++;
+        q->outbox_count[dest_rank]++;
         return DSTM_SUCCESS;
 }
 
-static int dqueue_flush_slot(dstm_dqueue_t *q, int slot,
+/* Append one destination's staged elements to that owner's slot.  The
+ * owner's slot offset is the base (count field); dstm_append maintains
+ * the byte count there and concatenates our payload bytes. */
+static int dqueue_flush_dest(dstm_dqueue_t *q, int dest,
                              dstm_time_t time, dstm_time_t delta)
 {
-        int    dest = q->neighbors[slot];
-        char  *blk  = outbox_block(q, slot);
-        size_t idx  = block_index(q, dest, q->self);
+        size_t n = q->outbox_count[dest];
+        if (n == 0)
+                return DSTM_SUCCESS;   /* nothing staged; appends compose */
 
-        if (idx == (size_t)-1)
-                return -DSTM_EINVAL;   /* self not in dest's neighbor list */
-
-        int rc = dstm_darray_put(q->table, idx, blk, time, delta);
+        dstm_ptr_t dst = slot_ptr_of(q, dest);
+        int rc = dstm_append(dest, q->rank_region_id[dest], time, delta,
+                             dst, outbox_for(q, dest),
+                             n * q->element_size);
         if (rc != DSTM_SUCCESS)
                 return rc;
 
-        block_hdr(blk)->count = 0;     /* clear staged block */
+        q->outbox_count[dest] = 0;
         return DSTM_SUCCESS;
 }
 
@@ -415,14 +314,36 @@ int dstm_dqueue_flush(dstm_dqueue_t *q, dstm_time_t time, dstm_time_t delta)
         if (q == NULL)
                 return -DSTM_EINVAL;
 
-        /* Publish EVERY outgoing neighbor block, empty or not.
+        /* Ensure the (self, time+delta) version exists even if no producer
+         * (including us) sends anything, so a consumer's pop at this
+         * version never blocks.  A zero-byte local append creates the
+         * version and leaves it WRITABLE until the phase rule promotes it.
          *
-         * A consumer's pop_incoming issues one get per incoming neighbor
-         * at a given version. If we skipped empty outboxes, a neighbor we
-         * had nothing to send would issue no put, that version would never
-         * exist, and the consumer's get would block forever. */
-        for (int slot = 0; slot < q->n_neighbors; slot++) {
-                int rc = dqueue_flush_slot(q, slot, time, delta);
+         * delta applies only to remote destinations; the owner always
+         * seeds its own slot at the SAME effective time the consumer will
+         * read.  We seed at the local rank with delta so effective time
+         * matches producers' (time + delta). */
+        {
+                dstm_ptr_t dst = slot_ptr_of(q, q->self);
+                int rc = dstm_append(q->self, q->region_id, time, delta,
+                                     dst, q->outbox /* unused: size 0 */, 0);
+                if (rc != DSTM_SUCCESS)
+                        return rc;
+        }
+
+        /* Append only where we actually have data; appends compose, so no
+         * empty-block-to-everyone requirement remains. */
+        for (int d = 0; d < q->world_size; d++) {
+                if (d == q->self)
+                        continue;   /* self handled below via local append */
+                int rc = dqueue_flush_dest(q, d, time, delta);
+                if (rc != DSTM_SUCCESS)
+                        return rc;
+        }
+        /* Self-destined staged elements: local append at the same
+         * effective time. */
+        {
+                int rc = dqueue_flush_dest(q, q->self, time, delta);
                 if (rc != DSTM_SUCCESS)
                         return rc;
         }
@@ -436,11 +357,13 @@ int dstm_dqueue_push_flush(dstm_dqueue_t *q, int dest_rank,
         int rc = dstm_dqueue_push(q, dest_rank, element);
         if (rc != DSTM_SUCCESS)
                 return rc;
-        return dqueue_flush_slot(q, q->rank_to_slot[dest_rank], time, delta);
+        /* With append semantics, flushing a single destination is safe
+         * and composes with any later flush at the same version. */
+        return dqueue_flush_dest(q, dest_rank, time, delta);
 }
 
 /* ---------------------------------------------------------------------------
- * Pop (== get) : single-queue surface, merges every incoming block
+ * Pop (== get) : single local get of the slot
  * ------------------------------------------------------------------------- */
 
 int dstm_dqueue_pop_incoming(dstm_dqueue_t *q, void *out_elements,
@@ -457,56 +380,38 @@ int dstm_dqueue_pop_incoming(dstm_dqueue_t *q, void *out_elements,
         }
 
         size_t cap = *io_count;    /* caller buffer capacity, in elements */
-        size_t written = 0;
 
-        for (int slot = 0; slot < q->n_neighbors; slot++) {
-                int    src = q->neighbors[slot];
-                size_t idx = block_index(q, q->self, src);
-                if (idx == (size_t)-1)
-                        continue;   /* defensive; slot is self's neighbor */
+        /* One local get of this rank's slot at (time + delta).  The owner
+         * always seeds this version in flush(), so it exists. */
+        dqueue_slot_hdr_t *hdr = calloc(1, q->slot_bytes);
+        if (hdr == NULL)
+                return -DSTM_ENOMEM;
 
-                int rc = dstm_darray_get(q->table, idx, q->scratch,
-                                         time, delta);
-                if (rc != DSTM_SUCCESS)
-                        return rc;
-
-                uint64_t count = block_hdr(q->scratch)->count;
-                if (count > q->capacity)
-                        count = q->capacity;   /* corrupt-block guard */
-                if (count == 0)
-                        continue;
-
-                /* Capacity check: if the caller's buffer is too small,
-                 * report the exact total needed via the two-call pattern.
-                 * We finish counting the rest so io_count is accurate. */
-                if (out_elements == NULL || written + count > cap) {
-                        /* switch to count-only for the remainder */
-                        written += (size_t)count;
-                        for (int s2 = slot + 1; s2 < q->n_neighbors; s2++) {
-                                size_t i2 = block_index(q, q->self,
-                                                        q->neighbors[s2]);
-                                if (i2 == (size_t)-1)
-                                        continue;
-                                int rc2 = dstm_darray_get(q->table, i2,
-                                                          q->scratch,
-                                                          time, delta);
-                                if (rc2 != DSTM_SUCCESS)
-                                        return rc2;
-                                uint64_t c2 = block_hdr(q->scratch)->count;
-                                if (c2 > q->capacity)
-                                        c2 = q->capacity;
-                                written += (size_t)c2;
-                        }
-                        *io_count = written;
-                        return -DSTM_ENOMEM;
-                }
-
-                memcpy((char *)out_elements + written * q->element_size,
-                       block_payload(q->scratch),
-                       (size_t)count * q->element_size);
-                written += (size_t)count;
+        dstm_ptr_t src = slot_ptr_of(q, q->self);
+        int rc = dstm_get(q->self, q->region_id, time, delta,
+                          hdr, src, q->slot_bytes);
+        if (rc != DSTM_SUCCESS) {
+                free(hdr);
+                return rc;
         }
 
-        *io_count = written;
+        uint64_t bytes = hdr->byte_count;
+        size_t   count = (size_t)(bytes / q->element_size);
+        if (count > q->capacity)
+                count = q->capacity;   /* corrupt-slot guard */
+
+        if (out_elements == NULL || count > cap) {
+                *io_count = count;
+                free(hdr);
+                return (out_elements == NULL && cap == 0)
+                               ? -DSTM_ENOMEM   /* count-only query */
+                               : (count > cap ? -DSTM_ENOMEM : DSTM_SUCCESS);
+        }
+
+        memcpy(out_elements,
+               (char *)hdr + sizeof(dqueue_slot_hdr_t),
+               count * q->element_size);
+        *io_count = count;
+        free(hdr);
         return DSTM_SUCCESS;
 }
