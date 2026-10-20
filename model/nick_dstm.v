@@ -124,9 +124,11 @@ Inductive step : config -> config -> Prop :=
   (Hcheck : operation_allowed owner i (Load t1 x l t) G)
   (Hload: m !! (l, t) = Some (v, Readable)):
     step (np, m) (<[i := (rest, <[x := v]>e)]>np, m)
-| step_store np i t1 l t v0 v rest e m (Hi : np !! i = Some (Store t1 l t v :: rest, e))
+| step_store np i t1 l t v rest e m
+  (Hi : np !! i = Some (Store t1 l t v :: rest, e))
   (Hcheck : operation_allowed owner i (Store t1 l t v) G)
-  (Hload: m !! (l, t) = Some (v0, Writeable)):
+  (Hslot : m !! (l, t) = None \/
+    exists v0, m !! (l, t) = Some (v0, Writeable)):
     step (np, m) (<[i := (rest, e)]>np, <[(l, t) := (v, Writeable)]>m)
 | step_readable np m l t v
   (Hload: m !! (l, t) = Some (v, Writeable))
@@ -152,17 +154,37 @@ Proof.
   exact Hload.
 Qed.
 
-(* Any store transition requires the target version to be Writeable. *)
-Lemma store_only_modifies_writeable
-    (np : node_pool) (i : node_id)
-    (t1 : timestamp) (l : loc) (t : timestamp)
-    (v0 v : val) (rest : list instr) (e : env) (m : mem)
+(* A store target must be absent or already Writeable. *)
+Lemma store_target_available
+    (m : mem) (l : loc) (t : timestamp)
+    (Hslot :
+      m !! (l, t) = None \/
+      exists v0, m !! (l, t) = Some (v0, Writeable)) :
+  forall v, m !! (l, t) <> Some (v, Readable).
+Proof.
+  intros v Hread.
+  destruct Hslot as [Habsent | [v0 Hwriteable]].
+  - rewrite Hread in Habsent.
+    discriminate.
+  - rewrite Hread in Hwriteable.
+    discriminate.
+Qed.
+
+Lemma store_creates_absent_version
+    (np : node_pool) (m : mem)
+    (i : node_id) (t1 : timestamp)
+    (l : loc) (t : timestamp) (v : val)
+    (rest : list instr) (e : env)
     (Hi : np !! i = Some (Store t1 l t v :: rest, e))
     (Hcheck : operation_allowed owner i (Store t1 l t v) G)
-    (Hstore : m !! (l, t) = Some (v0, Writeable)) :
-  m !! (l, t) = Some (v0, Writeable).
+    (Habsent : m !! (l, t) = None) :
+  step (np, m)
+    (<[i := (rest, e)]>np, <[(l, t) := (v, Writeable)]>m).
 Proof.
-  exact Hstore.
+  eapply step_store.
+  - exact Hi.
+  - exact Hcheck.
+  - left. exact Habsent.
 Qed.
 
 (* Once a version is Readable, one execution step preserves both
@@ -181,8 +203,11 @@ Proof.
   - (* Store. *)
     destruct (decide ((l0, t0) = (l, t))) as [Heq | Hneq].
     + inversion Heq; subst.
-      rewrite Hread in Hload.
-      discriminate.
+      destruct Hslot as [Habsent | [v_old Hwriteable]].
+      * rewrite Hread in Habsent.
+        discriminate.
+      * rewrite Hread in Hwriteable.
+        discriminate.
     + transitivity (m !! (l, t)).
       * apply lookup_insert_ne.
         congruence.
@@ -396,9 +421,11 @@ Inductive step' : config' -> config' -> Prop :=
   (Hcheck : operation_allowed owner i (Load t1 x l t) G)
   (Hload: m !! (l, t) = Some (v, Readable)):
     step' (np, m, nt) (<[i := (rest, <[x := v]>e)]>np, m, <[i := t1]>nt)
-| step'_store np i t1 l t v0 v rest e m nt (Hi : np !! i = Some (Store t1 l t v :: rest, e))
+| step'_store np i t1 l t v rest e m nt
+  (Hi : np !! i = Some (Store t1 l t v :: rest, e))
   (Hcheck : operation_allowed owner i (Store t1 l t v) G)
-  (Hload: m !! (l, t) = Some (v0, Writeable)):
+  (Hslot : m !! (l, t) = None \/
+    exists v0, m !! (l, t) = Some (v0, Writeable)):
     step' (np, m, nt) (<[i := (rest, e)]>np, <[(l, t) := (v, Writeable)]>m, <[i := t1]>nt)
 | step'_readable np m l t v nt
   (Hload : m !! (l, t) = Some (v, Writeable))
