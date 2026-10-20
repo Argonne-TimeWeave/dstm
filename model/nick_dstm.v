@@ -312,21 +312,47 @@ for some number of timestamps t:
 
 *)
 Definition ring (n : nat) : gmap node_id (list instr) :=
-  foldr (λ i prog, <[i := [Store 0 (i + 1 `mod` n) 1 1%Z; (*Load 0 "x"%string i 0;*)
-                           Store 1 (i + 1 `mod` n) 2 2%Z; Load 1 "x"%string i 1]]>prog) ∅ (seq 0 n).
+  foldr (λ i prog, <[i := [Store 0 ((i + 1) `mod` n) 1 1%Z; (*Load 0 "x"%string i 0;*)
+                           Store 1 ((i + 1) `mod` n) 2 2%Z; Load 1 "x"%string i 1]]>prog) ∅ (seq 0 n).
 
-Definition neighbor n n1 n2 : bool := (n2 =? n1 + 1 `mod` n) || (n2 =? n1 - 1 `mod` n).
+Definition neighbor n n1 n2 : bool := (n2 =? (n1 + 1) `mod` n) || (n2 =? (n1 + n - 1) `mod` n).
 
 Program Definition ring_graph n : comm_graph := {|
   world_size := n;
-  channel_lag n1 n2 := if neighbor n n1 n2 then Some 1 else None
+  channel_lag n1 n2 := 
+    if decide (n1 < n /\ n2 < n /\ n1 <> n2 /\
+          neighbor n n1 n2 = true) then Some 1 else None
 |}.
+
+(* channel_in_bounds *)
 Next Obligation.
-Admitted.
+  intros n p q d Hlag.
+  cbn in Hlag.
+  destruct (decide
+    (p < n /\ q < n /\ p <> q /\ neighbor n p q = true))
+    as [Hedge | Hnoedge].
+  - destruct Hedge as [Hp [Hq _]].
+    split; assumption.
+  - discriminate.
+Qed.
+
+(* channel_irreflexive *)
 Next Obligation.
-Admitted.
+  intros n p Hp.
+  cbn.
+  case_decide; naive_solver.
+Qed.
+
+(* channel_positive *)
 Next Obligation.
-Admitted.
+  intros n p q d Hlag.
+  cbn in Hlag.
+  destruct (decide
+    (p < n /\ q < n /\ p <> q /\ neighbor n p q = true)).
+  - injection Hlag as <-.
+    lia.
+  - discriminate Hlag.
+Qed.
 
 Lemma ring_can_terminate n : exists c, rtc (step id (ring_graph n)) (init_config (ring n)) c /\ finished c.
 Proof.
