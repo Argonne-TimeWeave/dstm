@@ -336,9 +336,58 @@ for some number of timestamps t:
   at t, load n t , make sure the value is t
 
 *)
+Definition ring_program (n i : nat) : list instr :=
+  [Store 0 ((i + 1) `mod` n) 1 1%Z;
+   Store 1 ((i + 1) `mod` n) 2 2%Z;
+   Load 1 "x"%string i 1].
+
 Definition ring (n : nat) : gmap node_id (list instr) :=
-  foldr (λ i prog, <[i := [Store 0 ((i + 1) `mod` n) 1 1%Z; (*Load 0 "x"%string i 0;*)
-                           Store 1 ((i + 1) `mod` n) 2 2%Z; Load 1 "x"%string i 1]]>prog) ∅ (seq 0 n).
+  foldr (fun i prog => <[i := ring_program n i]> prog)
+    ∅ (seq 0 n).
+
+(* ring_lookup proves:
+    if node i is part of a ring of size n, looking up i in the ring program returns exactly
+    its expected instructions
+*)
+
+Lemma foldr_insert_lookup_present
+    {A : Type} (f : nat -> A) (xs : list nat) i :
+  i ∈ xs ->
+  (foldr
+     (fun j (m : gmap nat A) => <[j := f j]> m)
+     ∅ xs) !! i = Some (f i).
+Proof.
+  induction xs as [|j xs IH].
+  - intros Hi.
+    rewrite elem_of_nil in Hi.
+    contradiction.
+  - intros Hi.
+    rewrite elem_of_cons in Hi.
+    destruct Hi as [Hij | Hi].
+    + subst j.
+      cbn.
+      rewrite lookup_insert.
+      reflexivity.
+    + cbn.
+      destruct (decide (j = i)) as [-> | Hne].
+      * rewrite lookup_insert.
+        reflexivity.
+      * rewrite lookup_insert_ne; last exact Hne.
+        apply IH.
+        exact Hi.
+Qed.
+
+Lemma ring_lookup n i :
+  i < n ->
+  ring n !! i = Some (ring_program n i).
+Proof.
+  intros Hi.
+  unfold ring.
+  refine (@foldr_insert_lookup_present
+    (list instr) (ring_program n) (seq 0 n) i _).
+  apply elem_of_seq.
+  lia.
+Qed.
 
 Definition neighbor n n1 n2 : bool := (n2 =? (n1 + 1) `mod` n) || (n2 =? (n1 + n - 1) `mod` n).
 
@@ -378,6 +427,115 @@ Next Obligation.
     lia.
   - discriminate Hlag.
 Qed.
+
+(* A non-local successor in the ring is connected by an edge with lag 1. *)
+Lemma ring_successor_lag n i :
+  i < n ->
+  (i + 1) `mod` n <> i ->
+  channel_lag (ring_graph n) i ((i + 1) `mod` n) = Some 1.
+Proof.
+  intros Hi Hneq.
+  cbn.
+  rewrite decide_True.
+  - reflexivity.
+  - repeat split.
+    + exact Hi.
+    + apply Nat.mod_upper_bound.
+      lia.
+    + lia.
+    + unfold neighbor.
+      rewrite Nat.eqb_refl.
+      reflexivity.
+Qed.
+
+(* A ring store is permitted: it is either local, or targets the
+   next ring neighbor at least one timestamp in the future. *)
+Lemma ring_store_allowed n i issued_at target_at v :
+  i < n ->
+  issued_at + 1 <= target_at ->
+  operation_allowed
+    id i
+    (Store issued_at ((i + 1) `mod` n) target_at v)
+    (ring_graph n).
+Proof.
+  intros Hi Htime.
+  unfold operation_allowed.
+  cbn.
+
+  destruct (Nat.eq_dec ((i + 1) `mod` n) i) as [Heq | Hneq].
+  - rewrite Heq, Nat.eqb_refl.
+    split.
+    + left. reflexivity.
+    + lia.
+  - assert
+      (Hlag :
+         channel_lag (ring_graph n) i ((i + 1) `mod` n) = Some 1).
+    {
+      apply ring_successor_lag; assumption.
+    }
+    assert (Heqb : ((i + 1) `mod` n =? i) = false).
+    {
+      apply Nat.eqb_neq.
+      exact Hneq.
+    }
+    rewrite Heqb.
+    split.
+    + right. exists 1. exact Hlag.
+    + exists 1. split.
+      * exact Hlag.
+      * lia.
+Qed.
+
+(* Every node's first store is permitted at timestamp 0,
+   targeting its successor's version at timestamp 1. *)
+Lemma ring_first_store_allowed n i :
+  i < n ->
+  operation_allowed
+    id i
+    (Store 0 ((i + 1) `mod` n) 1 1%Z)
+    (ring_graph n).
+Proof.
+  intros Hi.
+  apply ring_store_allowed; lia.
+Qed.
+
+(* Every node's second store is permitted at timestamp 1,
+   targeting its successor's version at timestamp 2. *)
+Lemma ring_second_store_allowed n i :
+  i < n ->
+  operation_allowed
+    id i
+    (Store 1 ((i + 1) `mod` n) 2 2%Z)
+    (ring_graph n).
+Proof.
+  intros Hi.
+  apply ring_store_allowed; lia.
+Qed.
+
+(* Every node's final load is permitted because it reads its own
+   location at the current timestamp. *)
+Lemma ring_load_allowed n i :
+  operation_allowed
+    id i
+    (Load 1 "x"%string i 1)
+    (ring_graph n).
+Proof.
+  unfold operation_allowed.
+  cbn.
+  split.
+  - left. reflexivity.
+  - rewrite Nat.eqb_refl.
+    lia.
+Qed.
+
+(* Every in-bounds node initially has its complete ring program
+   and an empty environment. *)
+Lemma init_ring_lookup n i :
+  i < n ->
+  fst (init_config (ring n)) !! i =
+    Some (ring_program n i, ∅).
+Proof.
+Admitted.
 
 Lemma ring_can_terminate n : exists c, rtc (step id (ring_graph n)) (init_config (ring n)) c /\ finished c.
 Proof.
