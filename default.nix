@@ -2,6 +2,5 @@
 }:
 pkgs // rec {
   stdenv = pkgs.gcc12Stdenv;
-  aml = pkgs.callPackage ./nix/aml.nix { inherit stdenv; };
   dstm = pkgs.callPackage ./nix/dstm.nix { inherit stdenv; };
 }
