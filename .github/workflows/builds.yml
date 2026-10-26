@@ -1,0 +1,34 @@
+name: builds
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+
+env:
+  VERBOSE: 1
+jobs:
+  base-install: &base-job
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - run: sudo apt update
+      - run: sudo apt install -y gcc make autoconf automake libtool pkg-config mpich libjansson-dev check bats
+      - uses: actions/checkout@v7
+  generic: *base-job
+    steps:
+      - name: configure
+        run: |
+          ./autogen.sh
+          mkdir build
+          ./configure --prefix=`pwd`/build
+      - run: make
+      - run: make check
+      - run: make install
+      - uses: actions/upload-artifact@v7
+        if: failure()
+        with:
+          name: generic
+          path: |
+            config.log
+            *.log
