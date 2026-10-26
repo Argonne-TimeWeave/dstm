@@ -389,6 +389,55 @@ Proof.
   lia.
 Qed.
 
+(* Every key occurring in a finite map built by folding insert over a
+   list comes from that list. *)
+Lemma foldr_insert_lookup_member
+    {A : Type} (f : nat -> A) (xs : list nat) i x :
+  (foldr
+     (fun j (m : gmap nat A) => <[j := f j]> m)
+     ∅ xs) !! i = Some x ->
+  i ∈ xs.
+Proof.
+  induction xs as [|j xs IH].
+  - intros Hlookup.
+    cbn in Hlookup.
+    rewrite lookup_empty in Hlookup.
+    discriminate.
+  - intros Hlookup.
+    cbn in Hlookup.
+    rewrite elem_of_cons.
+    destruct (Nat.eq_dec j i) as [-> | Hne].
+    + left.
+      reflexivity.
+    + right.
+      apply IH.
+      transitivity
+        ((<[j := f j]>
+            (foldr
+              (fun j0 (m : gmap nat A) => <[j0 := f j0]> m)
+              ∅ xs)) !! i).
+      * symmetry.
+        apply lookup_insert_ne.
+        exact Hne.
+      * exact Hlookup.
+Qed.
+
+Lemma ring_lookup_in_bounds n i instructions :
+  ring n !! i = Some instructions ->
+  i < n.
+Proof.
+  intros Hlookup.
+  assert (Hmember : i ∈ seq 0 n).
+  {
+    apply
+      (foldr_insert_lookup_member
+        (ring_program n) (seq 0 n) i instructions).
+    exact Hlookup.
+  }
+  apply (proj1 (elem_of_seq 0 n i)) in Hmember.
+  lia.
+Qed.
+
 Definition neighbor n n1 n2 : bool := (n2 =? (n1 + 1) `mod` n) || (n2 =? (n1 + n - 1) `mod` n).
 
 Program Definition ring_graph n : comm_graph := {|
@@ -535,12 +584,919 @@ Lemma init_ring_lookup n i :
   fst (init_config (ring n)) !! i =
     Some (ring_program n i, ∅).
 Proof.
-Admitted.
+  intros Hi.
+  unfold init_config.
+  cbn [fst].
+  apply (proj2 (lookup_fmap_Some
+    (λ is : list instr, (is, (∅ : env)))
+    (ring n) i
+    (ring_program n i, (∅ : env)))).
+  exists (ring_program n i).
+  split.
+  - reflexivity.
+  - exact (ring_lookup n i Hi).
+Qed.
 
-Lemma ring_can_terminate n : exists c, rtc (step id (ring_graph n)) (init_config (ring n)) c /\ finished c.
+(* The initial node pool has no nodes outside the ring. *)
+Lemma init_ring_lookup_in_bounds n i p :
+  fst (init_config (ring n)) !! i = Some p ->
+  i < n.
 Proof.
-  (* define a three-part schedule (running each instruction); prove each by induction on n *)
-Abort.
+  intros Hlookup.
+  unfold init_config in Hlookup.
+  cbn [fst] in Hlookup.
+  apply (proj1 (lookup_fmap_Some
+    (λ is : list instr, (is, (∅ : env)))
+    (ring n) i p)) in Hlookup.
+  destruct Hlookup as [instructions [_ Hring]].
+  eapply ring_lookup_in_bounds.
+  exact Hring.
+Qed.
+
+(* Node pool obtained after nodes 0 through k-1 have executed their
+   first stores. *)
+Fixpoint ring_first_np (n k : nat) : node_pool :=
+  match k with
+  | 0 => fst (init_config (ring n))
+  | S k' =>
+      <[k' :=
+        ([Store 1 ((k' + 1) `mod` n) 2 2%Z;
+          Load 1 "x"%string k' 1], (∅ : env))]>
+        (ring_first_np n k')
+  end.
+
+(* Memory obtained after nodes 0 through k-1 have executed their
+   first stores. *)
+Fixpoint ring_first_mem (n k : nat) : mem :=
+  match k with
+  | 0 => ∅
+  | S k' =>
+      <[((k' + 1) `mod` n, 1) := (1%Z, Writeable)]>
+        (ring_first_mem n k')
+  end.
+
+Lemma ring_first_np_0 n :
+  ring_first_np n 0 =
+    fst (init_config (ring n)).
+Proof.
+  reflexivity.
+Qed.
+
+Lemma ring_first_np_S n k :
+  ring_first_np n (S k) =
+    <[k :=
+      ([Store 1 ((k + 1) `mod` n) 2 2%Z;
+        Load 1 "x"%string k 1], (∅ : env))]>
+      (ring_first_np n k).
+Proof.
+  reflexivity.
+Qed.
+
+Lemma ring_first_mem_0 n :
+  ring_first_mem n 0 = (∅ : mem).
+Proof.
+  reflexivity.
+Qed.
+
+Lemma ring_first_mem_S n k :
+  ring_first_mem n (S k) =
+    <[((k + 1) `mod` n, 1) := (1%Z, Writeable)]>
+      (ring_first_mem n k).
+Proof.
+  reflexivity.
+Qed.
+
+(* A node not yet visited by the first-store sweep still has its
+   complete initial program. *)
+Lemma ring_first_np_unprocessed n k i :
+  k <= i ->
+  i < n ->
+  ring_first_np n k !! i =
+    Some (ring_program n i, ∅).
+Proof.
+  intros Hki Hin.
+  induction k as [|k IH].
+  - rewrite ring_first_np_0.
+    apply init_ring_lookup.
+    exact Hin.
+  - rewrite ring_first_np_S.
+    transitivity (ring_first_np n k !! i).
+    + apply lookup_insert_ne.
+      lia.
+    + apply IH.
+      lia.
+Qed.
+
+Lemma ring_first_np_lookup_in_bounds n k i p :
+  k <= n ->
+  ring_first_np n k !! i = Some p ->
+  i < n.
+Proof.
+  intros Hkn.
+  induction k as [|k IH].
+  - rewrite ring_first_np_0.
+    apply init_ring_lookup_in_bounds.
+  - intros Hlookup.
+    rewrite ring_first_np_S in Hlookup.
+    destruct (Nat.eq_dec k i) as [-> | Hne].
+    + lia.
+    + apply IH.
+      * lia.
+      * transitivity
+          ((<[k :=
+              ([Store 1 ((k + 1) `mod` n) 2 2%Z;
+                Load 1 "x"%string k 1], (∅ : env))]>
+             (ring_first_np n k)) !! i).
+        -- symmetry.
+           apply lookup_insert_ne.
+           exact Hne.
+        -- exact Hlookup.
+Qed.
+
+(* A node already visited by the first-store sweep has only its
+   second store and final load remaining. *)
+Lemma ring_first_np_processed n k i :
+  i < k ->
+  k <= n ->
+  ring_first_np n k !! i =
+    Some
+      ([Store 1 ((i + 1) `mod` n) 2 2%Z;
+        Load 1 "x"%string i 1], ∅).
+Proof.
+  intros Hik Hkn.
+  induction k as [|k IH].
+  - lia.
+  - rewrite ring_first_np_S.
+    destruct (Nat.eq_dec i k) as [-> | Hne].
+    + apply lookup_insert.
+    + transitivity (ring_first_np n k !! i).
+      * apply lookup_insert_ne.
+        lia.
+      * apply IH; lia.
+Qed.
+
+(* Successor modulo n is injective on the bounded node identifiers. *)
+Lemma ring_successor_inj n i j :
+  i < n ->
+  j < n ->
+  (i + 1) `mod` n = (j + 1) `mod` n ->
+  i = j.
+Proof.
+  intros Hi Hj Heq.
+  assert (Hn : 0 < n) by lia.
+  assert (Hn0 : n <> 0) by lia.
+  replace (i + 1) with (S i) in Heq by lia.
+  replace (j + 1) with (S j) in Heq by lia.
+  destruct (Nat.eq_dec (S i) n) as [Hi_last | Hi_not_last].
+  - destruct (Nat.eq_dec (S j) n) as [Hj_last | Hj_not_last].
+    + lia.
+    + assert (Hj_small : S j < n) by lia.
+      rewrite Hi_last in Heq.
+      rewrite Nat.mod_same in Heq by exact Hn0.
+      rewrite Nat.mod_small in Heq by exact Hj_small.
+      lia.
+  - assert (Hi_small : S i < n) by lia.
+    destruct (Nat.eq_dec (S j) n) as [Hj_last | Hj_not_last].
+    + rewrite Nat.mod_small in Heq by exact Hi_small.
+      rewrite Hj_last in Heq.
+      rewrite Nat.mod_same in Heq by exact Hn0.
+      lia.
+    + assert (Hj_small : S j < n) by lia.
+      rewrite Nat.mod_small in Heq by exact Hi_small.
+      rewrite Nat.mod_small in Heq by exact Hj_small.
+      lia.
+Qed.
+
+Definition ring_predecessor (n i : nat) : nat :=
+  if Nat.eq_dec i 0 then n - 1 else i - 1.
+
+(* Every bounded location is the successor of a bounded ring node. *)
+Lemma ring_predecessor_spec n i :
+  i < n ->
+  ring_predecessor n i < n /\
+  (ring_predecessor n i + 1) `mod` n = i.
+Proof.
+  intros Hin.
+  unfold ring_predecessor.
+  destruct (Nat.eq_dec i 0) as [-> | Hne].
+  - split.
+    + lia.
+    + replace (n - 1 + 1) with n by lia.
+      rewrite Nat.mod_same by lia.
+      reflexivity.
+  - split.
+    + lia.
+    + replace (i - 1 + 1) with i by lia.
+      apply Nat.mod_small.
+      exact Hin.
+Qed.
+
+(* No first-store target belonging to an unprocessed node has yet
+   been allocated. *)
+Lemma ring_first_mem_unprocessed n k i :
+  k <= i ->
+  i < n ->
+  ring_first_mem n k !! (((i + 1) `mod` n), 1) = None.
+Proof.
+  intros Hki Hin.
+  induction k as [|k IH].
+  - rewrite ring_first_mem_0.
+    apply lookup_empty.
+  - rewrite ring_first_mem_S.
+    transitivity
+      (ring_first_mem n k !! (((i + 1) `mod` n), 1)).
+    + apply lookup_insert_ne.
+      intro Hkeys.
+      apply (f_equal fst) in Hkeys.
+      cbn in Hkeys.
+      assert (Hkn : k < n) by lia.
+      pose proof
+        (ring_successor_inj n k i Hkn Hin Hkeys)
+        as Hbad.
+      lia.
+    + apply IH.
+      lia.
+Qed.
+
+(* Immediately before node k's first store, its target slot is absent. *)
+Lemma ring_first_mem_fresh n k :
+  k < n ->
+  ring_first_mem n k !! (((k + 1) `mod` n), 1) = None.
+Proof.
+  intros Hkn.
+  apply ring_first_mem_unprocessed.
+  - lia.
+  - exact Hkn.
+Qed.
+
+(* Every processed node has written its timestamp-1 successor slot. *)
+Lemma ring_first_mem_processed n k i :
+  i < k ->
+  k <= n ->
+  ring_first_mem n k !! (((i + 1) `mod` n), 1) =
+    Some (1%Z, Writeable).
+Proof.
+  intros Hik Hkn.
+  induction k as [|k IH].
+  - lia.
+  - rewrite ring_first_mem_S.
+    destruct (Nat.eq_dec i k) as [-> | Hne].
+    + apply lookup_insert.
+    + transitivity
+        (ring_first_mem n k !! (((i + 1) `mod` n), 1)).
+      * apply lookup_insert_ne.
+        intro Hkeys.
+        apply (f_equal fst) in Hkeys.
+        cbn in Hkeys.
+        assert (Hin : i < n) by lia.
+        assert (Hkn' : k < n) by lia.
+        pose proof
+          (ring_successor_inj n k i Hkn' Hin Hkeys)
+          as Heq.
+        apply Hne.
+        symmetry.
+        exact Heq.
+      * apply IH; lia.
+Qed.
+
+(* The first-store sweep only allocates timestamp-1 versions. *)
+Lemma ring_first_mem_timestamp2_absent n k l :
+  ring_first_mem n k !! (l, 2) = None.
+Proof.
+  induction k as [|k IH].
+  - rewrite ring_first_mem_0.
+    apply lookup_empty.
+  - rewrite ring_first_mem_S.
+    transitivity (ring_first_mem n k !! (l, 2)).
+    + apply lookup_insert_ne.
+      intro Hkeys.
+      apply (f_equal snd) in Hkeys.
+      discriminate.
+    + exact IH.
+Qed.
+
+Lemma ring_first_step n k :
+  k < n ->
+  step id (ring_graph n)
+    (ring_first_np n k, ring_first_mem n k)
+    (ring_first_np n (S k), ring_first_mem n (S k)).
+Proof.
+  intros Hkn.
+  pose proof
+    (ring_first_np_unprocessed n k k (Nat.le_refl k) Hkn)
+    as Hlookup.
+  unfold ring_program in Hlookup.
+  rewrite ring_first_np_S.
+  rewrite ring_first_mem_S.
+  eapply step_store.
+  - exact Hlookup.
+  - apply ring_first_store_allowed.
+    exact Hkn.
+  - left.
+    apply ring_first_mem_fresh.
+    exact Hkn.
+Qed.
+
+Lemma ring_first_sweep n k :
+  k <= n ->
+  rtc (step id (ring_graph n))
+    (init_config (ring n))
+    (ring_first_np n k, ring_first_mem n k).
+Proof.
+  intros Hkn.
+  induction k as [|k IH].
+  - apply rtc_refl.
+  - eapply rtc_r.
+    + apply IH.
+      lia.
+    + apply ring_first_step.
+      lia.
+Qed.
+
+(* Node pool obtained after all first stores and the first k second
+   stores have executed. *)
+Fixpoint ring_second_np (n k : nat) : node_pool :=
+  match k with
+  | 0 => ring_first_np n n
+  | S k' =>
+      <[k' :=
+        ([Load 1 "x"%string k' 1], (∅ : env))]>
+        (ring_second_np n k')
+  end.
+
+(* Memory obtained after all first stores and the first k second
+   stores have executed. *)
+Fixpoint ring_second_mem (n k : nat) : mem :=
+  match k with
+  | 0 => ring_first_mem n n
+  | S k' =>
+      <[((k' + 1) `mod` n, 2) := (2%Z, Writeable)]>
+        (ring_second_mem n k')
+  end.
+
+Lemma ring_second_np_0 n :
+  ring_second_np n 0 = ring_first_np n n.
+Proof.
+  reflexivity.
+Qed.
+
+Lemma ring_second_np_S n k :
+  ring_second_np n (S k) =
+    <[k :=
+      ([Load 1 "x"%string k 1], (∅ : env))]>
+      (ring_second_np n k).
+Proof.
+  reflexivity.
+Qed.
+
+Lemma ring_second_mem_0 n :
+  ring_second_mem n 0 = ring_first_mem n n.
+Proof.
+  reflexivity.
+Qed.
+
+Lemma ring_second_mem_S n k :
+  ring_second_mem n (S k) =
+    <[((k + 1) `mod` n, 2) := (2%Z, Writeable)]>
+      (ring_second_mem n k).
+Proof.
+  reflexivity.
+Qed.
+
+(* A node not yet visited by the second-store sweep still has its
+   second store followed by its final load. *)
+Lemma ring_second_np_unprocessed n k i :
+  k <= i ->
+  i < n ->
+  ring_second_np n k !! i =
+    Some
+      ([Store 1 ((i + 1) `mod` n) 2 2%Z;
+        Load 1 "x"%string i 1], ∅).
+Proof.
+  intros Hki Hin.
+  induction k as [|k IH].
+  - rewrite ring_second_np_0.
+    apply ring_first_np_processed.
+    + exact Hin.
+    + lia.
+  - rewrite ring_second_np_S.
+    transitivity (ring_second_np n k !! i).
+    + apply lookup_insert_ne.
+      lia.
+    + apply IH.
+      lia.
+Qed.
+
+(* A node already visited by the second-store sweep has only its
+   final load remaining. *)
+Lemma ring_second_np_processed n k i :
+  i < k ->
+  k <= n ->
+  ring_second_np n k !! i =
+    Some ([Load 1 "x"%string i 1], ∅).
+Proof.
+  intros Hik Hkn.
+  induction k as [|k IH].
+  - lia.
+  - rewrite ring_second_np_S.
+    destruct (Nat.eq_dec i k) as [-> | Hne].
+    + apply lookup_insert.
+    + transitivity (ring_second_np n k !! i).
+      * apply lookup_insert_ne.
+        lia.
+      * apply IH; lia.
+Qed.
+
+Lemma ring_second_np_lookup_in_bounds n k i p :
+  k <= n ->
+  ring_second_np n k !! i = Some p ->
+  i < n.
+Proof.
+  intros Hkn.
+  induction k as [|k IH].
+  - rewrite ring_second_np_0.
+    apply ring_first_np_lookup_in_bounds.
+    lia.
+  - intros Hlookup.
+    rewrite ring_second_np_S in Hlookup.
+    destruct (Nat.eq_dec k i) as [-> | Hne].
+    + lia.
+    + apply IH.
+      * lia.
+      * transitivity
+          ((<[k :=
+              ([Load 1 "x"%string k 1], (∅ : env))]>
+             (ring_second_np n k)) !! i).
+        -- symmetry.
+           apply lookup_insert_ne.
+           exact Hne.
+        -- exact Hlookup.
+Qed.
+
+(* After all second stores, every remaining program is its node's
+   singleton final load. *)
+Lemma ring_second_np_final_lookup n i instructions e :
+  ring_second_np n n !! i = Some (instructions, e) ->
+  instructions = [Load 1 "x"%string i 1] /\ e = ∅.
+Proof.
+  intros Hlookup.
+  assert (Hin : i < n).
+  {
+    eapply ring_second_np_lookup_in_bounds.
+    - exact (Nat.le_refl n).
+    - exact Hlookup.
+  }
+  pose proof
+    (ring_second_np_processed n n i Hin (Nat.le_refl n))
+    as Hexpected.
+  pose proof (eq_trans (eq_sym Hlookup) Hexpected) as Heq.
+  inversion Heq.
+  split; reflexivity.
+Qed.
+
+(* Timestamp-2 targets belonging to unprocessed nodes have not yet
+   been allocated by the second-store sweep. *)
+Lemma ring_second_mem_unprocessed n k i :
+  k <= i ->
+  i < n ->
+  ring_second_mem n k !! (((i + 1) `mod` n), 2) = None.
+Proof.
+  intros Hki Hin.
+  induction k as [|k IH].
+  - rewrite ring_second_mem_0.
+    apply ring_first_mem_timestamp2_absent.
+  - rewrite ring_second_mem_S.
+    transitivity
+      (ring_second_mem n k !! (((i + 1) `mod` n), 2)).
+    + apply lookup_insert_ne.
+      intro Hkeys.
+      apply (f_equal fst) in Hkeys.
+      cbn in Hkeys.
+      assert (Hkn : k < n) by lia.
+      pose proof
+        (ring_successor_inj n k i Hkn Hin Hkeys)
+        as Hbad.
+      lia.
+    + apply IH.
+      lia.
+Qed.
+
+Lemma ring_second_mem_fresh n k :
+  k < n ->
+  ring_second_mem n k !! (((k + 1) `mod` n), 2) = None.
+Proof.
+  intros Hkn.
+  apply ring_second_mem_unprocessed.
+  - lia.
+  - exact Hkn.
+Qed.
+
+(* Second stores only modify timestamp-2 slots, so every completed
+   first-store entry remains Writeable. *)
+Lemma ring_second_mem_timestamp1 n k i :
+  i < n ->
+  ring_second_mem n k !! (((i + 1) `mod` n), 1) =
+    Some (1%Z, Writeable).
+Proof.
+  intros Hin.
+  induction k as [|k IH].
+  - rewrite ring_second_mem_0.
+    apply ring_first_mem_processed.
+    + exact Hin.
+    + exact (Nat.le_refl n).
+  - rewrite ring_second_mem_S.
+    transitivity
+      (ring_second_mem n k !! (((i + 1) `mod` n), 1)).
+    + apply lookup_insert_ne.
+      intro Hkeys.
+      apply (f_equal snd) in Hkeys.
+      discriminate.
+    + exact IH.
+Qed.
+
+Lemma ring_second_mem_location_timestamp1 n k i :
+  i < n ->
+  ring_second_mem n k !! (i, 1) =
+    Some (1%Z, Writeable).
+Proof.
+  intros Hin.
+  destruct (ring_predecessor_spec n i Hin) as [Hpred Hsuccessor].
+  transitivity
+    (ring_second_mem n k !!
+      (((ring_predecessor n i + 1) `mod` n), 1)).
+  - rewrite Hsuccessor.
+    reflexivity.
+  - apply ring_second_mem_timestamp1.
+    exact Hpred.
+Qed.
+
+Lemma ring_second_step n k :
+  k < n ->
+  step id (ring_graph n)
+    (ring_second_np n k, ring_second_mem n k)
+    (ring_second_np n (S k), ring_second_mem n (S k)).
+Proof.
+  intros Hkn.
+  pose proof
+    (ring_second_np_unprocessed n k k (Nat.le_refl k) Hkn)
+    as Hlookup.
+  rewrite ring_second_np_S.
+  rewrite ring_second_mem_S.
+  eapply step_store.
+  - exact Hlookup.
+  - apply ring_second_store_allowed.
+    exact Hkn.
+  - left.
+    apply ring_second_mem_fresh.
+    exact Hkn.
+Qed.
+
+Lemma ring_second_sweep n k :
+  k <= n ->
+  rtc (step id (ring_graph n))
+    (ring_first_np n n, ring_first_mem n n)
+    (ring_second_np n k, ring_second_mem n k).
+Proof.
+  intros Hkn.
+  induction k as [|k IH].
+  - apply rtc_refl.
+  - eapply rtc_r.
+    + apply IH.
+      lia.
+    + apply ring_second_step.
+      lia.
+Qed.
+
+(* The first two transition sweeps compose. *)
+Lemma ring_store_sweeps n :
+  rtc (step id (ring_graph n))
+    (init_config (ring n))
+    (ring_second_np n n, ring_second_mem n n).
+Proof.
+  etransitivity.
+  - apply ring_first_sweep.
+    exact (Nat.le_refl n).
+  - apply ring_second_sweep.
+    exact (Nat.le_refl n).
+Qed.
+
+(* Once both store sweeps finish, every remaining instruction is a
+   load, so no timestamp-1 version has a pending writer. *)
+Lemma ring_second_np_visible n l :
+  visible (ring_second_np n n) l 1.
+Proof.
+  unfold visible, pending_write.
+  intros Hpending.
+  destruct Hpending as
+    [i [instructions [e [op [Hlookup [Hop Hwrites]]]]]].
+  destruct
+    (ring_second_np_final_lookup n i instructions e Hlookup)
+    as [-> ->].
+  rewrite elem_of_cons in Hop.
+  destruct Hop as [Hop | Hop].
+  - subst op.
+    cbn in Hwrites.
+    exact Hwrites.
+  - rewrite elem_of_nil in Hop.
+    contradiction.
+Qed.
+
+(* Memory after locations 0 through k-1 have had their timestamp-1
+   versions marked Readable. *)
+Fixpoint ring_readable_mem (n k : nat) : mem :=
+  match k with
+  | 0 => ring_second_mem n n
+  | S k' =>
+      <[(k', 1) := (1%Z, Readable)]>
+        (ring_readable_mem n k')
+  end.
+
+Lemma ring_readable_mem_0 n :
+  ring_readable_mem n 0 = ring_second_mem n n.
+Proof.
+  reflexivity.
+Qed.
+
+Lemma ring_readable_mem_S n k :
+  ring_readable_mem n (S k) =
+    <[(k, 1) := (1%Z, Readable)]>
+      (ring_readable_mem n k).
+Proof.
+  reflexivity.
+Qed.
+
+(* A location not yet visited by the readability sweep remains
+   Writeable at timestamp 1. *)
+Lemma ring_readable_mem_unprocessed n k i :
+  k <= i ->
+  i < n ->
+  ring_readable_mem n k !! (i, 1) =
+    Some (1%Z, Writeable).
+Proof.
+  intros Hki Hin.
+  induction k as [|k IH].
+  - rewrite ring_readable_mem_0.
+    apply ring_second_mem_location_timestamp1.
+    exact Hin.
+  - rewrite ring_readable_mem_S.
+    transitivity (ring_readable_mem n k !! (i, 1)).
+    + apply lookup_insert_ne.
+      intro Hkeys.
+      apply (f_equal fst) in Hkeys.
+      cbn in Hkeys.
+      lia.
+    + apply IH.
+      lia.
+Qed.
+
+Lemma ring_readable_step n k :
+  k < n ->
+  step id (ring_graph n)
+    (ring_second_np n n, ring_readable_mem n k)
+    (ring_second_np n n, ring_readable_mem n (S k)).
+Proof.
+  intros Hkn.
+  rewrite ring_readable_mem_S.
+  eapply step_readable.
+  - apply ring_readable_mem_unprocessed.
+    + exact (Nat.le_refl k).
+    + exact Hkn.
+  - apply ring_second_np_visible.
+Qed.
+
+Lemma ring_readable_sweep n k :
+  k <= n ->
+  rtc (step id (ring_graph n))
+    (ring_second_np n n, ring_second_mem n n)
+    (ring_second_np n n, ring_readable_mem n k).
+Proof.
+  intros Hkn.
+  induction k as [|k IH].
+  - apply rtc_refl.
+  - eapply rtc_r.
+    + apply IH.
+      lia.
+    + apply ring_readable_step.
+      lia.
+Qed.
+
+(* The two store sweeps followed by the readability sweep. *)
+Lemma ring_store_readable_sweeps n :
+  rtc (step id (ring_graph n))
+    (init_config (ring n))
+    (ring_second_np n n, ring_readable_mem n n).
+Proof.
+  etransitivity.
+  - apply ring_store_sweeps.
+  - apply ring_readable_sweep.
+    exact (Nat.le_refl n).
+Qed.
+
+Lemma ring_readable_mem_processed n k i :
+  i < k ->
+  k <= n ->
+  ring_readable_mem n k !! (i, 1) =
+    Some (1%Z, Readable).
+Proof.
+  intros Hik Hkn.
+  induction k as [|k IH].
+  - lia.
+  - rewrite ring_readable_mem_S.
+    destruct (Nat.eq_dec i k) as [-> | Hne].
+    + apply lookup_insert.
+    + transitivity (ring_readable_mem n k !! (i, 1)).
+      * apply lookup_insert_ne.
+        intro Hkeys.
+        apply (f_equal fst) in Hkeys.
+        cbn in Hkeys.
+        exact (Hne (eq_sym Hkeys)).
+      * apply IH; lia.
+Qed.
+
+Lemma ring_readable_mem_final n i :
+  i < n ->
+  ring_readable_mem n n !! (i, 1) =
+    Some (1%Z, Readable).
+Proof.
+  intros Hin.
+  apply ring_readable_mem_processed.
+  - exact Hin.
+  - exact (Nat.le_refl n).
+Qed.
+
+(* Node pool after nodes 0 through k-1 have executed their final
+   loads. Memory remains unchanged throughout this sweep. *)
+Fixpoint ring_final_np (n k : nat) : node_pool :=
+  match k with
+  | 0 => ring_second_np n n
+  | S k' =>
+      <[k' :=
+        ([], <["x"%string := 1%Z]> (∅ : env))]>
+        (ring_final_np n k')
+  end.
+
+Lemma ring_final_np_0 n :
+  ring_final_np n 0 = ring_second_np n n.
+Proof.
+  reflexivity.
+Qed.
+
+Lemma ring_final_np_S n k :
+  ring_final_np n (S k) =
+    <[k :=
+      ([], <["x"%string := 1%Z]> (∅ : env))]>
+      (ring_final_np n k).
+Proof.
+  reflexivity.
+Qed.
+
+(* A node not yet visited by the load sweep still has its singleton
+   final load and its empty environment. *)
+Lemma ring_final_np_unprocessed n k i :
+  k <= i ->
+  i < n ->
+  ring_final_np n k !! i =
+    Some ([Load 1 "x"%string i 1], ∅).
+Proof.
+  intros Hki Hin.
+  induction k as [|k IH].
+  - rewrite ring_final_np_0.
+    apply ring_second_np_processed.
+    + exact Hin.
+    + exact (Nat.le_refl n).
+  - rewrite ring_final_np_S.
+    transitivity (ring_final_np n k !! i).
+    + apply lookup_insert_ne.
+      lia.
+    + apply IH.
+      lia.
+Qed.
+
+(* A node already visited by the load sweep has no remaining
+   instructions and has bound x to the loaded value 1. *)
+Lemma ring_final_np_processed n k i :
+  i < k ->
+  k <= n ->
+  ring_final_np n k !! i =
+    Some ([], <["x"%string := 1%Z]> (∅ : env)).
+Proof.
+  intros Hik Hkn.
+  induction k as [|k IH].
+  - lia.
+  - rewrite ring_final_np_S.
+    destruct (Nat.eq_dec i k) as [-> | Hne].
+    + apply lookup_insert.
+    + transitivity (ring_final_np n k !! i).
+      * apply lookup_insert_ne.
+        lia.
+      * apply IH; lia.
+Qed.
+
+Lemma ring_final_np_lookup_in_bounds n k i p :
+  k <= n ->
+  ring_final_np n k !! i = Some p ->
+  i < n.
+Proof.
+  intros Hkn.
+  induction k as [|k IH].
+  - rewrite ring_final_np_0.
+    apply ring_second_np_lookup_in_bounds.
+    exact (Nat.le_refl n).
+  - intros Hlookup.
+    rewrite ring_final_np_S in Hlookup.
+    destruct (Nat.eq_dec k i) as [-> | Hne].
+    + lia.
+    + apply IH.
+      * lia.
+      * transitivity
+          ((<[k :=
+              ([], <["x"%string := 1%Z]> (∅ : env))]>
+             (ring_final_np n k)) !! i).
+        -- symmetry.
+           apply lookup_insert_ne.
+           exact Hne.
+        -- exact Hlookup.
+Qed.
+
+Lemma ring_final_step n k :
+  k < n ->
+  step id (ring_graph n)
+    (ring_final_np n k, ring_readable_mem n n)
+    (ring_final_np n (S k), ring_readable_mem n n).
+Proof.
+  intros Hkn.
+  pose proof
+    (ring_final_np_unprocessed n k k (Nat.le_refl k) Hkn)
+    as Hlookup.
+  rewrite ring_final_np_S.
+  eapply step_load.
+  - exact Hlookup.
+  - apply ring_load_allowed.
+  - apply ring_readable_mem_final.
+    exact Hkn.
+Qed.
+
+Lemma ring_final_sweep n k :
+  k <= n ->
+  rtc (step id (ring_graph n))
+    (ring_second_np n n, ring_readable_mem n n)
+    (ring_final_np n k, ring_readable_mem n n).
+Proof.
+  intros Hkn.
+  induction k as [|k IH].
+  - apply rtc_refl.
+  - eapply rtc_r.
+    + apply IH.
+      lia.
+    + apply ring_final_step.
+      lia.
+Qed.
+
+(* All four transition sweeps compose. *)
+Lemma ring_all_sweeps n :
+  rtc (step id (ring_graph n))
+    (init_config (ring n))
+    (ring_final_np n n, ring_readable_mem n n).
+Proof.
+  etransitivity.
+  - apply ring_store_readable_sweeps.
+  - apply ring_final_sweep.
+    exact (Nat.le_refl n).
+Qed.
+
+Lemma ring_final_finished n :
+  finished (ring_final_np n n, ring_readable_mem n n).
+Proof.
+  unfold finished.
+  cbn [fst].
+  apply map_Forall_lookup_2.
+  intros i p Hlookup.
+  destruct p as [instructions e].
+  assert (Hin : i < n).
+  {
+    eapply ring_final_np_lookup_in_bounds.
+    - exact (Nat.le_refl n).
+    - exact Hlookup.
+  }
+  pose proof
+    (ring_final_np_processed n n i Hin (Nat.le_refl n))
+    as Hexpected.
+  pose proof (eq_trans (eq_sym Hlookup) Hexpected) as Heq.
+  inversion Heq.
+  reflexivity.
+Qed.
+
+Lemma ring_can_terminate n :
+  exists c,
+    rtc (step id (ring_graph n))
+      (init_config (ring n)) c /\
+    finished c.
+Proof.
+  exists (ring_final_np n n, ring_readable_mem n n).
+  split.
+  - apply ring_all_sweeps.
+  - apply ring_final_finished.
+Qed.
 
 (* maybe we won't prove this *)
 Lemma ring_can_always_terminate n : forall c, rtc (step id (ring_graph n)) (init_config (ring n)) c ->
