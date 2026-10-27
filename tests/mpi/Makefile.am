@@ -35,7 +35,9 @@ COMPILED_TESTS = \
         multi_region_disjoint_timesteps \
         multi_dgraph \
         dgraph \
+        dqueue \
         mini_airport \
+        mini_airport_q \
 		put_after_get
 
 check_PROGRAMS = $(COMPILED_TESTS)

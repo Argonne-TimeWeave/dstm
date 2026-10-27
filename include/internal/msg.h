@@ -41,7 +41,8 @@ extern "C" {
 #define DSTM_MSG_TYPE_GET_REP 2
 #define DSTM_MSG_TYPE_HEARTBEAT 3
 #define DSTM_MSG_TYPE_BARRIER 4
-#define DSTM_MSG_TYPE_MAX 5
+#define DSTM_MSG_TYPE_APPEND 5
+#define DSTM_MSG_TYPE_MAX 6
 
 struct dstm_msg_hdr_s {
 	int type;

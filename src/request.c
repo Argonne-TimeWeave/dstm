@@ -121,10 +121,13 @@ int dstm_request_isdone(dstm_request_t *req)
 static const dstm_enum_table_t dstm_request_type_table[] = {
         {DSTM_REQUEST_TYPE_LOCAL_PUT, "LOCAL_PUT"},
         {DSTM_REQUEST_TYPE_LOCAL_GET, "LOCAL_GET"},
+        {DSTM_REQUEST_TYPE_LOCAL_APPEND, "LOCAL_APPEND"},
         {DSTM_REQUEST_TYPE_IN_PUT, "IN_PUT"},
         {DSTM_REQUEST_TYPE_IN_GET, "IN_GET"},
+        {DSTM_REQUEST_TYPE_IN_APPEND, "IN_APPEND"},
         {DSTM_REQUEST_TYPE_OUT_PUT, "OUT_PUT"},
         {DSTM_REQUEST_TYPE_OUT_GET, "OUT_GET"},
+        {DSTM_REQUEST_TYPE_OUT_APPEND, "OUT_APPEND"},
         {DSTM_REQUEST_TYPE_BARRIER, "BARRIER"},
         {0, NULL},
 };

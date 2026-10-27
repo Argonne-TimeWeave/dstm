@@ -91,7 +91,8 @@ static int dstm_has_pending_outgoing(void)
 	DL_FOREACH(requests, it)
 	{
 		if ((it->type == DSTM_REQUEST_TYPE_OUT_PUT ||
-		     it->type == DSTM_REQUEST_TYPE_OUT_GET) &&
+             it->type == DSTM_REQUEST_TYPE_OUT_GET ||
+		     it->type == DSTM_REQUEST_TYPE_OUT_APPEND) &&
 		    it->status != DSTM_REQUEST_STATUS_DONE)
 			return 1;
 	}

@@ -74,6 +74,16 @@ static int dstm_version_can_become_readable(dstm_region_t *region, int region_id
 		if (it->type == DSTM_REQUEST_TYPE_IN_PUT &&
 		    it->status != DSTM_REQUEST_STATUS_DONE)
 			return 0;
+
+        /* Appends are writers too: a still-pending append means
+		 * more bytes can still land in this version. */
+		if (it->type == DSTM_REQUEST_TYPE_LOCAL_APPEND &&
+		    it->status != DSTM_REQUEST_STATUS_DONE)
+			return 0;
+
+		if (it->type == DSTM_REQUEST_TYPE_IN_APPEND &&
+		    it->status != DSTM_REQUEST_STATUS_DONE)
+			return 0;
 	}
 
 	/* Could we receive more PUTs from neighbors?
@@ -328,6 +338,93 @@ static int dstm_request_progress_in_put(dstm_request_t *req)
 	return 0;
 }
 
+/* Shared accumulate helper: append req->buf (req->size bytes) into the
+ * target version's slot at req->dst.offset, which is laid out as
+ * [ uint64_t byte_count | accumulated bytes ].  Creates the version on
+ * demand, exactly like IN_PUT, and enforces the same WRITABLE phase rule.
+ *
+ * The region buffer is calloc'd per version, so an as-yet-untouched slot
+ * reads byte_count == 0 and we start accumulating at offset 0. */
+static void dstm_region_append_apply(dstm_region_t *rg, dstm_request_t *req,
+                                     dstm_time_t target)
+{
+	dstm_region_version_t *v =
+	        dstm_region_version_find_or_create(rg, target);
+	assert(v != NULL);
+	if (v->status != DSTM_REGION_STATUS_WRITABLE) {
+		dstm_log_error(
+		        "append contract violation on rank %d at effective "
+		        "time %" PRId64 ": target version is no longer "
+		        "WRITABLE (status=%d).  All appends/puts to a given "
+		        "effective time must be issued before any get on "
+		        "that time.\n",
+		        dstm_global_context.rank, target, v->status);
+		abort();
+	}
+
+	/* Slot base within the version buffer. */
+	char    *slot  = (char *)v->buffer + req->dst.offset;
+	uint64_t count;
+	memcpy(&count, slot, sizeof(uint64_t));
+
+	/* Overflow guard: the accumulated region must stay inside the
+	 * region buffer.  The data-structure layer (dqueue) bound-checks
+	 * before issuing, but a corrupt or oversized producer must not be
+	 * allowed to scribble past the region. */
+	size_t head    = (size_t)req->dst.offset + sizeof(uint64_t);
+	size_t written = (size_t)count;
+	if (head + written + req->size > rg->size) {
+		dstm_log_error(
+		        "append overflow on rank %d: slot at offset %td would "
+		        "exceed region size %zu (count=%" PRIu64
+		        ", add=%zu)\n",
+		        dstm_global_context.rank, req->dst.offset, rg->size,
+		        count, req->size);
+		abort();
+	}
+
+	memcpy(slot + sizeof(uint64_t) + written, req->buf, req->size);
+	count += (uint64_t)req->size;
+	memcpy(slot, &count, sizeof(uint64_t));
+}
+
+static int dstm_request_progress_local_append(dstm_request_t *req)
+{
+	dstm_region_t *rg = dstm_get_local_region(req->region_id);
+	assert(rg != NULL);
+	assert(req->status == DSTM_REQUEST_STATUS_INIT);
+	dstm_time_t target = req->time + req->delta;
+	dstm_region_append_apply(rg, req, target);
+	req->status = DSTM_REQUEST_STATUS_DONE;
+	return 0;
+}
+
+static int dstm_request_progress_in_append(dstm_request_t *req)
+{
+	dstm_region_t *rg = dstm_get_local_region(req->region_id);
+	if (rg == NULL) {
+		dstm_log_error("incoming append for unknown local region %d "
+		               "on rank %d\n",
+		               req->region_id, dstm_global_context.rank);
+		abort();
+	}
+	assert(req->status == DSTM_REQUEST_STATUS_INIT);
+	dstm_time_t target = req->time + req->delta;
+	dstm_region_append_apply(rg, req, target);
+	req->status = DSTM_REQUEST_STATUS_DONE;
+	return 0;
+}
+
+/* OUT_APPEND behaves exactly like OUT_PUT: an async MPI send that
+ * completes when MPI_Test reports done. */
+static int dstm_request_progress_out_append(dstm_request_t *req)
+{
+	assert(req->status == DSTM_REQUEST_STATUS_ISEND);
+	if (dstm_msg_test(req->msg))
+		req->status = DSTM_REQUEST_STATUS_DONE;
+	return 0;
+}
+
 static int dstm_request_progress_in_get(dstm_request_t *req)
 {
 	/* logic:
@@ -446,10 +543,13 @@ typedef struct dstm_request_progress_s {
 static dstm_request_progress_t progress_sm[DSTM_REQUEST_TYPE_MAX] = {
         {DSTM_REQUEST_TYPE_LOCAL_PUT, dstm_request_progress_local_put},
         {DSTM_REQUEST_TYPE_LOCAL_GET, dstm_request_progress_local_get},
+        {DSTM_REQUEST_TYPE_LOCAL_APPEND, dstm_request_progress_local_append},
         {DSTM_REQUEST_TYPE_IN_PUT, dstm_request_progress_in_put},
         {DSTM_REQUEST_TYPE_IN_GET, dstm_request_progress_in_get},
+        {DSTM_REQUEST_TYPE_IN_APPEND, dstm_request_progress_in_append},
         {DSTM_REQUEST_TYPE_OUT_PUT, dstm_request_progress_out_put},
         {DSTM_REQUEST_TYPE_OUT_GET, dstm_request_progress_out_get},
+        {DSTM_REQUEST_TYPE_OUT_APPEND, dstm_request_progress_out_append},
         {DSTM_REQUEST_TYPE_BARRIER, dstm_request_progress_barrier},
 };
 
@@ -488,6 +588,7 @@ static void dstm_handle_incoming_msg(MPI_Status status)
      * and does not participate in the distance-based checks. */
     switch (m.header.type) {
     case DSTM_MSG_TYPE_PUT:
+    case DSTM_MSG_TYPE_APPEND:
     case DSTM_MSG_TYPE_GET_REQ:
     case DSTM_MSG_TYPE_GET_REP:
             dstm_ninfo_set(m.header.src_rank, m.header.region_id,
@@ -516,6 +617,25 @@ static void dstm_handle_incoming_msg(MPI_Status status)
 		                    status.MPI_TAG, m.header.time,
 		                    m.header.delta, m.header.dst_rank, 
                             m.header.region_id, dptr,
+		                    (dstm_ptr_t){0, 0}, m.u.putget.size);
+		nr->buf = malloc(m.u.putget.size);
+		assert(nr->buf != NULL);
+		memcpy(nr->buf, m.data, m.u.putget.size);
+		dstm_msg_free_packbuf(&m);
+		DL_INSERT_INORDER(requests, nr, dstm_request_cmp_departure);
+		break;
+
+	case DSTM_MSG_TYPE_APPEND:
+		/* Incoming APPEND: identical plumbing to PUT, but the
+		 * request accumulates into the slot instead of
+		 * overwriting it.  Concatenation order is the order these
+		 * IN_APPEND requests are applied, i.e. MPI arrival order. */
+		dptr = (dstm_ptr_t){m.u.putget.ptr.region,
+		                    m.u.putget.ptr.offset};
+		dstm_request_create(&nr, DSTM_REQUEST_TYPE_IN_APPEND,
+		                    status.MPI_TAG, m.header.time,
+		                    m.header.delta, m.header.dst_rank,
+		                    m.header.region_id, dptr,
 		                    (dstm_ptr_t){0, 0}, m.u.putget.size);
 		nr->buf = malloc(m.u.putget.size);
 		assert(nr->buf != NULL);
@@ -822,4 +942,70 @@ int dstm_get_or_default(int rank,
 	}
 
 	return dstm_get(rank, region_id, time, delta, dst, src, size);
+}
+
+int dstm_append(int rank,
+                int region_id,
+                dstm_time_t time,
+                dstm_time_t delta,
+                dstm_ptr_t dst,
+                void *src,
+                size_t size)
+{
+	dstm_log_info("append: %d, %d, %" PRId64 ", %" PRId64
+	              ", %d:%td, %p, %zu\n",
+	              rank, region_id, time, delta, dst.region, dst.offset, src,
+	              size);
+
+	if (region_id < 0 || region_id >= DSTM_MAX_REGIONS)
+		return -DSTM_EINVAL;
+
+	if (src == NULL)
+		return -DSTM_EINVAL;
+
+	if (region_id != dst.region)
+		return -DSTM_EINVAL;
+
+	/* An append, like a put, cannot target the past. */
+	if (delta < 0)
+		return -DSTM_EINVAL;
+
+	/* delta == 0 is only meaningful for the local rank. */
+	if (delta == 0 && rank != dstm_global_context.rank)
+		return -DSTM_EDOM;
+
+	/* Same clock-advance heartbeat as put/get. */
+	if (dstm_global_context.local_heartbeat_time < time) {
+		dstm_region_send_heartbeat_to_all(time);
+		dstm_global_context.local_heartbeat_time = time;
+	}
+
+	dstm_request_t *req;
+	if (rank == dstm_global_context.rank) {
+		/* Local append: buffer the payload so the caller's buffer
+		 * can be reused or freed immediately. */
+		dstm_request_create(&req, DSTM_REQUEST_TYPE_LOCAL_APPEND, -1,
+		                    time, delta, rank, region_id, dst,
+		                    (dstm_ptr_t){0, 0}, size);
+		req->buf = malloc(size);
+		assert(req->buf != NULL);
+		memcpy(req->buf, src, size);
+	} else {
+		/* Outgoing append: async send, APPEND message type. */
+		int tag = dstm_request_new_tag();
+		dstm_request_create(&req, DSTM_REQUEST_TYPE_OUT_APPEND, tag,
+		                    time, delta, rank, region_id, dst,
+		                    (dstm_ptr_t){0, 0}, size);
+		req->buf = malloc(size);
+		assert(req->buf != NULL);
+		memcpy(req->buf, src, size);
+
+		dstm_msg_fill_hdr(&req->msg, DSTM_MSG_TYPE_APPEND, time, delta,
+		                  rank, dstm_global_context.rank, region_id);
+		dstm_msg_fill_payload(&req->msg, dst, req->buf, size);
+		dstm_msg_isend(&req->msg, tag);
+		req->status = DSTM_REQUEST_STATUS_ISEND;
+	}
+	DL_INSERT_INORDER(requests, req, dstm_request_cmp_departure);
+	return 0;
 }
