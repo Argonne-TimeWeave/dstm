@@ -17,6 +17,7 @@
 
 #include "internal/globals.h"
 #include "internal/msg.h"
+#include "internal/profile.h"
 #include "internal/region.h"
 #include "internal/request.h"
 
@@ -96,27 +97,38 @@ int dstm_start_custom(dstm_distance_t *dist, dstm_opts_t opts)
 {
 	int err;
 
-	if (dist == NULL)
-		return -DSTM_EINVAL;
+    dstm_profile_start();
 
-	if (dstm_distance_size(dist) != (size_t)dstm_global_context.world_size)
+	if (dist == NULL) {
+        dstm_profile_cancel();
 		return -DSTM_EINVAL;
+    }
 
-	if (opts.region_size < DSTM_REGION_MIN_BLOCK_SIZE)
+	if (dstm_distance_size(dist) != (size_t)dstm_global_context.world_size) {
+        dstm_profile_cancel();
 		return -DSTM_EINVAL;
+    }
+
+	if (opts.region_size < DSTM_REGION_MIN_BLOCK_SIZE) {
+        dstm_profile_cancel();
+		return -DSTM_EINVAL;
+    }
 	
 	/* Reset the per-session monotonic tag counter so each session
 	 * starts from a deterministic base. */
 	dstm_request_tag_reset();
 
 	err = dstm_distance_create_copy(&dstm_global_context.distances, dist);
-	if (err)
+	if (err) {
+        dstm_profile_cancel();
 		return err;
+    }
 
 	/* create a region locally with user-specified size */
 	err = dstm_region_create(&dstm_global_context.regions[0], opts.region_size);
 	if (err) {
 		dstm_distance_destroy(&dstm_global_context.distances);
+        dstm_profile_cancel();
 		return err;
 	}
     dstm_global_context.regions[0]->id = 0;
@@ -184,6 +196,14 @@ int dstm_fini(dstm_time_t last_time)
 	 * ensures all ranks have arrived and no session message is in transit
 	 * before the comm (and its context id) is released. */
 	MPI_Barrier(dstm_global_context.comm);
+    dstm_profile_record(DSTM_PROFILE_MPI_BARRIER, 0);
+
+    /*
+	 * Aggregate and print while the session communicator is still valid.
+	 * The aggregation reductions are intentionally excluded from metrics.
+	 */
+	dstm_profile_finish_and_log(dstm_global_context.comm,
+	                            dstm_global_context.rank);
 
 	/* Free the session communicator and restore the fallback so any
 	 * subsequent data-structure calls (e.g. dstm_darray_create) made

@@ -18,6 +18,7 @@
 #include "internal/globals.h"
 #include "internal/log.h"
 #include "internal/msg.h"
+#include "internal/profile.h"
 #include "internal/region.h"
 #include "internal/utlist.h"
 
@@ -166,6 +167,7 @@ static int dstm_msg_isend_with_data(dstm_msg_t *msg, int tag)
 
 	MPI_Isend(msg->packbuf, pos, MPI_PACKED, msg->header.dst_rank, tag,
 	          dstm_global_context.comm, &msg->request);
+    dstm_profile_record(DSTM_PROFILE_MPI_ISEND, (size_t)pos);
 	return 0;
 }
 
@@ -203,6 +205,7 @@ int dstm_msg_send_getreq(dstm_msg_t *msg, int tag)
 	/* send the message */
 	MPI_Send(msg->packbuf, pos, MPI_PACKED, msg->header.dst_rank, tag,
 	         dstm_global_context.comm);
+    dstm_profile_record(DSTM_PROFILE_MPI_SEND, (size_t)pos);
 
 	dstm_msg_free_packbuf(msg);
 	return 0;
@@ -224,6 +227,7 @@ static int dstm_msg_send_heartbeat(dstm_msg_t *msg, int tag)
 
 	MPI_Send(msg->packbuf, pos, MPI_PACKED, msg->header.dst_rank, tag,
 	         dstm_global_context.comm);
+    dstm_profile_record(DSTM_PROFILE_MPI_SEND, (size_t)pos);
 
 	dstm_msg_free_packbuf(msg);
 	return 0;
@@ -248,6 +252,7 @@ static int dstm_msg_send_barrier(dstm_msg_t *msg, int tag)
 
 	MPI_Send(msg->packbuf, pos, MPI_PACKED, msg->header.dst_rank, tag,
 	         dstm_global_context.comm);
+    dstm_profile_record(DSTM_PROFILE_MPI_SEND, (size_t)pos);
 
 	dstm_msg_free_packbuf(msg);
 	return 0;
@@ -298,6 +303,7 @@ int dstm_msg_recvany(MPI_Status status, dstm_msg_t *msg)
 	assert(msg->packbuf != NULL);
 	MPI_Recv(msg->packbuf, bufsz, MPI_PACKED, source, tag,
 	         dstm_global_context.comm, &status);
+    dstm_profile_record(DSTM_PROFILE_MPI_RECV, 0);
 
 	/* unpack message header first, so that we know what we received */
 	int pos = 0;
@@ -354,8 +360,10 @@ int dstm_msg_consensus(MPI_Comm comm, int err)
         int local_bad = (err != 0) ? 1 : 0;
         int any_bad   = 0;
 
-        if (MPI_Allreduce(&local_bad, &any_bad, 1, MPI_INT, MPI_MAX, comm)
-            != MPI_SUCCESS)
+        int mpi_err = MPI_Allreduce(&local_bad, &any_bad, 1, MPI_INT, MPI_MAX, comm);
+        dstm_profile_record_collective(DSTM_PROFILE_MPI_ALLREDUCE, sizeof(local_bad));
+
+        if (mpi_err != MPI_SUCCESS)
                 return (err != 0) ? err : -DSTM_FAILURE;
 
         if (err != 0)

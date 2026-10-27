@@ -19,6 +19,7 @@
 #include <stdio.h>
 
 #include "dstm.h"
+#include "internal/profile.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -87,6 +88,9 @@ struct dstm_context_s {
     * caller's `time` strictly exceeds this watermark. Rank-wide; reset to 0 on each
     * dstm_start. */
     dstm_time_t local_heartbeat_time;
+
+    /* Profiling data for the current dstm_start/dstm_fini session. */
+    dstm_profile_t profile;
 };
 typedef struct dstm_context_s dstm_context_t;
 

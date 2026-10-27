@@ -18,6 +18,7 @@
 
 #include "internal/globals.h"
 #include "internal/msg.h"
+#include "internal/profile.h"
 #include "internal/region.h"
 
 /*******************************************************************************
@@ -409,9 +410,7 @@ void dstm_region_destroy(dstm_region_t **region)
 	dstm_region_version_t *v, *vtmp;
 	DL_FOREACH_SAFE(r->versions, v, vtmp)
 	{
-		DL_DELETE(r->versions, v);
-		free(v->buffer);
-		free(v);
+		dstm_region_version_destroy(r, v);
 	}
 
     /* neighbor info is now rank-level (context); not freed here */
@@ -538,6 +537,7 @@ dstm_region_version_t *dstm_region_version_find_or_create(dstm_region_t *region,
 	}
 
 	DL_INSERT_INORDER(region->versions, v, dstm_region_version_cmp);
+    dstm_profile_version_created();
 	return v;
 }
 
@@ -548,6 +548,7 @@ void dstm_region_version_destroy(dstm_region_t *region,
 		return;
 
 	DL_DELETE(region->versions, version);
+    dstm_profile_version_destroyed();
 	free(version->buffer);
 	free(version);
 }

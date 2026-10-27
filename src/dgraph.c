@@ -20,6 +20,7 @@
 
 #include "internal/globals.h"
 #include "internal/region.h"
+#include "internal/profile.h"
 #include "internal/msg.h"
 
 /*******************************************************************************
@@ -563,10 +564,14 @@ consensus_setup:
                 /* Collective already entered by peers; report and let the
                  * post-exchange consensus tear everyone down. */
                 err = -DSTM_ENOMEM;
-        } else if (MPI_Allgather(&self_info, (int)sizeof(self_info), MPI_BYTE,
-                                 all_info, (int)sizeof(self_info), MPI_BYTE,
-                                 comm) != MPI_SUCCESS) {
-                err = -DSTM_FAILURE;
+        } else {
+                int mpi_err = MPI_Allgather(&self_info, (int)sizeof(self_info),
+                                            MPI_BYTE, all_info,
+                                            (int)sizeof(self_info), MPI_BYTE, comm);
+                dstm_profile_record_collective(DSTM_PROFILE_MPI_ALLGATHER,
+                                               sizeof(self_info));
+                if (mpi_err != MPI_SUCCESS)
+                        err = -DSTM_FAILURE;
         }
 
         if (err == 0) {
@@ -653,19 +658,25 @@ consensus_setup:
                  * setup only. Every rank must enter this Allgather even if
                  * it has already failed, hence the throwaway fallback. */
                 if (local_touched != NULL && touch_matrix != NULL) {
-                        if (MPI_Allgather(local_touched, world_size,
-                                          MPI_UINT8_T, touch_matrix,
-                                          world_size, MPI_UINT8_T, comm)
-                            != MPI_SUCCESS)
+                        int mpi_err = MPI_Allgather(local_touched, world_size,
+                                                    MPI_UINT8_T, touch_matrix,
+                                                    world_size, MPI_UINT8_T, comm);
+                        dstm_profile_record_collective(DSTM_PROFILE_MPI_ALLGATHER,
+                                            (size_t)world_size * sizeof(uint8_t));
+                        if (mpi_err != MPI_SUCCESS)
                                 err = -DSTM_FAILURE;
                 } else {
                         uint8_t *tmp_s = calloc((size_t)world_size, 1);
                         uint8_t *tmp_r = calloc((size_t)world_size *
                                                 (size_t)world_size, 1);
-                        if (tmp_s && tmp_r)
+                        if (tmp_s && tmp_r) {
                                 MPI_Allgather(tmp_s, world_size, MPI_UINT8_T,
                                               tmp_r, world_size, MPI_UINT8_T,
                                               comm);
+                                dstm_profile_record_collective(
+                                        DSTM_PROFILE_MPI_ALLGATHER,
+                                        (size_t)world_size * sizeof(uint8_t));
+                        }
                         free(tmp_s);
                         free(tmp_r);
                 }
@@ -800,22 +811,37 @@ consensus_setup:
                                 MPI_Irecv(g->rank_row_ptrs[r], (int)n_rp,
                                           MPI_UINT64_T, r, TAG_ROW_PTRS,
                                           comm, &reqs[req_n++]);
-                                if (n_ed > 0)
+                                dstm_profile_record(DSTM_PROFILE_MPI_IRECV, 0);
+
+                                if (n_ed > 0) {
                                         MPI_Irecv(g->rank_edge_dsts[r],
                                                   (int)n_ed, MPI_UINT64_T, r,
                                                   TAG_EDGE_DSTS, comm,
                                                   &reqs[req_n++]);
+                                        dstm_profile_record(
+                                                DSTM_PROFILE_MPI_IRECV, 0);
+                                }
 
                                 MPI_Isend(g->rank_row_ptrs[self],
                                           (int)(local_vertices + 1),
                                           MPI_UINT64_T, r, TAG_ROW_PTRS,
                                           comm, &reqs[req_n++]);
-                                if (g->local_edge_count > 0)
+                                dstm_profile_record(
+                                        DSTM_PROFILE_MPI_ISEND,
+                                        (local_vertices + 1) *
+                                                sizeof(uint64_t));
+
+                                if (g->local_edge_count > 0) {
                                         MPI_Isend(g->rank_edge_dsts[self],
                                                   (int)g->local_edge_count,
                                                   MPI_UINT64_T, r,
                                                   TAG_EDGE_DSTS, comm,
                                                   &reqs[req_n++]);
+                                        dstm_profile_record(
+                                                DSTM_PROFILE_MPI_ISEND,
+                                                g->local_edge_count *
+                                                        sizeof(uint64_t));
+                                }
                         }
 
                         if (MPI_Waitall(req_n, reqs, MPI_STATUSES_IGNORE)
@@ -1264,8 +1290,11 @@ static int build_distance_from_row(const int *local_row, int world_size,
         if (full == NULL)
                 return -DSTM_ENOMEM;
 
-        if (MPI_Allgather(local_row, world_size, MPI_INT, full, world_size,
-                          MPI_INT, comm) != MPI_SUCCESS) {
+        int mpi_err = MPI_Allgather(local_row, world_size, MPI_INT, full,
+                              world_size, MPI_INT, comm);
+        dstm_profile_record_collective(DSTM_PROFILE_MPI_ALLGATHER,
+                (size_t)world_size * sizeof(int));
+        if (mpi_err != MPI_SUCCESS) {
                 free(full);
                 return -DSTM_FAILURE;
         }
@@ -1342,8 +1371,10 @@ int dstm_dgraph_distance_from_topology(dstm_distance_t **ret,
                 return -DSTM_ENOMEM;
         }
 
-        if (MPI_Allgather(&mine, 1, MPI_UINT64_T, counts, 1, MPI_UINT64_T,
-                          comm) != MPI_SUCCESS) {
+        int mpi_err = MPI_Allgather(&mine, 1, MPI_UINT64_T, counts, 1,
+                              MPI_UINT64_T, comm);
+        dstm_profile_record_collective(DSTM_PROFILE_MPI_ALLGATHER, sizeof(mine));
+        if (mpi_err != MPI_SUCCESS) {
                 free(counts);
                 free(offsets);
                 free(row);

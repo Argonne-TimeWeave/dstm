@@ -1,0 +1,340 @@
+/*******************************************************************************
+ * Copyright 2025 UChicago Argonne, LLC.
+ * (c.f. AUTHORS, LICENSE)
+ *
+ * This file is part of the dstm project.
+ * For more info, see https://github.com/anlsys/dstm
+ *
+ * SPDX-License-Identifier: BSD-3-Clause
+ *******************************************************************************/
+
+#include "config.h"
+
+#include <inttypes.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include <mpi.h>
+
+#include "dstm.h"
+
+#include "internal/globals.h"
+#include "internal/profile.h"
+
+/*
+ * Process-local configuration, persistent across sessions. All ranks must
+ * set the same value before entering dstm_start.
+ */
+static int dstm_profile_enabled = 0;
+
+int dstm_profile_set_enabled(int enabled)
+{
+        dstm_profile_enabled = (enabled != 0);
+        return DSTM_SUCCESS;
+}
+
+void dstm_profile_start(void)
+{
+        dstm_profile_t *profile = &dstm_global_context.profile;
+
+        memset(profile, 0, sizeof(*profile));
+
+        if (!dstm_profile_enabled)
+                return;
+
+        profile->start_time = MPI_Wtime();
+        profile->active = 1;
+}
+
+void dstm_profile_cancel(void)
+{
+        dstm_global_context.profile.active = 0;
+}
+
+void dstm_profile_record(dstm_profile_mpi_call_t call, size_t bytes)
+{
+        dstm_profile_t *profile = &dstm_global_context.profile;
+
+        if (!profile->active)
+                return;
+
+        if (call < 0 || call >= DSTM_PROFILE_MPI_CALL_MAX)
+                return;
+
+        profile->mpi_calls[call]++;
+        profile->mpi_bytes[call] += (uint64_t)bytes;
+}
+
+void dstm_profile_record_collective(dstm_profile_mpi_call_t call,
+                                    size_t local_payload_bytes)
+{
+        uint64_t bytes = 0;
+
+        if (dstm_global_context.world_size > 1) {
+                bytes = (uint64_t)local_payload_bytes *
+                        (uint64_t)(dstm_global_context.world_size - 1);
+        }
+
+        dstm_profile_record(call, (size_t)bytes);
+}
+
+void dstm_profile_version_created(void)
+{
+        dstm_profile_t *profile = &dstm_global_context.profile;
+
+        if (!profile->active)
+                return;
+
+        profile->versions_created++;
+        profile->versions_active++;
+
+        if (profile->versions_active > profile->versions_active_max)
+                profile->versions_active_max = profile->versions_active;
+}
+
+void dstm_profile_version_destroyed(void)
+{
+        dstm_profile_t *profile = &dstm_global_context.profile;
+
+        if (!profile->active)
+                return;
+
+        profile->versions_destroyed++;
+
+        /*
+         * Every version created during a normal session should have a
+         * matching active count. Keep this guarded so profiling cannot
+         * underflow if a pre-profile version is ever destroyed.
+         */
+        if (profile->versions_active > 0)
+                profile->versions_active--;
+}
+
+void dstm_profile_finish_and_log(MPI_Comm comm, int rank)
+{
+        enum {
+                DSTM_PROFILE_VERSION_CREATED = 0,
+                DSTM_PROFILE_VERSION_DESTROYED,
+                DSTM_PROFILE_VERSION_ACTIVE_MAX,
+                DSTM_PROFILE_VERSION_METRIC_MAX
+        };
+
+        dstm_profile_t *profile = &dstm_global_context.profile;
+        uint64_t local_calls[DSTM_PROFILE_MPI_CALL_MAX] = {0};
+        uint64_t local_bytes[DSTM_PROFILE_MPI_CALL_MAX] = {0};
+        uint64_t local_versions[DSTM_PROFILE_VERSION_METRIC_MAX] = {0};
+
+        uint64_t *rank_calls = NULL;
+        uint64_t *rank_bytes = NULL;
+        uint64_t *rank_versions = NULL;
+        double *rank_runtimes = NULL;
+
+        double local_runtime;
+        int world_size;
+        int allocation_ok = 1;
+
+        if (!profile->active)
+                return;
+
+        local_runtime = MPI_Wtime() - profile->start_time;
+
+        for (int i = 0; i < DSTM_PROFILE_MPI_CALL_MAX; i++) {
+                local_calls[i] = profile->mpi_calls[i];
+                local_bytes[i] = profile->mpi_bytes[i];
+        }
+
+        local_versions[DSTM_PROFILE_VERSION_CREATED] =
+                profile->versions_created;
+        local_versions[DSTM_PROFILE_VERSION_DESTROYED] =
+                profile->versions_destroyed;
+        local_versions[DSTM_PROFILE_VERSION_ACTIVE_MAX] =
+                profile->versions_active_max;
+
+        /*
+         * Disable collection before gathering results so the profiling
+         * collectives do not count themselves.
+         */
+        profile->active = 0;
+
+        MPI_Comm_size(comm, &world_size);
+
+        /*
+         * Rank 0 owns the gathered profiling data. Each array is laid out
+         * as:
+         *
+         *   rank_calls[rank * DSTM_PROFILE_MPI_CALL_MAX + call]
+         *   rank_bytes[rank * DSTM_PROFILE_MPI_CALL_MAX + call]
+         *   rank_runtimes[rank]
+         */
+        if (rank == 0) {
+                size_t counter_count =
+                        (size_t)world_size * DSTM_PROFILE_MPI_CALL_MAX;
+                size_t version_metric_count =
+                        (size_t)world_size *
+                        DSTM_PROFILE_VERSION_METRIC_MAX;
+
+                rank_calls = calloc(counter_count, sizeof(*rank_calls));
+                rank_bytes = calloc(counter_count, sizeof(*rank_bytes));
+                rank_versions = calloc(version_metric_count,
+                                       sizeof(*rank_versions));
+                rank_runtimes =
+                        calloc((size_t)world_size, sizeof(*rank_runtimes));
+
+                if (rank_calls == NULL ||
+                    rank_bytes == NULL ||
+                    rank_versions == NULL ||
+                    rank_runtimes == NULL)
+                        allocation_ok = 0;
+        }
+
+        /*
+         * All ranks must agree whether rank 0 successfully allocated the
+         * receive buffers before entering MPI_Gather. Profiling is already
+         * disabled, so this broadcast is intentionally excluded.
+         */
+        MPI_Bcast(&allocation_ok, 1, MPI_INT, 0, comm);
+
+        if (!allocation_ok) {
+                if (rank == 0) {
+                        dstm_profile_log(
+                                "DSTM_PROFILE "
+                                "status=unavailable "
+                                "reason=out_of_memory\n");
+                }
+
+                free(rank_calls);
+                free(rank_bytes);
+                free(rank_versions);
+                free(rank_runtimes);
+                return;
+        }
+
+        MPI_Gather(local_calls, DSTM_PROFILE_MPI_CALL_MAX, MPI_UINT64_T,
+                   rank_calls, DSTM_PROFILE_MPI_CALL_MAX, MPI_UINT64_T,
+                   0, comm);
+
+        MPI_Gather(local_versions, DSTM_PROFILE_VERSION_METRIC_MAX,
+                   MPI_UINT64_T,
+                   rank_versions, DSTM_PROFILE_VERSION_METRIC_MAX,
+                   MPI_UINT64_T,
+                   0, comm);
+
+        MPI_Gather(local_bytes, DSTM_PROFILE_MPI_CALL_MAX, MPI_UINT64_T,
+                   rank_bytes, DSTM_PROFILE_MPI_CALL_MAX, MPI_UINT64_T,
+                   0, comm);
+
+        MPI_Gather(&local_runtime, 1, MPI_DOUBLE,
+                   rank_runtimes, 1, MPI_DOUBLE,
+                   0, comm);
+
+        if (rank == 0) {
+                for (int r = 0; r < world_size; r++) {
+                        const uint64_t *calls =
+                                rank_calls +
+                                (size_t)r * DSTM_PROFILE_MPI_CALL_MAX;
+                        const uint64_t *bytes =
+                                rank_bytes +
+                                (size_t)r * DSTM_PROFILE_MPI_CALL_MAX;
+                        const uint64_t *versions =
+                                rank_versions +
+                                (size_t)r *
+                                DSTM_PROFILE_VERSION_METRIC_MAX;
+
+                        uint64_t total_calls = 0;
+                        uint64_t total_bytes = 0;
+
+                        for (int i = 0;
+                             i < DSTM_PROFILE_MPI_CALL_MAX;
+                             i++) {
+                                total_calls += calls[i];
+                                total_bytes += bytes[i];
+                        }
+
+                        dstm_profile_log(
+                                "DSTM_PROFILE "
+                                "scope=rank "
+                                "rank=%d "
+                                "runtime_wall_seconds=%.9f "
+                                "versions_created=%" PRIu64 " "
+                                "versions_destroyed=%" PRIu64 " "
+                                "versions_active_max=%" PRIu64 " "
+                                "mpi_calls_total=%" PRIu64 " "
+                                "mpi_send_calls=%" PRIu64 " "
+                                "mpi_isend_calls=%" PRIu64 " "
+                                "mpi_recv_calls=%" PRIu64 " "
+                                "mpi_irecv_calls=%" PRIu64 " "
+                                "mpi_allgather_calls=%" PRIu64 " "
+                                "mpi_allreduce_calls=%" PRIu64 " "
+                                "mpi_barrier_calls=%" PRIu64 " "
+                                "bytes_moved_total=%" PRIu64 " "
+                                "mpi_send_bytes=%" PRIu64 " "
+                                "mpi_isend_bytes=%" PRIu64 " "
+                                "mpi_recv_bytes=%" PRIu64 " "
+                                "mpi_irecv_bytes=%" PRIu64 " "
+                                "mpi_allgather_bytes=%" PRIu64 " "
+                                "mpi_allreduce_bytes=%" PRIu64 " "
+                                "mpi_barrier_bytes=%" PRIu64 "\n",
+                                r,
+                                rank_runtimes[r],
+                                versions[DSTM_PROFILE_VERSION_CREATED],
+                                versions[DSTM_PROFILE_VERSION_DESTROYED],
+                                versions[DSTM_PROFILE_VERSION_ACTIVE_MAX],
+                                total_calls,
+                                calls[DSTM_PROFILE_MPI_SEND],
+                                calls[DSTM_PROFILE_MPI_ISEND],
+                                calls[DSTM_PROFILE_MPI_RECV],
+                                calls[DSTM_PROFILE_MPI_IRECV],
+                                calls[DSTM_PROFILE_MPI_ALLGATHER],
+                                calls[DSTM_PROFILE_MPI_ALLREDUCE],
+                                calls[DSTM_PROFILE_MPI_BARRIER],
+                                total_bytes,
+                                bytes[DSTM_PROFILE_MPI_SEND],
+                                bytes[DSTM_PROFILE_MPI_ISEND],
+                                bytes[DSTM_PROFILE_MPI_RECV],
+                                bytes[DSTM_PROFILE_MPI_IRECV],
+                                bytes[DSTM_PROFILE_MPI_ALLGATHER],
+                                bytes[DSTM_PROFILE_MPI_ALLREDUCE],
+                                bytes[DSTM_PROFILE_MPI_BARRIER]);
+                }
+        }
+
+        free(rank_calls);
+        free(rank_bytes);
+        free(rank_versions);
+        free(rank_runtimes);
+}
+
+void dstm_profile_log_printf(const char *file,
+                             const char *func,
+                             unsigned int line,
+                             const char *format,
+                             ...)
+{
+        va_list ap;
+        FILE *fd = dstm_log_fd != NULL ? dstm_log_fd : stderr;
+        int rank = dstm_global_context.rank;
+        int world_size = dstm_global_context.world_size;
+
+        if (!dstm_profile_enabled)
+                return;
+
+        /*
+         * This deliberately does not inspect dstm_log_level. "profile" is
+         * an independently enabled output category, not a log priority.
+         */
+        fprintf(fd, "dstm:\tprofile:%d/%d:\t", rank, world_size);
+
+        /*
+         * Match ordinary logging's additional source context in debug mode,
+         * without making profile emission depend on that mode.
+         */
+        if (dstm_log_level == DSTM_LOG_DEBUG)
+                fprintf(fd, "%s:\t%s:\t%u:\t", file, func, line);
+
+        va_start(ap, format);
+        vfprintf(fd, format, ap);
+        va_end(ap);
+}

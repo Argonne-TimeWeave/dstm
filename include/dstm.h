@@ -160,6 +160,23 @@ extern int dstm_log_level;
 	} while (0)
 
 /*******************************************************************************
+ * Profiling
+ ******************************************************************************/
+
+/**
+ * Enable or disable DSTM session profiling.
+ *
+ * Profiling is disabled by default. When enabled, each dstm_start/dstm_fini
+ * session collects and prints per-rank runtime, MPI communication, and
+ * version-lifetime statistics. All ranks participating in a DSTM session must 
+ * set the same value before calling dstm_start. 
+ *
+ * @param enabled zero to disable profiling, nonzero to enable it
+ * @return DSTM_SUCCESS
+ */
+int dstm_profile_set_enabled(int enabled);
+
+/*******************************************************************************
  * Distances
  ******************************************************************************/
 
