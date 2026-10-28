@@ -326,6 +326,11 @@ Qed.
 
 Definition finished (c : config) := map_Forall (λ _ '(is, _), is = []) (fst c).
 
+(* This would also be an interesting property to prove on the status_semantics, which uses a more concrete
+   scheduling strategy. *)
+Definition deadlock_free (init : config) :=
+  forall state, rtc step init state -> finished state \/ exists state', step state state'.
+
 End semantics.
 
 (* Examples 
@@ -366,11 +371,11 @@ Proof.
     destruct Hi as [Hij | Hi].
     + subst j.
       cbn.
-      rewrite lookup_insert.
+      rewrite lookup_insert_eq.
       reflexivity.
     + cbn.
       destruct (decide (j = i)) as [-> | Hne].
-      * rewrite lookup_insert.
+      * rewrite lookup_insert_eq.
         reflexivity.
       * rewrite lookup_insert_ne; last exact Hne.
         apply IH.
@@ -728,7 +733,7 @@ Proof.
   - lia.
   - rewrite ring_first_np_S.
     destruct (Nat.eq_dec i k) as [-> | Hne].
-    + apply lookup_insert.
+    + apply lookup_insert_eq.
     + transitivity (ring_first_np n k !! i).
       * apply lookup_insert_ne.
         lia.
@@ -841,7 +846,7 @@ Proof.
   - lia.
   - rewrite ring_first_mem_S.
     destruct (Nat.eq_dec i k) as [-> | Hne].
-    + apply lookup_insert.
+    + apply lookup_insert_eq.
     + transitivity
         (ring_first_mem n k !! (((i + 1) `mod` n), 1)).
       * apply lookup_insert_ne.
@@ -1000,7 +1005,7 @@ Proof.
   - lia.
   - rewrite ring_second_np_S.
     destruct (Nat.eq_dec i k) as [-> | Hne].
-    + apply lookup_insert.
+    + apply lookup_insert_eq.
     + transitivity (ring_second_np n k !! i).
       * apply lookup_insert_ne.
         lia.
@@ -1303,7 +1308,7 @@ Proof.
   - lia.
   - rewrite ring_readable_mem_S.
     destruct (Nat.eq_dec i k) as [-> | Hne].
-    + apply lookup_insert.
+    + apply lookup_insert_eq.
     + transitivity (ring_readable_mem n k !! (i, 1)).
       * apply lookup_insert_ne.
         intro Hkeys.
@@ -1385,7 +1390,7 @@ Proof.
   - lia.
   - rewrite ring_final_np_S.
     destruct (Nat.eq_dec i k) as [-> | Hne].
-    + apply lookup_insert.
+    + apply lookup_insert_eq.
     + transitivity (ring_final_np n k !! i).
       * apply lookup_insert_ne.
         lia.
@@ -1571,3 +1576,13 @@ Abort.
 End status_semantics.
 
 (* further refinement: travel time between nodes, and its relationship to read/write limits *)
+
+(* Properties:
+1. A valid program admits a schedule under which it terminates.
+2. Anything that can be expressed with conservative synchronization can be expressed in DSTM.
+   (only one live timestamp at a time; write syntax and semantics, a translation function, and prove
+    that the translation preserves semantics)
+3. Programs using the push model/pull model won't deadlock.
+4. The status semantics correctly implements the more abstract semantics (which makes locations Readable
+   precisely when it needs to).
+*)
