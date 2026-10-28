@@ -11,6 +11,7 @@ LDADD = $(top_builddir)/libdstm.la
 noinst_PROGRAMS = airports
 
 airports_SOURCES = \
+    ../../mpi_wrap.c \
 	airport.c \
     airport.h \
     main.c

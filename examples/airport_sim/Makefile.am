@@ -1,1 +1,1 @@
-SUBDIRS = simple_dstm graph_dstm
+SUBDIRS = simple_dstm graph_dstm queue_dstm
