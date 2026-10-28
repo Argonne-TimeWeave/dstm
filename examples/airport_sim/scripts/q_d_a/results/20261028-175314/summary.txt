@@ -1,0 +1,75 @@
+host:         cascade10
+date:         2026-10-28T17:53:14+00:00
+job id:       1012236
+alloc source: COBALT_NODEFILE  (8 nodes, using <= 8)
+nodefile:     /var/tmp/cobalt.1012236
+nodes:        cascade08 cascade09 cascade10 cascade11 cascade12 cascade13 cascade14 cascade15
+launcher:     mpirun [openmpi] 
+mpi prefix:   /soft/libraries/mpi/openmpi/4.1.1
+forwarded:    LD_LIBRARY_PATH PATH
+placement:    pack   max ppn 32
+darray exe:   /home/ncassarino/dstm/examples/airport_sim/simple_dstm/airports
+dgraph exe:   /home/ncassarino/dstm/examples/airport_sim/graph_dstm/airports
+dqueue exe:   /home/ncassarino/dstm/examples/airport_sim/queue_dstm/airports
+modes:        weak strong
+impls:        darray graph queue    variants: base
+weak ladder:  16:1:16 64:2:32 256:8:32
+strong ladr:  16:1:16 32:1:32 64:2:32 128:4:32 256:8:32
+na/rank:      256 (weak)   total: 16384 (strong)
+cap/edge:     8  (GATE/queue cap = cap/edge * na)
+planes:       4    timesteps: 512    reps: 3
+timeout:      600s
+
+===== weak scaling (median of 3 reps) =====
+impl     variant     ranks   layout      na    total  elapsed(s)       ts/s   speedup      eff
+-------------------------------------------------------------------------------------------------
+darray   base           16     1x16     256     4096      0.2251    2274.74     1.00x     100%
+darray   base           64     2x32     256    16384      0.6610     774.54     0.34x      34%
+darray   base          256     8x32     256    65536      1.0759     475.87     0.21x      21%
+
+graph    base           16     1x16     256     4096      0.6955     736.20     1.00x     100%
+graph    base           64     2x32     256    16384      1.1292     453.42     0.62x      62%
+graph    base          256     8x32     256    65536      1.9589     261.37     0.36x      36%
+
+queue    base           16     1x16     256     4096      0.1165    4395.66     1.00x     100%
+queue    base           64     2x32     256    16384      0.3337    1534.47     0.35x      35%
+queue    base          256     8x32     256    65536      1.1000     465.46     0.11x      11%
+
+  head to head: median elapsed(s), base variant.  'best' = fastest backend.
+   ranks   layout       darray       dgraph       dqueue   best    
+      16     1x16       0.2251       0.6955       0.1165   dqueue  
+      64     2x32       0.6610       1.1292       0.3337   dqueue  
+     256     8x32       1.0759       1.9589       1.1000   darray  
+
+===== strong scaling (median of 3 reps) =====
+impl     variant     ranks   layout      na    total  elapsed(s)       ts/s   speedup      eff
+-------------------------------------------------------------------------------------------------
+darray   base           16     1x16    1024    16384      0.5225     979.89     1.00x     100%
+darray   base           32     1x32     512    16384      0.4619    1108.58     1.13x      57%
+darray   base           64     2x32     256    16384      0.6434     795.76     0.81x      20%
+darray   base          128     4x32     128    16384      0.6818     750.91     0.77x      10%
+darray   base          256     8x32      64    16384      1.0122     505.83     0.52x       3%
+
+graph    base           16     1x16    1024    16384      9.2782      55.18     1.00x     100%
+graph    base           32     1x32     512    16384      2.9115     175.86     3.19x     159%
+graph    base           64     2x32     256    16384      1.1296     453.26     8.21x     205%
+graph    base          128     4x32     128    16384      0.7061     725.14    13.14x     164%
+graph    base          256     8x32      64    16384      0.5258     973.69    17.65x     110%
+
+queue    base           16     1x16    1024    16384      0.2771    1847.65     1.00x     100%
+queue    base           32     1x32     512    16384      0.3286    1558.25     0.84x      42%
+queue    base           64     2x32     256    16384      0.3335    1535.19     0.83x      21%
+queue    base          128     4x32     128    16384      0.3915    1307.63     0.71x       9%
+queue    base          256     8x32      64    16384      0.2716    1885.17     1.02x       6%
+
+  head to head: median elapsed(s), base variant.  'best' = fastest backend.
+   ranks   layout       darray       dgraph       dqueue   best    
+      16     1x16       0.5225       9.2782       0.2771   dqueue  
+      32     1x32       0.4619       2.9115       0.3286   dqueue  
+      64     2x32       0.6434       1.1296       0.3335   dqueue  
+     128     4x32       0.6818       0.7061       0.3915   dqueue  
+     256     8x32       1.0122       0.5258       0.2716   dqueue  
+
+runs recorded:           72
+failed:                  0  (timeouts: 0, launcher: 0)
+conservation mismatches: 0

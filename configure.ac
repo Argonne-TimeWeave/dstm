@@ -116,6 +116,7 @@ AC_CONFIG_FILES([Makefile
          examples/airport_sim/Makefile
          examples/airport_sim/simple_dstm/Makefile
          examples/airport_sim/graph_dstm/Makefile
+         examples/airport_sim/queue_dstm/Makefile
          examples/zombies/Makefile
          examples/zombies/dstm_zombies/Makefile
          examples/zombies/mpi_zombies/Makefile
