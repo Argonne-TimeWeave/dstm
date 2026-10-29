@@ -88,3 +88,6 @@ __pycache__
 
 # tooling
 /.cache*
+
+*.rankfile
+*.gif
