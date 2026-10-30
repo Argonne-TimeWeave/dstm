@@ -1591,3 +1591,49 @@ End status_semantics.
 4. The status semantics correctly implements the more abstract semantics (which makes locations Readable
    precisely when it needs to).
 *)
+
+(* Here, valid means push (remote write at t+1, local read at t) or pull (local write at t,
+   remote read at t-1).  Deadlock freedom means every reachable state is finished or can step.
+   Multiple writes may overwrite a Writeable version.  The implementation broadcasts advancing
+   logical times as heartbeats and uses per-region neighbor times plus distance to close versions. *)
+
+Definition push_instr
+    (owner : loc -> node_id) (G : comm_graph)
+    (issuer : node_id) (op : instr) : Prop :=
+  operation_allowed owner issuer op G /\
+  match op with
+  | Load issued_at _ l target_at =>
+      owner l = issuer /\ target_at = issued_at
+  | Store issued_at l target_at _ =>
+      owner l <> issuer /\ target_at = S issued_at
+  end.
+
+Definition pull_instr
+    (owner : loc -> node_id) (G : comm_graph)
+    (issuer : node_id) (op : instr) : Prop :=
+  operation_allowed owner issuer op G /\
+  match op with
+  | Load issued_at _ l target_at =>
+      owner l <> issuer /\ issued_at = S target_at
+  | Store issued_at l target_at _ =>
+      owner l = issuer /\ target_at = issued_at
+  end.
+
+Definition push_program
+    (owner : loc -> node_id) (G : comm_graph)
+    (prog : gmap node_id (list instr)) : Prop :=
+  map_Forall (λ issuer ops, Forall (push_instr owner G issuer) ops) prog.
+
+Definition pull_program
+    (owner : loc -> node_id) (G : comm_graph)
+    (prog : gmap node_id (list instr)) : Prop :=
+  map_Forall (λ issuer ops, Forall (pull_instr owner G issuer) ops) prog.
+
+Definition valid_program
+    (owner : loc -> node_id) (G : comm_graph)
+    (prog : gmap node_id (list instr)) : Prop :=
+  push_program owner G prog \/ pull_program owner G prog.
+
+(* TODO: define heartbeats as monotonic logical-time frontiers; prove that reported times
+   bound future instructions; generalize push/pull from one step to channel lag d; then prove
+   that heartbeat time plus d makes the status readability test imply abstract visibility. *)
