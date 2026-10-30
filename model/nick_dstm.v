@@ -2,6 +2,11 @@ Require Import String.
 Require Import Lia.
 Require Import stdpp.gmap.
 
+Module StdppCompat.
+  Notation lookup_insert_eq := lookup_insert.
+End StdppCompat.
+Import StdppCompat.
+
 Definition var := string.
 Definition loc := nat.
 Definition timestamp := nat.
@@ -371,11 +376,11 @@ Proof.
     destruct Hi as [Hij | Hi].
     + subst j.
       cbn.
-      rewrite lookup_insert.
+      rewrite lookup_insert_eq.
       reflexivity.
     + cbn.
       destruct (decide (j = i)) as [-> | Hne].
-      * rewrite lookup_insert.
+      * rewrite lookup_insert_eq.
         reflexivity.
       * rewrite lookup_insert_ne; last exact Hne.
         apply IH.
@@ -733,7 +738,7 @@ Proof.
   - lia.
   - rewrite ring_first_np_S.
     destruct (Nat.eq_dec i k) as [-> | Hne].
-    + apply lookup_insert.
+    + apply lookup_insert_eq.
     + transitivity (ring_first_np n k !! i).
       * apply lookup_insert_ne.
         lia.
@@ -846,7 +851,7 @@ Proof.
   - lia.
   - rewrite ring_first_mem_S.
     destruct (Nat.eq_dec i k) as [-> | Hne].
-    + apply lookup_insert.
+    + apply lookup_insert_eq.
     + transitivity
         (ring_first_mem n k !! (((i + 1) `mod` n), 1)).
       * apply lookup_insert_ne.
@@ -1005,7 +1010,7 @@ Proof.
   - lia.
   - rewrite ring_second_np_S.
     destruct (Nat.eq_dec i k) as [-> | Hne].
-    + apply lookup_insert.
+    + apply lookup_insert_eq.
     + transitivity (ring_second_np n k !! i).
       * apply lookup_insert_ne.
         lia.
@@ -1308,7 +1313,7 @@ Proof.
   - lia.
   - rewrite ring_readable_mem_S.
     destruct (Nat.eq_dec i k) as [-> | Hne].
-    + apply lookup_insert.
+    + apply lookup_insert_eq.
     + transitivity (ring_readable_mem n k !! (i, 1)).
       * apply lookup_insert_ne.
         intro Hkeys.
@@ -1390,7 +1395,7 @@ Proof.
   - lia.
   - rewrite ring_final_np_S.
     destruct (Nat.eq_dec i k) as [-> | Hne].
-    + apply lookup_insert.
+    + apply lookup_insert_eq.
     + transitivity (ring_final_np n k !! i).
       * apply lookup_insert_ne.
         lia.
