@@ -8,15 +8,13 @@ on:
 env:
   VERBOSE: 1
 jobs:
-  base-install: &base-job
+  generic:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - run: sudo apt update
       - run: sudo apt install -y gcc make autoconf automake libtool pkg-config mpich libjansson-dev check bats
       - uses: actions/checkout@v7
-  generic: *base-job
-    steps:
       - name: configure
         run: |
           ./autogen.sh
