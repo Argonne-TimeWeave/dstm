@@ -26,7 +26,7 @@ START_TEST(test_fill_hdr_put)
 {
 	dstm_msg_t m;
 	memset(&m, 0, sizeof(m));
-	int rc = dstm_msg_fill_hdr(&m, DSTM_MSG_TYPE_PUT, 10, 2, 0, 1);
+	int rc = dstm_msg_fill_hdr(&m, DSTM_MSG_TYPE_PUT, 10, 2, 0, 1, 4);
 	ck_assert_int_eq(rc, DSTM_SUCCESS);
 	ck_assert_int_eq(m.header.type, DSTM_MSG_TYPE_PUT);
 	ck_assert_int_eq(m.header.dst_rank, 0);
@@ -40,7 +40,7 @@ START_TEST(test_fill_hdr_getreq)
 {
 	dstm_msg_t m;
 	memset(&m, 0, sizeof(m));
-	int rc = dstm_msg_fill_hdr(&m, DSTM_MSG_TYPE_GET_REQ, 42, 1, 3, 7);
+	int rc = dstm_msg_fill_hdr(&m, DSTM_MSG_TYPE_GET_REQ, 42, 1, 3, 7, 5);
 	ck_assert_int_eq(rc, DSTM_SUCCESS);
 	ck_assert_int_eq(m.header.type, DSTM_MSG_TYPE_GET_REQ);
 	ck_assert_int_eq(m.header.dst_rank, 3);
@@ -54,7 +54,7 @@ START_TEST(test_fill_hdr_getrep)
 {
 	dstm_msg_t m;
 	memset(&m, 0, sizeof(m));
-	int rc = dstm_msg_fill_hdr(&m, DSTM_MSG_TYPE_GET_REP, 99, 5, 2, 0);
+	int rc = dstm_msg_fill_hdr(&m, DSTM_MSG_TYPE_GET_REP, 99, 5, 2, 0, 6);
 	ck_assert_int_eq(rc, DSTM_SUCCESS);
 	ck_assert_int_eq(m.header.type, DSTM_MSG_TYPE_GET_REP);
 	ck_assert_int_eq(m.header.dst_rank, 2);
@@ -69,7 +69,7 @@ START_TEST(test_fill_hdr_invalid_type_max)
 {
 	dstm_msg_t m;
 	memset(&m, 0, sizeof(m));
-	int rc = dstm_msg_fill_hdr(&m, DSTM_MSG_TYPE_MAX, 0, 0, 0, 0);
+	int rc = dstm_msg_fill_hdr(&m, DSTM_MSG_TYPE_MAX, 0, 0, 0, 0, 0);
 	ck_assert_int_eq(rc, -DSTM_EINVAL);
 	ck_assert_int_eq(dstm_errno, DSTM_EINVAL);
 }
@@ -80,7 +80,7 @@ START_TEST(test_fill_hdr_invalid_type_negative)
 {
 	dstm_msg_t m;
 	memset(&m, 0, sizeof(m));
-	int rc = dstm_msg_fill_hdr(&m, -1, 0, 0, 0, 0);
+	int rc = dstm_msg_fill_hdr(&m, -1, 0, 0, 0, 0, 0);
 	ck_assert_int_eq(rc, -DSTM_EINVAL);
 	ck_assert_int_eq(dstm_errno, DSTM_EINVAL);
 }
