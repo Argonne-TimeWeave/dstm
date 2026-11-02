@@ -106,6 +106,8 @@ struct dstm_request_s {
 	 * dstm_request_destroy.
 	 */
 	void *buf;
+    int op;
+    int datatype;
 	/* When set, dstm_do_progress will not destroy this request on
 	 * completion; the caller that set this flag is responsible for calling
 	 * dstm_request_destroy once it has observed DONE status.

@@ -147,3 +147,11 @@ bats_require_minimum_version 1.5.0
 @test "mpirun -n 8 mini_airport_q" {
         run -0 --separate-stderr timeout --preserve-status 5 mpirun -n 8 $LOG_COMPILER $LOG_FLAGS $ABS_TOP_BUILDDIR/tests/mpi/mini_airport_q
 }
+
+@test "mpirun -n 2 accumulate" {
+        run -0 --separate-stderr timeout --preserve-status 5 mpirun -n 2 $LOG_COMPILER $LOG_FLAGS $ABS_TOP_BUILDDIR/tests/mpi/accumulate
+}
+
+@test "mpirun -n 4 accumulate" {
+        run -0 --separate-stderr timeout --preserve-status 5 mpirun -n 4 $LOG_COMPILER $LOG_FLAGS $ABS_TOP_BUILDDIR/tests/mpi/accumulate
+}

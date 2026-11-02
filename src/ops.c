@@ -338,6 +338,74 @@ static int dstm_request_progress_in_put(dstm_request_t *req)
 	return 0;
 }
 
+/* ---------------------------------------------------------------------------
+ * Elementwise reduction kernel for dstm_accumulate.
+ *
+ * Applies  dst[i] = op(dst[i], src[i])  for count elements of `dt`, in
+ * place, on the owning rank's version buffer.  Every op is associative +
+ * commutative so the fold order (MPI arrival order) does not matter.
+ * ------------------------------------------------------------------------- */
+
+#define DSTM_ACC_LOOP(CTYPE, OPEXPR)                                           \
+	do {                                                                   \
+		CTYPE       *d = (CTYPE *)dst;                                 \
+		const CTYPE *s = (const CTYPE *)src;                           \
+		for (size_t i = 0; i < count; i++) {                           \
+			CTYPE a = d[i], b = s[i];                             \
+			d[i] = (OPEXPR);                                       \
+		}                                                              \
+	} while (0)
+
+#define DSTM_ACC_DISPATCH(CTYPE)                                               \
+	do {                                                                   \
+		switch (op) {                                                  \
+		case DSTM_OP_SUM:  DSTM_ACC_LOOP(CTYPE, (CTYPE)(a + b)); break;\
+		case DSTM_OP_PROD: DSTM_ACC_LOOP(CTYPE, (CTYPE)(a * b)); break;\
+		case DSTM_OP_MIN:  DSTM_ACC_LOOP(CTYPE, (a < b ? a : b)); break;\
+		case DSTM_OP_MAX:  DSTM_ACC_LOOP(CTYPE, (a > b ? a : b)); break;\
+		default: return -DSTM_EINVAL;                                  \
+		}                                                              \
+	} while (0)
+
+/* Bitwise ops only make sense on the integer datatypes. */
+#define DSTM_ACC_DISPATCH_INT(CTYPE)                                           \
+	do {                                                                   \
+		switch (op) {                                                  \
+		case DSTM_OP_SUM:  DSTM_ACC_LOOP(CTYPE, (CTYPE)(a + b)); break;\
+		case DSTM_OP_PROD: DSTM_ACC_LOOP(CTYPE, (CTYPE)(a * b)); break;\
+		case DSTM_OP_MIN:  DSTM_ACC_LOOP(CTYPE, (a < b ? a : b)); break;\
+		case DSTM_OP_MAX:  DSTM_ACC_LOOP(CTYPE, (a > b ? a : b)); break;\
+		case DSTM_OP_BOR:  DSTM_ACC_LOOP(CTYPE, (CTYPE)(a | b)); break;\
+		case DSTM_OP_BAND: DSTM_ACC_LOOP(CTYPE, (CTYPE)(a & b)); break;\
+		case DSTM_OP_BXOR: DSTM_ACC_LOOP(CTYPE, (CTYPE)(a ^ b)); break;\
+		default: return -DSTM_EINVAL;                                  \
+		}                                                              \
+	} while (0)
+
+static int dstm_reduce_apply(void *dst, const void *src, size_t count,
+                             int datatype, int op)
+{
+	switch (datatype) {
+	case DSTM_DT_INT32:  DSTM_ACC_DISPATCH_INT(int32_t);  return 0;
+	case DSTM_DT_INT64:  DSTM_ACC_DISPATCH_INT(int64_t);  return 0;
+	case DSTM_DT_UINT32: DSTM_ACC_DISPATCH_INT(uint32_t); return 0;
+	case DSTM_DT_UINT64: DSTM_ACC_DISPATCH_INT(uint64_t); return 0;
+	case DSTM_DT_FLOAT:  DSTM_ACC_DISPATCH(float);        return 0;
+	case DSTM_DT_DOUBLE: DSTM_ACC_DISPATCH(double);       return 0;
+	default: return -DSTM_EINVAL;
+	}
+}
+
+/* Width of one element for each datatype, for count/overflow checks. */
+static size_t dstm_datatype_size(int datatype)
+{
+	switch (datatype) {
+	case DSTM_DT_INT32:  case DSTM_DT_UINT32: case DSTM_DT_FLOAT:  return 4;
+	case DSTM_DT_INT64:  case DSTM_DT_UINT64: case DSTM_DT_DOUBLE: return 8;
+	default: return 0;
+	}
+}
+
 /* Shared accumulate helper: append req->buf (req->size bytes) into the
  * target version's slot at req->dst.offset, which is laid out as
  * [ uint64_t byte_count | accumulated bytes ].  Creates the version on
@@ -362,30 +430,56 @@ static void dstm_region_append_apply(dstm_region_t *rg, dstm_request_t *req,
 		abort();
 	}
 
-	/* Slot base within the version buffer. */
-	char    *slot  = (char *)v->buffer + req->dst.offset;
-	uint64_t count;
-	memcpy(&count, slot, sizeof(uint64_t));
+	char *slot = (char *)v->buffer + req->dst.offset;
 
-	/* Overflow guard: the accumulated region must stay inside the
-	 * region buffer.  The data-structure layer (dqueue) bound-checks
-	 * before issuing, but a corrupt or oversized producer must not be
-	 * allowed to scribble past the region. */
-	size_t head    = (size_t)req->dst.offset + sizeof(uint64_t);
-	size_t written = (size_t)count;
-	if (head + written + req->size > rg->size) {
-		dstm_log_error(
-		        "append overflow on rank %d: slot at offset %td would "
-		        "exceed region size %zu (count=%" PRIu64
-		        ", add=%zu)\n",
-		        dstm_global_context.rank, req->dst.offset, rg->size,
-		        count, req->size);
-		abort();
+	if (req->op == DSTM_OP_APPEND) {
+		/* ---- byte-concatenation path (dqueue / dstm_append) ---- */
+		uint64_t count;
+		memcpy(&count, slot, sizeof(uint64_t));
+
+		size_t head    = (size_t)req->dst.offset + sizeof(uint64_t);
+		size_t written = (size_t)count;
+		if (head + written + req->size > rg->size) {
+			dstm_log_error(
+			        "append overflow on rank %d: slot at offset %td "
+			        "would exceed region size %zu (count=%" PRIu64
+			        ", add=%zu)\n",
+			        dstm_global_context.rank, req->dst.offset,
+			        rg->size, count, req->size);
+			abort();
+		}
+		memcpy(slot + sizeof(uint64_t) + written, req->buf, req->size);
+		count += (uint64_t)req->size;
+		memcpy(slot, &count, sizeof(uint64_t));
+		return;
 	}
 
-	memcpy(slot + sizeof(uint64_t) + written, req->buf, req->size);
-	count += (uint64_t)req->size;
-	memcpy(slot, &count, sizeof(uint64_t));
+	/* ---- fixed-size elementwise reduction path (dstm_accumulate) ---- */
+	{
+		size_t dt = dstm_datatype_size(req->datatype);
+		if (dt == 0 || (req->size % dt) != 0) {
+			dstm_log_error(
+			        "accumulate on rank %d: size %zu not a multiple "
+			        "of datatype width %zu\n",
+			        dstm_global_context.rank, req->size, dt);
+			abort();
+		}
+		if ((size_t)req->dst.offset + req->size > rg->size) {
+			dstm_log_error(
+			        "accumulate overflow on rank %d: cell at offset "
+			        "%td + %zu exceeds region size %zu\n",
+			        dstm_global_context.rank, req->dst.offset,
+			        req->size, rg->size);
+			abort();
+		}
+		if (dstm_reduce_apply(slot, req->buf, req->size / dt,
+		                      req->datatype, req->op) != 0) {
+			dstm_log_error("accumulate on rank %d: bad op %d / dt %d\n",
+			               dstm_global_context.rank, req->op,
+			               req->datatype);
+			abort();
+		}
+	}
 }
 
 static int dstm_request_progress_local_append(dstm_request_t *req)
@@ -637,6 +731,8 @@ static void dstm_handle_incoming_msg(MPI_Status status)
 		                    m.header.delta, m.header.dst_rank,
 		                    m.header.region_id, dptr,
 		                    (dstm_ptr_t){0, 0}, m.u.putget.size);
+        nr->op = m.u.putget.op;
+        nr->datatype = m.u.putget.datatype;
 		nr->buf = malloc(m.u.putget.size);
 		assert(nr->buf != NULL);
 		memcpy(nr->buf, m.data, m.u.putget.size);
@@ -981,31 +1077,107 @@ int dstm_append(int rank,
 	}
 
 	dstm_request_t *req;
-	if (rank == dstm_global_context.rank) {
-		/* Local append: buffer the payload so the caller's buffer
-		 * can be reused or freed immediately. */
+    if (rank == dstm_global_context.rank) {
 		dstm_request_create(&req, DSTM_REQUEST_TYPE_LOCAL_APPEND, -1,
 		                    time, delta, rank, region_id, dst,
 		                    (dstm_ptr_t){0, 0}, size);
+		req->op       = DSTM_OP_APPEND;
+		req->datatype = DSTM_DT_INT32;   /* unused on append path */
 		req->buf = malloc(size);
 		assert(req->buf != NULL);
 		memcpy(req->buf, src, size);
 	} else {
-		/* Outgoing append: async send, APPEND message type. */
 		int tag = dstm_request_new_tag();
 		dstm_request_create(&req, DSTM_REQUEST_TYPE_OUT_APPEND, tag,
 		                    time, delta, rank, region_id, dst,
 		                    (dstm_ptr_t){0, 0}, size);
+		req->op       = DSTM_OP_APPEND;
+		req->datatype = DSTM_DT_INT32;
 		req->buf = malloc(size);
 		assert(req->buf != NULL);
 		memcpy(req->buf, src, size);
-
 		dstm_msg_fill_hdr(&req->msg, DSTM_MSG_TYPE_APPEND, time, delta,
 		                  rank, dstm_global_context.rank, region_id);
 		dstm_msg_fill_payload(&req->msg, dst, req->buf, size);
+		req->msg.u.putget.op       = DSTM_OP_APPEND;
+		req->msg.u.putget.datatype = DSTM_DT_INT32;
 		dstm_msg_isend(&req->msg, tag);
 		req->status = DSTM_REQUEST_STATUS_ISEND;
 	}
+	DL_INSERT_INORDER(requests, req, dstm_request_cmp_departure);
+	return 0;
+}
+
+int dstm_accumulate(int rank,
+                    int region_id,
+                    dstm_time_t time,
+                    dstm_time_t delta,
+                    dstm_ptr_t dst,
+                    void *src,
+                    size_t count,
+                    dstm_datatype_t datatype,
+                    dstm_reduce_op_t op)
+{
+	dstm_log_info("accumulate: %d, %d, %" PRId64 ", %" PRId64
+	              ", %d:%td, %p, count=%zu, dt=%d, op=%d\n",
+	              rank, region_id, time, delta, dst.region, dst.offset,
+	              src, count, (int)datatype, (int)op);
+
+	if (region_id < 0 || region_id >= DSTM_MAX_REGIONS)
+		return -DSTM_EINVAL;
+	if (src == NULL)
+		return -DSTM_EINVAL;
+	if (region_id != dst.region)
+		return -DSTM_EINVAL;
+	if (delta < 0)
+		return -DSTM_EINVAL;
+	if (op == DSTM_OP_APPEND || op <= 0 || op >= DSTM_OP_MAX_SENTINEL)
+		return -DSTM_EINVAL;
+	if (datatype < 0 || datatype >= DSTM_DT_MAX_SENTINEL)
+		return -DSTM_EINVAL;
+
+	size_t dt = dstm_datatype_size(datatype);
+	if (dt == 0)
+		return -DSTM_EINVAL;
+	size_t size = count * dt;
+
+	if (delta == 0 && rank != dstm_global_context.rank)
+		return -DSTM_EDOM;
+
+	if (dstm_global_context.local_heartbeat_time < time) {
+		dstm_region_send_heartbeat_to_all(time);
+		dstm_global_context.local_heartbeat_time = time;
+	}
+
+	dstm_request_t *req;
+	if (rank == dstm_global_context.rank) {
+		dstm_request_create(&req, DSTM_REQUEST_TYPE_LOCAL_APPEND, -1,
+		                    time, delta, rank, region_id, dst,
+		                    (dstm_ptr_t){0, 0}, size);
+		req->op       = op;
+		req->datatype = datatype;
+		req->buf = malloc(size);
+		assert(req->buf != NULL);
+		memcpy(req->buf, src, size);
+	} else {
+		int tag = dstm_request_new_tag();
+		dstm_request_create(&req, DSTM_REQUEST_TYPE_OUT_APPEND, tag,
+		                    time, delta, rank, region_id, dst,
+		                    (dstm_ptr_t){0, 0}, size);
+		req->op       = op;
+		req->datatype = datatype;
+		req->buf = malloc(size);
+		assert(req->buf != NULL);
+		memcpy(req->buf, src, size);
+		dstm_msg_fill_hdr(&req->msg, DSTM_MSG_TYPE_APPEND, time, delta,
+		                  rank, dstm_global_context.rank, region_id);
+		dstm_msg_fill_payload(&req->msg, dst, req->buf, size);
+		req->msg.u.putget.op       = (int)op;
+		req->msg.u.putget.datatype = (int)datatype;
+		dstm_msg_isend(&req->msg, tag);
+		req->status = DSTM_REQUEST_STATUS_ISEND;
+	}
+
 	DL_INSERT_INORDER(requests, req, dstm_request_cmp_departure);
 	return 0;
 }

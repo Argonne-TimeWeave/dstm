@@ -25,6 +25,7 @@ COMPILED_TESTS = \
 		darray \
 		distances \
 		destroys \
+        accumulate \
 		get_or_default \
         init_comm \
         init_comm_world \

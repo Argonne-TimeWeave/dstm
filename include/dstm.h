@@ -350,6 +350,39 @@ void dstm_distance_destroy(dstm_distance_t **dist);
 typedef int64_t dstm_time_t;
 
 /*******************************************************************************
+ * ACCUMULATE / REDUCE TYPES
+ *
+ * Shared by dstm_accumulate and the darray / dgraph *_accumulate wrappers.
+ * Defined here (before those declarations) because C has no forward
+ * declaration for a typedef enum: the full definition must precede first use.
+ ******************************************************************************/
+
+/* Reduction operators.  DSTM_OP_APPEND is reserved for dstm_append's
+ * byte-concatenation path and must not be passed to dstm_accumulate. */
+typedef enum {
+	DSTM_OP_APPEND = 0,   /* internal: byte concat (dstm_append only) */
+	DSTM_OP_SUM,
+	DSTM_OP_PROD,
+	DSTM_OP_MIN,
+	DSTM_OP_MAX,
+	DSTM_OP_BOR,
+	DSTM_OP_BAND,
+	DSTM_OP_BXOR,
+	DSTM_OP_MAX_SENTINEL
+} dstm_reduce_op_t;
+
+/* Element datatype the operator is applied over. */
+typedef enum {
+	DSTM_DT_INT32 = 0,
+	DSTM_DT_INT64,
+	DSTM_DT_UINT32,
+	DSTM_DT_UINT64,
+	DSTM_DT_FLOAT,
+	DSTM_DT_DOUBLE,
+	DSTM_DT_MAX_SENTINEL
+} dstm_datatype_t;
+
+/*******************************************************************************
  * DSTM START/FINISH
  ******************************************************************************/
 
@@ -543,6 +576,23 @@ int dstm_darray_put(dstm_darray_t *darray,
                     void *src,
                     dstm_time_t time,
                     dstm_time_t delta);
+
+/**
+ * Accumulate @p src onto the element at @p global_index using @p op over
+ * @p datatype, effective at (time + delta).  The element's width must be
+ * an exact multiple of the datatype width; count is element_size/dt_size.
+ *
+ * Same delta/rank invariants as dstm_darray_put.  Many ranks may
+ * accumulate onto the same element at the same effective time; the owner
+ * reduces them in arrival order (order-independent for all supported ops).
+ */
+int dstm_darray_accumulate(dstm_darray_t *darray,
+                           size_t global_index,
+                           void *src,
+                           dstm_time_t time,
+                           dstm_time_t delta,
+                           dstm_datatype_t datatype,
+                           dstm_reduce_op_t op);
 
 /**
  * Read @p count elements from the distributed array at the global
@@ -903,6 +953,20 @@ int dstm_dgraph_vertex_put(dstm_dgraph_t *dgraph,
                            dstm_time_t delta);
 
 /**
+ * Accumulate @p src onto vertex @p vertex_id's state using @p op over
+ * @p datatype, effective at (time + delta).  Mirrors dstm_dgraph_vertex_put
+ * delta/rank rules; the owner reduces concurrent accumulates in arrival
+ * order.  vertex_state_size must be a multiple of the datatype width.
+ */
+int dstm_dgraph_vertex_accumulate(dstm_dgraph_t *dgraph,
+                                  size_t vertex_id,
+                                  void *src,
+                                  dstm_time_t time,
+                                  dstm_time_t delta,
+                                  dstm_datatype_t datatype,
+                                  dstm_reduce_op_t op);
+
+/**
  * Variant of dstm_dgraph_vertex_get that falls back to @p default_value
  * when (time + delta) is strictly negative. Matches
  * dstm_darray_get_or_default.
@@ -953,6 +1017,20 @@ int dstm_dgraph_edge_put(dstm_dgraph_t *dgraph,
                          void *src,
                          dstm_time_t time,
                          dstm_time_t delta);
+
+/**
+ * Accumulate @p src onto edge (@p u, @p v)'s state using @p op over
+ * @p datatype, effective at (time + delta).  Mirrors dstm_dgraph_edge_put
+ * rules; edge_state_size must be a multiple of the datatype width.
+ */
+int dstm_dgraph_edge_accumulate(dstm_dgraph_t *dgraph,
+                                size_t u,
+                                size_t v,
+                                void *src,
+                                dstm_time_t time,
+                                dstm_time_t delta,
+                                dstm_datatype_t datatype,
+                                dstm_reduce_op_t op);
 
 /*******************************************************************************
  * Neighborhood queries
@@ -1414,6 +1492,51 @@ int dstm_append(int rank,
                 dstm_ptr_t dst,
                 void *src,
                 size_t size);
+
+/*******************************************************************************
+ * ACCUMULATE  (fixed-size elementwise reduction onto a version cell)
+ *
+ * Unlike dstm_append (which concatenates bytes into a growing slot),
+ * dstm_accumulate applies an elementwise reduction operator onto a
+ * FIXED-SIZE cell that already lives at dst:
+ *
+ *     cell[i] = op(cell[i], src[i])   for i in [0, count)
+ *
+ * A cell never grows, so many producers can accumulate onto the same
+ * (owner, time + delta, offset) version without overflow.  The reduction
+ * is applied by the OWNING rank in MPI arrival order; every op offered
+ * here is associative+commutative, so the result is order-independent and
+ * therefore deterministic across runs (the key difference from append).
+ *
+ * The cell's starting value is whatever the version buffer holds: a
+ * version nobody has touched reads as zero (calloc'd), which is the
+ * identity for SUM/BOR/BXOR/MAX-on-nonneg.  For MIN/PROD you must seed
+ * the cell (e.g. a put of the identity) at the same effective time
+ * BEFORE any accumulate, exactly like the put-before-get phase rule.
+ ******************************************************************************/
+
+/**
+ * Accumulate @p count elements of @p datatype from @p src onto the cell
+ * at @p dst, hosted on @p rank, effective at (time + delta), using @p op.
+ *
+ * All (time, delta, rank) rules mirror dstm_put / dstm_append:
+ *   - @p region_id must equal @p dst.region.
+ *   - @p delta must be >= 0; @p delta == 0 requires the local rank.
+ *   - the target version must still be WRITABLE when applied.
+ *
+ * @return DSTM_SUCCESS, -DSTM_EINVAL (NULL src, bad region, negative
+ *         delta, bad op/datatype, or op == DSTM_OP_APPEND), -DSTM_EDOM
+ *         (remote with delta == 0), or the underlying transport error.
+ */
+int dstm_accumulate(int rank,
+                    int region_id,
+                    dstm_time_t time,
+                    dstm_time_t delta,
+                    dstm_ptr_t dst,
+                    void *src,
+                    size_t count,
+                    dstm_datatype_t datatype,
+                    dstm_reduce_op_t op);
 
 #ifdef __cplusplus
 }

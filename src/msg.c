@@ -49,13 +49,15 @@ int dstm_msg_init(void)
 	MPI_Type_commit(&dstm_msg_hdr_dt);
 
 	/* dstm_msg_putget_t: region(int), ptr(intptr_t), size(size_t) */
-	MPI_Datatype dstm_msg_putget_sig[3] = {MPI_INT, MPI_AINT, MPI_AINT};
-	int dstm_msg_putget_bl[3] = {1, 1, 1};
-	MPI_Aint dstm_msg_putget_disp[3] = {
+	MPI_Datatype dstm_msg_putget_sig[5] = {MPI_INT, MPI_AINT, MPI_AINT, MPI_INT, MPI_INT};
+	int dstm_msg_putget_bl[5] = {1, 1, 1, 1, 1};
+	MPI_Aint dstm_msg_putget_disp[5] = {
 	        offsetof(dstm_msg_putget_t, ptr.region),
 	        offsetof(dstm_msg_putget_t, ptr.offset),
-	        offsetof(dstm_msg_putget_t, size)};
-	MPI_Type_create_struct(3, dstm_msg_putget_bl, dstm_msg_putget_disp,
+	        offsetof(dstm_msg_putget_t, size), 
+            offsetof(dstm_msg_putget_t, op),
+            offsetof(dstm_msg_putget_t, datatype)};
+	MPI_Type_create_struct(5, dstm_msg_putget_bl, dstm_msg_putget_disp,
 	                       dstm_msg_putget_sig, &dstm_msg_putget_dt);
 	MPI_Type_commit(&dstm_msg_putget_dt);
 
@@ -118,6 +120,8 @@ int dstm_msg_fill_payload(dstm_msg_t *m, dstm_ptr_t ptr, void *src, size_t size)
 {
 	m->u.putget.ptr = ptr;
 	m->u.putget.size = size;
+	m->u.putget.op       = DSTM_OP_APPEND;  /* default; overridden by accumulate */
+	m->u.putget.datatype = DSTM_DT_INT32;
 	/* src may be NULL for messages that carry no payload (GET_REQ).
 	 * When non-NULL it is a non-owning pointer into the request's buf. */
 	m->data = src;

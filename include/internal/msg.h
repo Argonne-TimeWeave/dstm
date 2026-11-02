@@ -57,6 +57,8 @@ typedef struct dstm_msg_hdr_s dstm_msg_hdr_t;
 struct dstm_msg_putget_s {
 	dstm_ptr_t ptr;
 	size_t size;
+	int        op;        /* dstm_reduce_op_t; DSTM_OP_APPEND for append */
+	int        datatype;  /* dstm_datatype_t; ignored when op==APPEND */
 };
 typedef struct dstm_msg_putget_s dstm_msg_putget_t;
 

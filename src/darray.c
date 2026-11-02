@@ -301,6 +301,34 @@ int dstm_darray_put(dstm_darray_t *darray,
 	                darray->element_size);
 }
 
+int dstm_darray_accumulate(dstm_darray_t *darray,
+                           size_t global_index,
+                           void *src,
+                           dstm_time_t time,
+                           dstm_time_t delta,
+                           dstm_datatype_t datatype,
+                           dstm_reduce_op_t op)
+{
+	if (darray == NULL || src == NULL)
+		return -DSTM_EINVAL;
+
+	size_t dt;
+	switch (datatype) {
+	case DSTM_DT_INT32: case DSTM_DT_UINT32: case DSTM_DT_FLOAT:  dt = 4; break;
+	case DSTM_DT_INT64: case DSTM_DT_UINT64: case DSTM_DT_DOUBLE: dt = 8; break;
+	default: return -DSTM_EINVAL;
+	}
+	if ((darray->element_size % dt) != 0)
+		return -DSTM_EINVAL;
+
+	int rank, region;
+	dstm_ptr_t dst;
+	darray_resolve(darray, global_index, &rank, &region, &dst);
+
+	return dstm_accumulate(rank, region, time, delta, dst, src,
+	                       darray->element_size / dt, datatype, op);
+}
+
 int dstm_darray_get_range(dstm_darray_t *darray,
                           const size_t *indices,
                           size_t count,

@@ -1021,6 +1021,37 @@ int dstm_dgraph_vertex_put(dstm_dgraph_t *g, size_t vertex_id, void *src,
                         g->vertex_state_size);
 }
 
+int dstm_dgraph_vertex_accumulate(dstm_dgraph_t *g, size_t vertex_id,
+                                  void *src, dstm_time_t time,
+                                  dstm_time_t delta,
+                                  dstm_datatype_t datatype,
+                                  dstm_reduce_op_t op)
+{
+        if (g == NULL || src == NULL)
+                return -DSTM_EINVAL;
+        if (g->vertex_state_size == 0)
+                return (vertex_id < g->total_vertices)
+                               ? DSTM_SUCCESS : -DSTM_EINVAL;
+
+        size_t dt;
+        switch (datatype) {
+        case DSTM_DT_INT32: case DSTM_DT_UINT32: case DSTM_DT_FLOAT:  dt = 4; break;
+        case DSTM_DT_INT64: case DSTM_DT_UINT64: case DSTM_DT_DOUBLE: dt = 8; break;
+        default: return -DSTM_EINVAL;
+        }
+        if ((g->vertex_state_size % dt) != 0)
+                return -DSTM_EINVAL;
+
+        int rank, region;
+        dstm_ptr_t dst;
+        int rc = resolve_vertex_state(g, vertex_id, &rank, &region, &dst);
+        if (rc != DSTM_SUCCESS)
+                return rc;
+
+        return dstm_accumulate(rank, region, time, delta, dst, src,
+                               g->vertex_state_size / dt, datatype, op);
+}
+
 int dstm_dgraph_vertex_get_or_default(dstm_dgraph_t *g, size_t vertex_id,
                                       void *dst, dstm_time_t time,
                                       dstm_time_t delta,
@@ -1172,6 +1203,40 @@ int dstm_dgraph_edge_put(dstm_dgraph_t *g, size_t u, size_t v, void *src,
 
         return dstm_put(rank, region, time, delta, dst, src,
                         g->edge_state_size);
+}
+
+int dstm_dgraph_edge_accumulate(dstm_dgraph_t *g, size_t u, size_t v,
+                                void *src, dstm_time_t time,
+                                dstm_time_t delta,
+                                dstm_datatype_t datatype,
+                                dstm_reduce_op_t op)
+{
+        if (g == NULL || src == NULL)
+                return -DSTM_EINVAL;
+
+        size_t dt;
+        switch (datatype) {
+        case DSTM_DT_INT32: case DSTM_DT_UINT32: case DSTM_DT_FLOAT:  dt = 4; break;
+        case DSTM_DT_INT64: case DSTM_DT_UINT64: case DSTM_DT_DOUBLE: dt = 8; break;
+        default: return -DSTM_EINVAL;
+        }
+
+        int      rank;
+        intptr_t off;
+        int rc = resolve_edge_state(g, u, v, &rank, &off);
+        if (rc != DSTM_SUCCESS)
+                return rc;
+
+        if (g->edge_state_size == 0)
+                return DSTM_SUCCESS;
+        if ((g->edge_state_size % dt) != 0)
+                return -DSTM_EINVAL;
+
+        int        region = dgraph_region_of(g, rank);
+        dstm_ptr_t dst    = dstm_ptr_make(region, off);
+
+        return dstm_accumulate(rank, region, time, delta, dst, src,
+                               g->edge_state_size / dt, datatype, op);
 }
 
 /* ---------------------------------------------------------------------------
