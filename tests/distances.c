@@ -931,13 +931,35 @@ START_TEST(test_from_matrix_nonzero_diagonal)
 }
 END_TEST
 
-START_TEST(test_from_matrix_negative_entry)
+/* -1 represents a pair of ranks with no edge and is valid. */
+START_TEST(test_from_matrix_no_edge)
 {
 	dstm_distance_t *dist = NULL;
 	int m[4] = {0, -1, 1, 0};
+
 	int rc = dstm_distance_create_from_matrix(&dist, 2, m);
+
+	ck_assert_int_eq(rc, DSTM_SUCCESS);
+	ck_assert_ptr_nonnull(dist);
+	ck_assert_int_eq(dstm_distance_get(dist, 0, 1), -1);
+	ck_assert_int_eq(dstm_distance_get(dist, 1, 0), 1);
+
+	dstm_distance_destroy(&dist);
+	ck_assert_ptr_null(dist);
+}
+END_TEST
+
+/* Values below the no-edge sentinel (-1) are invalid. */
+START_TEST(test_from_matrix_entry_below_negative_one)
+{
+	dstm_distance_t *dist = NULL;
+	int m[4] = {0, -2, 1, 0};
+
+	int rc = dstm_distance_create_from_matrix(&dist, 2, m);
+
 	ck_assert_int_eq(rc, -DSTM_EINVAL);
 	ck_assert_ptr_null(dist);
+	ck_assert_int_eq(dstm_errno, DSTM_EINVAL);
 }
 END_TEST
 
@@ -1125,7 +1147,8 @@ Suite *distances_suite(void)
 	tcase_add_test(tc_from_matrix, test_from_matrix_invalid_size_zero);
 	tcase_add_test(tc_from_matrix, test_from_matrix_invalid_size_too_large);
 	tcase_add_test(tc_from_matrix, test_from_matrix_nonzero_diagonal);
-	tcase_add_test(tc_from_matrix, test_from_matrix_negative_entry);
+	tcase_add_test(tc_from_matrix, test_from_matrix_no_edge);
+	tcase_add_test(tc_from_matrix, test_from_matrix_entry_below_negative_one);
 	tcase_add_test(tc_from_matrix, test_from_matrix_create_destroy);
 	tcase_add_test(tc_from_matrix, test_from_matrix_input_is_copied);
 	tcase_add_test(tc_from_matrix, test_from_matrix_asymmetric);
