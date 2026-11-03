@@ -208,7 +208,6 @@ int dstm_fini(dstm_time_t last_time)
 	/* Free the session communicator and restore the fallback so any
 	 * subsequent data-structure calls (e.g. dstm_darray_create) made
 	 * before the next dstm_start still have a valid `comm`. */
-	MPI_Comm_free(&dstm_global_context.comm);
 	dstm_global_context.comm = dstm_global_context.user_comm;
 
 	return 0;
