@@ -24,6 +24,7 @@ COMPILED_TESTS = \
         combine_distances_insufficient \
 		darray \
 		distances \
+		destroys \
 		get_or_default \
         init_comm \
         init_comm_world \
