@@ -1530,6 +1530,11 @@ Section status_semantics.
 Variable owner : loc -> node_id.
 Variable G : comm_graph.
 
+(* This heartbeat model abstracts the runtime under the assumptions that issue times are
+   monotonic, channel lags are symmetric, and heartbeat and operation delivery is atomic.
+   The single global timestamp map also abstracts the runtime's receiver- and region-local
+   knowledge.  Removing finished nodes from readability checks stands for barrier completion;
+   the runtime continues checking their clocks until its distributed barrier permits bypass. *)
 Definition timestamp_of i :=
   match i with Load t _ _ _ | Store t _ _ _ => t end.
 
@@ -1569,6 +1574,148 @@ Inductive step' : config' -> config' -> Prop :=
 
 Definition monotonic (li : list instr) := forall a b ia ib, a < b -> li !! a = Some ia -> li !! b = Some ib ->
   timestamp_of ia <= timestamp_of ib.
+
+Definition heartbeat_frontier (t : timestamp) (li : list instr) :=
+  forall k op, li !! k = Some op -> t <= timestamp_of op.
+
+Lemma monotonic_heartbeat_frontier op rest :
+  monotonic (op :: rest) ->
+  heartbeat_frontier (timestamp_of op) (op :: rest).
+Proof.
+  intros Hmonotonic k op' Hlookup.
+  destruct k as [| k].
+  - cbn in Hlookup.
+    injection Hlookup as ->.
+    lia.
+  - eapply (Hmonotonic 0 (S k) op op').
+    + lia.
+    + reflexivity.
+    + exact Hlookup.
+Qed.
+
+Lemma monotonic_tail op rest :
+  monotonic (op :: rest) ->
+  monotonic rest.
+Proof.
+  intros Hmonotonic a b ia ib Hab Hia Hib.
+  eapply (Hmonotonic (S a) (S b) ia ib).
+  - lia.
+  - exact Hia.
+  - exact Hib.
+Qed.
+
+Definition heartbeat_frontiers
+    (np : node_pool) (nt : gmap node_id timestamp) : Prop :=
+  forall i li e ti,
+    np !! i = Some (li, e) ->
+    nt !! i = Some ti ->
+    heartbeat_frontier ti li.
+
+Definition monotonic_status
+    (np : node_pool) (nt : gmap node_id timestamp) : Prop :=
+  map_Forall (fun _ p => monotonic (fst p)) np /\
+  heartbeat_frontiers np nt.
+
+Lemma monotonic_status_initial np :
+  map_Forall (fun _ p => monotonic (fst p)) np ->
+  monotonic_status np empty.
+Proof.
+  intros Hmono.
+  split; first exact Hmono.
+  intros i li e ti Hnp Hnt.
+  rewrite lookup_empty in Hnt.
+  discriminate.
+Qed.
+
+Lemma monotonic_status_step np m nt np' m' nt' :
+  monotonic_status np nt ->
+  step' (np, m, nt) (np', m', nt') ->
+  monotonic_status np' nt'.
+Proof.
+  intros [Hmono Hfront] Hstep.
+  inversion Hstep; subst.
+  - split; first exact Hmono.
+    intros j li e' tj Hnp Hnt.
+    destruct (decide (j = i)) as [-> | Hne].
+    + rewrite lookup_insert in Hnt.
+      injection Hnt as <-.
+      rewrite Hi in Hnp.
+      injection Hnp as <- <-.
+      apply monotonic_heartbeat_frontier.
+      exact (Hmono i (op :: rest, e) Hi).
+    + rewrite lookup_insert_ne in Hnt; last congruence.
+      eapply Hfront; eauto.
+  - split.
+    + apply map_Forall_insert_2.
+      * apply monotonic_tail with (op := Load t1 x l t).
+        exact (Hmono i (Load t1 x l t :: rest, e) Hi).
+      * exact Hmono.
+    + intros j li e' tj Hnp Hnt.
+      destruct (decide (j = i)) as [-> | Hne].
+      * rewrite lookup_insert in Hnt.
+        injection Hnt as <-.
+        assert (<[i := (rest, <[x := v]> e)]> np !! i =
+          Some (rest, <[x := v]> e)) as Hins by apply lookup_insert.
+        rewrite Hnp in Hins.
+        inversion Hins; subst.
+        intros k op' Hlookup.
+        pose proof
+          (monotonic_heartbeat_frontier (Load t1 x l t) rest) as Hf.
+        specialize (Hf (Hmono i (Load t1 x l t :: rest, e) Hi)).
+        exact (Hf (S k) op' Hlookup).
+      * rewrite lookup_insert_ne in Hnt; last congruence.
+        assert (np !! j = Some (li, e')) as Hnp_old.
+        { rewrite <- Hnp. symmetry. apply lookup_insert_ne. congruence. }
+        eapply Hfront; eauto.
+  - split.
+    + apply map_Forall_insert_2.
+      * apply monotonic_tail with (op := Store t1 l t v).
+        exact (Hmono i (Store t1 l t v :: rest, e) Hi).
+      * exact Hmono.
+    + intros j li e' tj Hnp Hnt.
+      destruct (decide (j = i)) as [-> | Hne].
+      * rewrite lookup_insert in Hnt.
+        injection Hnt as <-.
+        assert (<[i := (rest, e)]> np !! i = Some (rest, e)) as Hins
+          by apply lookup_insert.
+        rewrite Hnp in Hins.
+        inversion Hins; subst.
+        intros k op' Hlookup.
+        pose proof
+          (monotonic_heartbeat_frontier (Store t1 l t v) rest) as Hf.
+        specialize (Hf (Hmono i (Store t1 l t v :: rest, e) Hi)).
+        exact (Hf (S k) op' Hlookup).
+      * rewrite lookup_insert_ne in Hnt; last congruence.
+        assert (np !! j = Some (li, e')) as Hnp_old.
+        { rewrite <- Hnp. symmetry. apply lookup_insert_ne. congruence. }
+        eapply Hfront; eauto.
+  - split; assumption.
+Qed.
+
+Lemma monotonic_status_reachable np m np' m' nt' :
+  map_Forall (fun _ p => monotonic (fst p)) np ->
+  rtc step' (np, m, empty) (np', m', nt') ->
+  monotonic_status np' nt'.
+Proof.
+  intros Hmono Hrtc.
+  pose proof (@rtc_ind_r config' step'
+    (fun c => monotonic_status c.1.1 c.2) (np, m, empty)) as Hind.
+  specialize (Hind (monotonic_status_initial np Hmono)).
+  specialize (Hind ltac:(
+    intros [[np1 m1] nt1] [[np2 m2] nt2] _ Hstep IH;
+    eapply monotonic_status_step; eauto)).
+  exact (Hind (np', m', nt') Hrtc).
+Qed.
+
+Corollary reachable_heartbeat_frontiers np m np' m' nt' :
+  map_Forall (fun _ p => monotonic (fst p)) np ->
+  rtc step' (np, m, empty) (np', m', nt') ->
+  heartbeat_frontiers np' nt'.
+Proof.
+  intros Hmono Hrtc.
+  exact (proj2 (monotonic_status_reachable
+    np m np' m' nt' Hmono Hrtc)).
+Qed.
 
 (* If all nodes' programs are monotonic, then this implementation can do anything that the nondeterministic
    implementation can do. *)
@@ -1634,6 +1781,5 @@ Definition valid_program
     (prog : gmap node_id (list instr)) : Prop :=
   push_program owner G prog \/ pull_program owner G prog.
 
-(* TODO: define heartbeats as monotonic logical-time frontiers; prove that reported times
-   bound future instructions; generalize push/pull from one step to channel lag d; then prove
-   that heartbeat time plus d makes the status readability test imply abstract visibility. *)
+(* TODO: generalize push/pull from one step to channel lag d; then prove that heartbeat time
+   plus d makes the status readability test imply abstract visibility. *)

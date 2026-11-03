@@ -12,7 +12,6 @@ Items explicitly identified as future work in `nick_dstm.v`, ordered by dependen
 
 Depends on **Foundations**.
 
-- Define heartbeats as monotonic logical-time frontiers and prove reported times bound future instructions (`nick_dstm.v:1637`).
 - Model end-of-writes signaling and barriers so the runtime can determine when a version is readable (`nick_dstm.v:25`, `nick_dstm.v:32`).
 - Generalize push/pull from one timestep to each edge's channel lag `d` (`nick_dstm.v:1638`).
 - Prove heartbeat time plus `d` makes status readability imply abstract visibility (`nick_dstm.v:1638`).
