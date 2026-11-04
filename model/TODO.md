@@ -5,7 +5,10 @@ Items explicitly identified as future work in `nick_dstm.v`, ordered by dependen
 ## 1. Foundations
 
 - [x] Formalize and use the assumption that each node issues instructions at monotonically increasing logical times (`monotonic_program`, `monotonic_program_status_reachable`).
-- Revisit the memory/status model, including whether to model `Discardable` versions (`nick_dstm.v:123`).
+- [ ] Complete the memory/status lifecycle work begun in `nick_dstm.v`:
+  - [x] Represent logical `Discardable` tombstones in the abstract semantics, guarded by the absence of pending reads, and prove retired versions preserve their value and cannot become writable again through reachable states (`retired_version_reachable`).
+  - [ ] Add a sound `READABLE -> DISCARDABLE` rule to the heartbeat/status semantics using a separate discard-distance bound and explicit end-of-reads/barrier evidence.
+  - [ ] Relate logical tombstones to runtime eviction and prove that removing a discardable version preserves observable behavior.
 - Refine the model with message travel time and relate it to read/write limits (`nick_dstm.v:1583`).
 
 ## 2. Heartbeats and readability
@@ -28,6 +31,7 @@ Abstract proofs depend on **Foundations**; concrete status proofs also depend on
 
 - Prove that every valid push or pull program has a deadlock-free terminating schedule (`nick_dstm.v:24`, `nick_dstm.v:336`, `nick_dstm.v:1586`, `nick_dstm.v:1595`).
 - Prove deadlock freedom for the concrete status semantics (`nick_dstm.v:334`).
+- Adapt the ring termination construction to the concrete status semantics: schedule heartbeats, prove the required versions become readable, retire them as discardable when safe, and account for runtime-style eviction.
 - Decide whether to prove that every reachable ring state has a terminating continuation (`ring_can_always_terminate`, `nick_dstm.v:1511`).
 - Prove ring result correctness using a preserved state invariant (`ring_correct`, `nick_dstm.v:1517`).
 

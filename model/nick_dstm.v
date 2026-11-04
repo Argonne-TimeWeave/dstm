@@ -120,8 +120,21 @@ Definition visible
     (np : node_pool) (l : loc) (t : timestamp) : Prop :=
   ~ pending_write np l t.
 
-Inductive mem_status := Writeable | Readable (*| Discardable*).
-Definition mem := gmap (loc * timestamp) (val * mem_status). (* revisit this *)
+Definition reads_from (l : loc) (t : timestamp) (op : instr) : Prop :=
+  match op with
+  | Load _ _ l' t' => l' = l /\ t' = t
+  | Store _ _ _ _ => False
+  end.
+
+Definition pending_read
+    (np : node_pool) (l : loc) (t : timestamp) : Prop :=
+  exists i instructions e op,
+    np !! i = Some (instructions, e) /\
+    op ∈ instructions /\
+    reads_from l t op.
+
+Inductive mem_status := Writeable | Readable | Discardable.
+Definition mem := gmap (loc * timestamp) (val * mem_status).
 Definition config := (node_pool * mem)%type.
 
 Inductive step : config -> config -> Prop :=
@@ -138,7 +151,11 @@ Inductive step : config -> config -> Prop :=
 | step_readable np m l t v
   (Hload: m !! (l, t) = Some (v, Writeable))
   (Hvisible: visible np l t):
-  step (np, m) (np, <[(l, t) := (v, Readable)]>m)
+    step (np, m) (np, <[(l, t) := (v, Readable)]>m)
+| step_discardable np m l t v
+  (Hload : m !! (l, t) = Some (v, Readable))
+  (Hretired : ~ pending_read np l t):
+    step (np, m) (np, <[(l, t) := (v, Discardable)]>m)
 (* It's the runtime's responsibility to ensure that this is done at the right time to make the program work. *)
 .
 
@@ -192,18 +209,19 @@ Proof.
   - left. exact Habsent.
 Qed.
 
-(* Once a version is Readable, one execution step preserves both
-   its value and its Readable status. *)
-Lemma readable_preserved_step
+(* Once a version is Readable, one execution step preserves its value and
+   either leaves it Readable or retires it as a logical Discardable tombstone. *)
+Lemma readable_retired_step
     (np np' : node_pool) (m m' : mem)
     (l : loc) (t : timestamp) (v : val)
     (Hread : m !! (l, t) = Some (v, Readable))
     (Hstep : step (np, m) (np', m')) :
-  m' !! (l, t) = Some (v, Readable).
+  m' !! (l, t) = Some (v, Readable) \/
+  m' !! (l, t) = Some (v, Discardable).
 Proof.
   inversion Hstep; subst.
   - (* Load: memory is unchanged. *)
-    exact Hread.
+    left. exact Hread.
 
   - (* Store. *)
     destruct (decide ((l0, t0) = (l, t))) as [Heq | Hneq].
@@ -213,7 +231,7 @@ Proof.
         discriminate.
       * rewrite Hread in Hwriteable.
         discriminate.
-    + transitivity (m !! (l, t)).
+    + left. transitivity (m !! (l, t)).
       * apply lookup_insert_ne.
         congruence.
       * exact Hread.
@@ -223,10 +241,84 @@ Proof.
     + inversion Heq; subst.
       rewrite Hread in Hload.
       discriminate.
-    + transitivity (m !! (l, t)).
+    + left. transitivity (m !! (l, t)).
       * apply lookup_insert_ne.
         congruence.
       * exact Hread.
+  - (* Discardability transition. *)
+    destruct (decide ((l0, t0) = (l, t))) as [Heq | Hneq].
+    + inversion Heq; subst.
+      rewrite Hread in Hload.
+      injection Hload as ->.
+      right. apply lookup_insert.
+    + left. transitivity (m !! (l, t)).
+      * apply lookup_insert_ne.
+        congruence.
+      * exact Hread.
+Qed.
+
+Lemma discardable_preserved_step
+    (np np' : node_pool) (m m' : mem)
+    (l : loc) (t : timestamp) (v : val)
+    (Hdiscarded : m !! (l, t) = Some (v, Discardable))
+    (Hstep : step (np, m) (np', m')) :
+  m' !! (l, t) = Some (v, Discardable).
+Proof.
+  inversion Hstep; subst.
+  - exact Hdiscarded.
+  - destruct (decide ((l0, t0) = (l, t))) as [Heq | Hneq].
+    + inversion Heq; subst.
+      destruct Hslot as [Habsent | [v_old Hwriteable]].
+      * rewrite Hdiscarded in Habsent. discriminate.
+      * rewrite Hdiscarded in Hwriteable. discriminate.
+    + transitivity (m !! (l, t)).
+      * apply lookup_insert_ne. congruence.
+      * exact Hdiscarded.
+  - destruct (decide ((l0, t0) = (l, t))) as [Heq | Hneq].
+    + inversion Heq; subst.
+      rewrite Hdiscarded in Hload. discriminate.
+    + transitivity (m !! (l, t)).
+      * apply lookup_insert_ne. congruence.
+      * exact Hdiscarded.
+  - destruct (decide ((l0, t0) = (l, t))) as [Heq | Hneq].
+    + inversion Heq; subst.
+      rewrite Hdiscarded in Hload. discriminate.
+    + transitivity (m !! (l, t)).
+      * apply lookup_insert_ne. congruence.
+      * exact Hdiscarded.
+Qed.
+
+Definition retired_version
+    (m : mem) (l : loc) (t : timestamp) (v : val) : Prop :=
+  m !! (l, t) = Some (v, Readable) \/
+  m !! (l, t) = Some (v, Discardable).
+
+Lemma retired_version_step
+    (np np' : node_pool) (m m' : mem)
+    (l : loc) (t : timestamp) (v : val)
+    (Hretired : retired_version m l t v)
+    (Hstep : step (np, m) (np', m')) :
+  retired_version m' l t v.
+Proof.
+  destruct Hretired as [Hread | Hdiscarded].
+  - exact (readable_retired_step np np' m m' l t v Hread Hstep).
+  - right. exact (discardable_preserved_step np np' m m' l t v Hdiscarded Hstep).
+Qed.
+
+Lemma retired_version_reachable
+    (np np' : node_pool) (m m' : mem)
+    (l : loc) (t : timestamp) (v : val)
+    (Hretired : retired_version m l t v)
+    (Hrtc : rtc step (np, m) (np', m')) :
+  retired_version m' l t v.
+Proof.
+  pose proof (@rtc_ind_r config step
+    (fun c => retired_version (snd c) l t v) (np, m)) as Hind.
+  specialize (Hind Hretired).
+  specialize (Hind ltac:(
+    intros [np1 m1] [np2 m2] _ Hstep IH;
+    eapply retired_version_step; eauto)).
+  exact (Hind (np', m') Hrtc).
 Qed.
 
 Definition location_of (op : instr) : loc :=
