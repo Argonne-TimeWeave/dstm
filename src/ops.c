@@ -420,7 +420,7 @@ static int dstm_request_progress_in_append(dstm_request_t *req)
 static int dstm_request_progress_out_append(dstm_request_t *req)
 {
 	assert(req->status == DSTM_REQUEST_STATUS_ISEND);
-	if (dstm_msg_test(req->msg))
+	if (dstm_msg_test(&req->msg))
 		req->status = DSTM_REQUEST_STATUS_DONE;
 	return 0;
 }
@@ -486,7 +486,7 @@ static int dstm_request_progress_in_get(dstm_request_t *req)
 			req->status = DSTM_REQUEST_STATUS_ISEND;
 		}
 	} else if (req->status == DSTM_REQUEST_STATUS_ISEND) {
-		if (dstm_msg_test(req->msg)) {
+		if (dstm_msg_test(&req->msg)) {
 			/* packbuf freed by dstm_request_destroy */
 			req->status = DSTM_REQUEST_STATUS_DONE;
 		}
@@ -501,7 +501,7 @@ static int dstm_request_progress_out_put(dstm_request_t *req)
 	 * - done: send completed; packbuf freed by dstm_request_destroy.
 	 */
 	assert(req->status == DSTM_REQUEST_STATUS_ISEND);
-	if (dstm_msg_test(req->msg)) {
+	if (dstm_msg_test(&req->msg)) {
 		req->status = DSTM_REQUEST_STATUS_DONE;
 	}
 	return 0;

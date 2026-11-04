@@ -205,6 +205,36 @@ int dstm_fini(dstm_time_t last_time)
 	dstm_profile_finish_and_log(dstm_global_context.comm,
 	                            dstm_global_context.rank);
 
+	/* After the first MPI_Barrier (no rank will send on this comm anymore)
+	 * and profiling. Drain stragglers until all ranks have finished draining,
+	 * using a nonblocking barrier so we keep servicing incoming messages
+	 * while waiting for peers. */
+	{
+		MPI_Request barrier_req;
+		int barrier_done = 0;
+
+		MPI_Ibarrier(dstm_global_context.comm, &barrier_req);
+
+		while (!barrier_done) {
+			int flag = 0;
+			MPI_Status st;
+
+			MPI_Iprobe(MPI_ANY_SOURCE, MPI_ANY_TAG,
+				   dstm_global_context.comm, &flag, &st);
+			if (flag) {
+				int count = 0;
+				MPI_Get_count(&st, MPI_PACKED, &count);
+				void *tmp = malloc(count > 0 ? (size_t)count : 1);
+				MPI_Recv(tmp, count, MPI_PACKED, st.MPI_SOURCE,
+					 st.MPI_TAG, dstm_global_context.comm,
+					 MPI_STATUS_IGNORE);
+				free(tmp);
+			}
+
+			MPI_Test(&barrier_req, &barrier_done, MPI_STATUS_IGNORE);
+		}
+	}
+
 	/* Free the session communicator and restore the fallback so any
 	 * subsequent data-structure calls (e.g. dstm_darray_create) made
 	 * before the next dstm_start still have a valid `comm`. */

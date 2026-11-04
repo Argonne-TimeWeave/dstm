@@ -344,11 +344,11 @@ int dstm_msg_recvany(MPI_Status status, dstm_msg_t *msg)
  * Checking for progress
  ******************************************************************************/
 
-int dstm_msg_test(dstm_msg_t msg)
+int dstm_msg_test(dstm_msg_t *msg)
 {
 	MPI_Status status;
 	int flag = 0;
-	MPI_Test(&msg.request, &flag, &status);
+	MPI_Test(&msg->request, &flag, &status);
 	dstm_log_debug("MPI_Test: %d\n", flag);
 	return flag;
 }

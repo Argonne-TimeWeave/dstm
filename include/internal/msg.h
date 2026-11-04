@@ -128,7 +128,7 @@ int dstm_msg_iprobe(MPI_Status *status);
 int dstm_msg_irecv(dstm_msg_t *msg, int tag);
 int dstm_msg_recvany(MPI_Status status, dstm_msg_t *msg);
 
-int dstm_msg_test(dstm_msg_t msg);
+int dstm_msg_test(dstm_msg_t *msg);
 
 /* Collective agreement on failure across @p comm. Given this rank's error
  * code @p err, returns the code this rank should propagate: its own if it
