@@ -1516,7 +1516,7 @@ int dstm_append(int rank,
  *
  * Unlike dstm_append (which concatenates bytes into a growing slot),
  * dstm_accumulate folds @p size bytes from @p src into the FIXED-SIZE cell
- * that already lives at dst, using the registered reducer @p reduce:
+ * that lives at dst, using the registered reducer @p reduce:
  *
  *     reduce(cell, src, size, user)
  *
@@ -1526,10 +1526,18 @@ int dstm_append(int rank,
  * associative+commutative, so the result is order-independent and therefore
  * deterministic across runs (the key difference from append).
  *
- * The cell's starting value is whatever the version buffer holds: a version
- * nobody has touched reads as all-zero bytes (calloc'd).  If all-zero is not
- * your reducer's identity, seed the cell with a put at the SAME effective
- * time BEFORE any accumulate, exactly like the put-before-get phase rule.
+ * FIRST CONTRIBUTION SEEDS THE CELL.  You do NOT have to seed the cell or
+ * reason about your reducer's identity.  The owner tracks which cells have
+ * received a contribution in each version: the first accumulate into a cell
+ * is copied in raw, and every subsequent accumulate folds with @p reduce.
+ * So, e.g., a min over positive values returns the true minimum rather than
+ * being pulled to the calloc'd zero.
+ *
+ * DO NOT MIX put AND accumulate ON THE SAME CELL.  A put does not mark the
+ * cell as seeded, so a later accumulate would treat itself as the first
+ * contribution and overwrite the put.  For a given (owner, effective time,
+ * offset) cell, use one or the other -- either publish it with put, or build
+ * it with accumulate, never both.
  *
  * @p reduce must be an id returned by dstm_reduce_register on THIS rank; the
  * owner applies the fold registered under the same id in its own table.

@@ -75,6 +75,34 @@ static void reduce_i32_max(void *dst, const void *src, size_t size, void *user)
                         d[i] = s[i];
 }
 
+/* Elementwise int32 min.  Identity is NOT zero -- this is exactly the case
+ * the old op/datatype design needed a pre-seed for.  With first-element
+ * seeding it just works. */
+static void reduce_i32_min(void *dst, const void *src, size_t size, void *user)
+{
+        (void)user;
+        int32_t       *d = dst;
+        const int32_t *s = src;
+        size_t         n = size / sizeof(int32_t);
+
+        for (size_t i = 0; i < n; i++)
+                if (s[i] < d[i])
+                        d[i] = s[i];
+}
+
+/* Elementwise int32 product.  Identity is 1, also not zero. */
+static void reduce_i32_prod(void *dst, const void *src, size_t size,
+                            void *user)
+{
+        (void)user;
+        int32_t       *d = dst;
+        const int32_t *s = src;
+        size_t         n = size / sizeof(int32_t);
+
+        for (size_t i = 0; i < n; i++)
+                d[i] *= s[i];
+}
+
 /* Elementwise double sum, demonstrating a second datatype through the
  * same mechanism. */
 static void reduce_f64_sum(void *dst, const void *src, size_t size, void *user)
@@ -119,6 +147,8 @@ static void reduce_agg(void *dst, const void *src, size_t size, void *user)
 /* Reducer ids, registered once in main and shared by every test. */
 static dstm_reduce_id_t RID_I32_SUM;
 static dstm_reduce_id_t RID_I32_MAX;
+static dstm_reduce_id_t RID_I32_MIN;
+static dstm_reduce_id_t RID_I32_PROD;
 static dstm_reduce_id_t RID_F64_SUM;
 static dstm_reduce_id_t RID_AGG;
 
@@ -374,6 +404,57 @@ static void test_darray_double_sum(void)
 }
 
 /*******************************************************************************
+ * Non-zero-identity reducers: proves first-element seeding removes the need
+ * to seed the cell or ever assume all-zero is the identity.
+ ******************************************************************************/
+
+static void test_darray_nonzero_identity(void)
+{
+        dstm_distance_t *dist = session_begin();
+
+        enum { MIN = 0, PROD = 1, N = 2 };
+
+        dstm_darray_t *a = NULL;
+        int rc = dstm_darray_create(&a, sizeof(int32_t), N);
+        assert(rc == DSTM_SUCCESS);
+
+        /* MIN over {1..world_size} is 1.  If the cell were (wrongly) folded
+         * against a zero identity, the result would be 0 instead of 1.
+         * PROD over {1..world_size} is world_size!.  A zero identity would
+         * collapse it to 0. */
+        for (int owner = 0; owner < world_size; owner++) {
+                size_t base = (size_t)owner * N;
+                int32_t contribution = (int32_t)(rank + 1);
+
+                rc = dstm_darray_accumulate(a, base + MIN, &contribution,
+                                            0, 1, RID_I32_MIN);
+                assert(rc == DSTM_SUCCESS);
+
+                rc = dstm_darray_accumulate(a, base + PROD, &contribution,
+                                            0, 1, RID_I32_PROD);
+                assert(rc == DSTM_SUCCESS);
+        }
+
+        size_t base = dstm_darray_global_offset(a);
+        int32_t got_min = INT32_MIN, got_prod = INT32_MIN;
+
+        rc = dstm_darray_get(a, base + MIN, &got_min, 1, 0);
+        assert(rc == DSTM_SUCCESS);
+        rc = dstm_darray_get(a, base + PROD, &got_prod, 1, 0);
+        assert(rc == DSTM_SUCCESS);
+
+        int32_t expect_prod = 1;
+        for (int r = 0; r < world_size; r++)
+                expect_prod *= (int32_t)(r + 1);
+
+        assert(got_min == 1);
+        assert(got_prod == expect_prod);
+
+        dstm_darray_destroy(&a);
+        session_end(&dist, 1);
+}
+
+/*******************************************************************************
  * Version isolation
  ******************************************************************************/
 
@@ -618,6 +699,10 @@ int main(int argc, char **argv)
         assert(rc == DSTM_SUCCESS);
         rc = dstm_reduce_register(reduce_i32_max, NULL, &RID_I32_MAX);
         assert(rc == DSTM_SUCCESS);
+        rc = dstm_reduce_register(reduce_i32_min, NULL, &RID_I32_MIN);
+        assert(rc == DSTM_SUCCESS);
+        rc = dstm_reduce_register(reduce_i32_prod, NULL, &RID_I32_PROD);
+        assert(rc == DSTM_SUCCESS);
         rc = dstm_reduce_register(reduce_f64_sum, NULL, &RID_F64_SUM);
         assert(rc == DSTM_SUCCESS);
         rc = dstm_reduce_register(reduce_agg, NULL, &RID_AGG);
@@ -627,6 +712,7 @@ int main(int argc, char **argv)
 
         test_darray_invalid_arguments();
         test_darray_scalar_sum_and_max();
+        test_darray_nonzero_identity();
         test_darray_elementwise_vector();
         test_darray_struct_reducer();
         test_darray_double_sum();

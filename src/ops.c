@@ -462,9 +462,28 @@ static void dstm_region_append_apply(dstm_region_t *rg, dstm_request_t *req,
 			        dstm_global_context.rank, req->reduce_id);
 			abort();
 		}
-		struct dstm_reduce_entry_s *e =
-		        &dstm_reduce_table[req->reduce_id];
-		e->fn(slot, req->buf, req->size, e->user);
+
+		/* First contribution to this cell in this version SEEDS it
+		 * (raw copy); every subsequent one FOLDS with the reducer.
+		 * This removes any dependence on a reducer identity value or
+		 * on seeding the cell with a prior put -- the owner knows
+		 * which contribution is first, so the caller never has to. */
+		if (!dstm_region_version_has_acc_cell(v, req->dst.offset)) {
+			memcpy(slot, req->buf, req->size);
+			if (dstm_region_version_mark_acc_cell(
+			            v, req->dst.offset, req->size) != 0) {
+				dstm_log_error(
+				        "accumulate on rank %d: out of memory "
+				        "tracking cell at offset %td\n",
+				        dstm_global_context.rank,
+				        req->dst.offset);
+				abort();
+			}
+		} else {
+			struct dstm_reduce_entry_s *e =
+			        &dstm_reduce_table[req->reduce_id];
+			e->fn(slot, req->buf, req->size, e->user);
+		}
 	}
 }
 
