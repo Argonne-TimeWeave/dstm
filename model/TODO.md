@@ -4,7 +4,7 @@ Items explicitly identified as future work in `nick_dstm.v`, ordered by dependen
 
 ## 1. Foundations
 
-- Formalize and use the assumption that each node issues instructions at monotonically increasing logical times (`nick_dstm.v:21`, `nick_dstm.v:1570`).
+- [x] Formalize and use the assumption that each node issues instructions at monotonically increasing logical times (`monotonic_program`, `monotonic_program_status_reachable`).
 - Revisit the memory/status model, including whether to model `Discardable` versions (`nick_dstm.v:123`).
 - Refine the model with message travel time and relate it to read/write limits (`nick_dstm.v:1583`).
 

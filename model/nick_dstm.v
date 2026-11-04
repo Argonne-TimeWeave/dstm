@@ -1575,6 +1575,9 @@ Inductive step' : config' -> config' -> Prop :=
 Definition monotonic (li : list instr) := forall a b ia ib, a < b -> li !! a = Some ia -> li !! b = Some ib ->
   timestamp_of ia <= timestamp_of ib.
 
+Definition monotonic_program (prog : gmap node_id (list instr)) : Prop :=
+  map_Forall (fun _ li => monotonic li) prog.
+
 Definition heartbeat_frontier (t : timestamp) (li : list instr) :=
   forall k op, li !! k = Some op -> t <= timestamp_of op.
 
@@ -1625,6 +1628,33 @@ Proof.
   intros i li e ti Hnp Hnt.
   rewrite lookup_empty in Hnt.
   discriminate.
+Qed.
+
+Lemma init_config_monotonic prog :
+  monotonic_program prog ->
+  map_Forall
+    (fun _ p => monotonic (fst p))
+    (fst (init_config prog)).
+Proof.
+  intros Hmono i [li e] Hlookup.
+  unfold init_config in Hlookup.
+  cbn [fst] in Hlookup.
+  apply (proj1 (lookup_fmap_Some
+    (fun ops : list instr => (ops, (∅ : env)))
+    prog i (li, e))) in Hlookup.
+  destruct Hlookup as [ops [Heq Hprog]].
+  inversion Heq; subst.
+  exact (Hmono i li Hprog).
+Qed.
+
+Corollary init_config_monotonic_status prog :
+  monotonic_program prog ->
+  monotonic_status (fst (init_config prog)) empty.
+Proof.
+  intros Hmono.
+  apply monotonic_status_initial.
+  apply init_config_monotonic.
+  exact Hmono.
 Qed.
 
 Lemma monotonic_status_step np m nt np' m' nt' :
@@ -1717,6 +1747,21 @@ Proof.
     np m np' m' nt' Hmono Hrtc)).
 Qed.
 
+Corollary monotonic_program_status_reachable
+    prog np' m' nt' :
+  monotonic_program prog ->
+  rtc step'
+    (fst (init_config prog), snd (init_config prog), empty)
+    (np', m', nt') ->
+  monotonic_status np' nt'.
+Proof.
+  intros Hmono Hrtc.
+  eapply monotonic_status_reachable.
+  - apply init_config_monotonic.
+    exact Hmono.
+  - exact Hrtc.
+Qed.
+
 (* If all nodes' programs are monotonic, then this implementation can do anything that the nondeterministic
    implementation can do. *)
 Theorem monotonic_step'_safe np : map_Forall (λ _ '(li, _), monotonic li) np ->
@@ -1779,7 +1824,8 @@ Definition pull_program
 Definition valid_program
     (owner : loc -> node_id) (G : comm_graph)
     (prog : gmap node_id (list instr)) : Prop :=
-  push_program owner G prog \/ pull_program owner G prog.
+  monotonic_program prog /\
+  (push_program owner G prog \/ pull_program owner G prog).
 
 (* TODO: generalize push/pull from one step to channel lag d; then prove that heartbeat time
    plus d makes the status readability test imply abstract visibility. *)

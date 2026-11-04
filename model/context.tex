@@ -1,0 +1,462 @@
+\title{Distributed Shared Timestamped Memory}
+
+%\author{\IEEEauthorblockN{Anonymous Author(s)}
+%\IEEEauthorblockA{\textit{Affiliation Withheld for Double-Blind Review}}}
+
+\author{
+\IEEEauthorblockN{Nicholas Cassarino, Swann Perarnau, Jonathan Ozik,\\
+Nicholson Collier, Jamie Cook, Kevin Brown}
+\IEEEauthorblockA{\textit{Argonne National Laboratory} \\
+Lemont, IL, USA \\
+\{ncassarino, swann, jozik, ncollier, jcook, kabrown\}@anl.gov}
+}
+
+\maketitle
+
+\thispagestyle{fancy} 
+\lhead{} 
+\rhead{} 
+\chead{} 
+\lfoot{\footnotesize{ 
+SC26 Workshops, November 15-20, 2026, Chicago, Illinois, USA 
+\newline 979-8-3195-1221-5/26/\$31.00 \copyright 2026 IEEE}} 
+\rfoot{} 
+\cfoot{} 
+\renewcommand{\headrulewidth}{0pt} 
+\renewcommand{\footrulewidth}{0pt} 
+
+\begin{abstract}
+
+% 150 word maximum
+%   this below is 149 words
+Parallel discrete-event simulation (PDES) and agent-based modeling and simulation (ABMS) are two important modeling and simulation paradigms used in domains such as network simulation, 
+epidemiology, and transportation. Both must coordinate distributed state as simulation time
+advances, yet common approaches in each paradigm sacrifice
+either performance through blocking synchronization or scalability and simplicity
+through rollback mechanisms to do so. Moreover research in each field has largely progressed in isolation.
+
+We present a partitioned distributed versioned array that can serve as a
+common global distributed memory layer in both PDES and ABMS for more flexible synchronization
+schemes. By allowing each rank to maintain multiple versions of a shared
+data structure available at the same time, our approach enables unbalanced
+workloads to drift out of lockstep without rollbacks or neighborhood barriers.
+We demonstrated increased performance using this scheme on common benchmarks
+from both PDES and ABMS paradigms, against state of the art runtimes.
+
+\end{abstract}
+
+\begin{IEEEkeywords}
+distributed simulation, programming models, MPI alternatives, HPC
+\end{IEEEkeywords}
+
+\section{Introduction}          % problem, motivation, contributions
+
+% Intro: PDES and ABMS
+%        Looking provide a programming model that can provide High-Performance
+%             on these two growing simulation fields
+Parallel discrete-event simulation (PDES) and agent-based modeling
+and simulation (ABMS) are two important modeling and simulation paradigms 
+used to study physical systems in domains such as network simulation~\cite{network-sim}, epidemiology~\cite{epi}, and transportation~\cite{transport}.
+The two paradigms target different systems: PDES
+handles systems with well-defined states and processes that drive
+state transitions between them, while ABMS handles systems of
+autonomous agents whose local behaviors and interactions
+collectively evolve the global system state. These differences in focus have
+caused each paradigm to scientifically progress separately, developing
+their own runtimes, programming models, and scalability techniques
+rather than leveraging each other's successes.
+
+% Problem: can look at the proposal for this
+%   problem is that existing techniques use either Conservative or Optimistic
+%       the conservative case ensures correctness but suffers performance wise
+%       the optimistic case can struggle with scaling due to cascading rollbacks
+%   instead of providing a hybrid model, we provide a distributed programming model 
+%       that can be used for both paradigms effectively. Therefore, this section should
+%       be framed differently, we do not need to build up to a hybrid model but instead 
+%       focus on the fact that there exists no good model that can be used by 
+%       both communities and avoids siloing
+
+% most visible in how each paradigm handles a distributed
+%   setup...
+% We see this siloing in how each paradigm handles distributed simulation
+%   suites
+Siloing can be observed in how each paradigm approaches distributed
+simulation. Conservative PDES guarantees correctness
+by blocking each process until it can prove no earlier
+event will arrive, which ensures correctness but forces frequent synchronization.
+Optimistic PDES
+eliminates blocking by processing events eagerly and rolling
+back on causality violations. At scale optimistic PDES suffers from cascading
+rollbacks, state-history overhead, and the programmer burden of
+writing reverse handlers. 
+ABMS frameworks have approached distributed simulation differently. A notable approach involves 
+advancing all ranks in lock-step through a per-tick ghost exchange
+that serializes boundary agents and neighbor-side state, transmits
+them via a blocking point-to-point sends to each neighbor, and deserializes them as read-only
+ghost copies before the next tick begins. This gives agents
+uniform access to neighborhood state at the cost of frequent synchronization,
+with further optimization
+left to the application.
+
+% hmmm not sure how i feel about this section
+%   i like that it brings up the gap that we will fill
+%   not sure of it's effectiveness
+
+Each of these approaches was developed in response to the needs of its own
+community, and none generalize cleanly to the other. The result is that a
+scalability advance in one paradigm, whether a smarter conservative window for
+PDES or a more efficient ghost exchange for ABMS, rarely benefits the other.
+%
+We argue here that some scalability techniques can benefit both communities by
+expressing them as distributed data structures with well tailored synchronization
+mechanisms. While this approach might not provide a distributed
+programming model general enough to serve both paradigms yet, it offers an avenue
+for the gradual design of a common substrate so that innovations can be expressed once
+and reused across communities.
+
+%What is
+%missing is a distributed programming model general enough to
+%serve both paradigms on a common substrate, so that scalability
+%techniques can be expressed once and reused across communities.
+
+% Motivation: DSTM 
+%   we believe that DSTM can provide a unique distributed programming model that is 
+%       efficient and usable for both PDES and ABMS
+%   the space-time memory model (versions) provides a unqiue abstraction into
+%       async distributed communications that limits synchronization (allowing 
+%       for drift between ranks). the distance matrix abstraction contains
+%       allows for stronger control over ranks synch/communication. We 
+%       discuss ideal scenarios for performance with this model. 
+%   the space-time memory model provides a conservative simulation technique
+%       that loosely bounds ranks by 'distance' and local neighborhoods. this
+%       allows for low computation ranks to speed ahead. low sync allows for
+%       high performance in both PDES and ABMS
+
+We argue that a distributed programming model organized around
+\emph{timestamped memory}, one that versions distributed state and
+differentiates for distributed operations the virtual simulation time at
+which they occur from the virtual simulation time they become visible,
+can serve both PDES and ABMS paradigms effectively. These timestamps then
+give the opportunity for a runtime to preserve causality (ensure a version is not read until no operation that could modify it can still arrive) without either
+global barriers or rollback, when associated with a version history that
+lets producers and consumers reference the same state at different points
+in simulation time.
+
+We demonstrate in this paper a realization of this idea in DSTM, a distributed
+service that provides a partitioned distributed array data structure built on three
+abstractions: as each rank in a simulation owns a partition of this array, we
+enable (1) \emph{versioning}, in which each rank retains several versions (i.e.
+a history) of its state tagged over simulation time; (2) \emph{timestamped
+operations}, in which reads and writes to the distributed array are tagged with
+the simulation time at which they occur; and (3) a \emph{distance matrix} that
+describes which nodes have the potential to send operations between each other
+and how long an operation would take (in simulated time) to become visible.
+
+Together these abstractions let ranks drift out of lockstep with no rollbacks
+and no global barriers: lightly-loaded ranks race ahead and deposit future
+versions, while lagging ranks read the earlier versions their producers have
+already made visible. Bounds on reachable neighbors preserve correctness. The
+result is an execution model whose synchronization cost is bounded by local
+simulation-specific neighborhood structure and per-edge drift. Making DSTM well
+suited for simulations from both PDES or ABMS when both the sparse event traffic
+of PDES and the tick-driven ghost exchange of ABMS.
+
+% Contribution:
+%   we present DSTM, a distributed space time memory model that provides conservative
+%       high performance for both PDES and ABMS
+%   we demonstrate the affect of application and distance matrix on drift size
+%           "we demonstrate how application conditions effect the abstrations
+%            that DSTM provides"
+%   we compare this framework directly against prior works {PDES: ROSS, ABMS: Repast}
+
+This paper makes the following contributions:
+\begin{itemize}
+  \item We design and implement DSTM, a distributed service
+        for PDES and ABMS runtimes. Through a distributed array abstracting over versioned memory, timestamped messages,
+        and a distance matrix, DSTM eliminates rollback and global barriers while
+        tolerating inter-rank drift.
+  \item We characterize how our distributed array data structure
+        can map to a simulation structure and identify the workload regimes in which
+        the approach is expected to perform best. %\hl{something to discuss in DSTM Overview or Discussion}
+        
+  \item We evaluate DSTM against representative prior systems
+        from each paradigm, ROSS~\cite{ross, ross-recent} for
+        PDES and Repast~HPC~\cite{repast-hpc} for ABMS, using
+        benchmarks that reproduce identical simulation semantics
+        across all three runtimes.
+\end{itemize}
+
+\section{Background and Related Work}
+\label{sec:background}
+
+\subsection{Simulation Paradigms}
+
+The two large-scale simulation paradigms at the focus of our
+work, parallel discrete-event simulation (PDES) and agent-based
+modeling and simulation (ABMS), are both commonly deployed in
+distributed settings but express computation in fundamentally
+different ways.
+
+\emph{PDES} advances a global virtual clock by processing
+timestamped events across logical processes (LPs). Each LP owns
+a piece of state that changes only in response to events it
+receives, and the runtime is responsible for preserving causality
+across LPs. This has historically been done through one of two
+families. \emph{Conservative} PDES, originating from Chandy et
+al.~\cite{chandy-misra}, only processes an event once every
+neighbor has advanced far enough to ensure it is safe. Safety is
+established through per-link lookahead and distributed via null
+messages, ensuring correctness but requiring frequent synchronization. 
+\emph{Optimistic} PDES, introduced as Time
+Warp~\cite{Time-Warp}, instead processes events eagerly and
+recovers from causality violations through rollback and
+antimessages, tolerating unbounded rank drift but paying for it
+with rollback overhead, state history for recovery, and the user
+burden of writing reverse handlers. ROSS~\cite{ross, ross-recent}
+supports both strategies and serves as our PDES baseline.
+
+\emph{ABMS} instead distributes stateful autonomous agents
+across ranks and advances them in lock-step through discrete
+ticks. Agent behavior is typically local, but often depends on
+neighborhood or global state exposed through shared spatial
+projections such as grids, networks, or continuous spaces. Unlike
+PDES, where progress is measured in events and causality is
+enforced per event, ABMS typically advances \emph{all} ranks
+together. Each tick, every agent executes its behavior, and a blocking neighbor exchange gathers ghosted state from partition-adjacent ranks before the next tick begins. Repast HPC~\cite{repast-hpc}
+and its Python successor Repast4Py~\cite{repast4py} provide this
+pattern, as a default, with an explicit per-tick \texttt{synchronize()} that
+exchanges agent and projection state across partition boundaries. Further optimizations
+to communication and synchronization are left to the user. 
+
+\subsection{Space-Time and Time Warp}
+
+DSTM's use of timestamped state has roots in the space-time view of
+distributed simulation. Jefferson's \emph{virtual time} and its
+realization in Time Warp~\cite{Time-Warp} framed a distributed
+computation as points on a two-dimensional space-time plane, with
+each process advancing along its own local virtual clock and rolling
+back when a straggler message revealed a causality violation.
+Fujimoto's analysis of Time Warp under synthetic
+workloads~\cite{fujimoto1990phold} characterized how rollback
+frequency, state-saving cost, and rank drift interact to determine
+throughput, and established that tolerating drift is only
+worthwhile when the mechanism for recovering from it is cheap.
+
+More recent systems have revisited the space-time abstraction
+without committing to full optimistic rollback. Chandy and
+Sherman's space-time simulation~\cite{chandy-sherman} treated
+the simulation state as a two-dimensional grid indexed by process
+and time, computed by relaxation rather than event scheduling.
+DSTM inherits this grid-shaped view of state (one version per
+(rank, time) pair) but replaces speculative execution and
+rollback with distance-bounded visibility, so drift is tolerated
+without ever having to undo work.
+
+\subsection{Computing with Drift}
+
+% A related concept to DSTM's multi-version drift comes from
+%   transactional systems. (MVCC) produces a new version tagged with a
+%   timestamp on every write rather than overwriting in place. 
+% This allows readers to see a consistent snapshot at their own
+%   timestamp without blocking concurrent writers. MVCC allows for
+%   drift between readers and writers but pays 
+A related concept to DSTM's versioned drift comes from transactional
+systems. 
+%The most closely related concept to DSTM's versioned state comes
+%from outside HPC entirely. 
+Multi-Version Concurrency Control
+(MVCC)~\cite{bernstein-mvcc} produces a new version tagged with a commit
+timestamp on every write rather than overwriting in place. This
+allows readers to see a consistent snapshot at their own
+timestamp without blocking concurrent writers. MVCC allows drift
+between readers and writers but pays for it with conflict
+detection and transaction abort at commit time. %, semantics a
+%tightly-coupled simulation cannot afford.
+
+DSTM builds upon the versioned-state idea and applies it to
+distributed simulation by tying versions to simulation timesteps
+rather than commit timestamps, and by bounding visibility through
+the distance matrix. This avoids the abort semantics MVCC
+relies on while preserving drift tolerance.
+
+\subsection{Asynchronous Runtimes and PGAS}
+
+A parallel line of work has attacked the same MPI+X limitations
+from the systems side rather than the simulation side.
+UPC++~\cite{upcxx} provides one-sided \texttt{put}/\texttt{get}
+over a global address space, with futures for asynchrony but no
+notion of logical time. Charm++~\cite{charmpp, charm14} uses
+migratable message-driven \emph{chares} whose asynchronous
+execution tolerates load imbalance well and naturally scopes
+communication to neighborhoods. It has served as the substrate
+for simulation codes such as ChaNGa~\cite{changa}, but exposes
+no versioned state and leaves ordering to message handlers.
+HPX~\cite{hpx-lci} and Lamellar~\cite{lamellar} are asynchronous
+many-task runtimes paired with a PGAS-style shared address space.
+None of these systems expose per-timestep versioning or per-edge
+visibility bounds. All leave temporal semantics to the
+application.
+
+DSTM shares the one-sided \texttt{put}/\texttt{get} interface of
+these systems but adds versioned state and distance matrix bounded
+visibility as abstractions, so time-stamped delivery
+is provided by the runtime rather than reimplemented in every
+application.
+
+\section{DSTM Overview}         % programming model, key abstractions, API
+
+% We have room here to described our three abstractions
+%   Versioned memory
+%   Timestamped messages
+%   A distance matrix
+
+While we envision DSTM as an approach that can eventually become a full-fledged
+programming model and runtime, we focus our work here on providing a
+partitioned, distributed, versioned array as a data structure that can be
+effectively kept synchronized across both PDES and ABMS simulations.
+
+As an initial step towards a more general approach, we make several simplifying
+design choices: a simulation is expected to be distributed among a set of static
+and uniquely identifiable ranks, with a unique shared virtual timeline across
+ranks (while each rank progresses along the timeline at its own pace, it is the
+same simulation timeline). Virtualization provided by logical processes, or
+virtual agents, is left for future work. Similarly, simulation state is assumed
+to be partitioned among ranks statically (no load balancing), while each rank
+only exhibits a single simulation time at once (no internal virtualization of
+the timeline for logical process management for example).
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\linewidth]{figs/darray_final.drawio.png}
+    \caption{Per-index versioning across ranks. Each rank owns a contiguous slice of the global index space (rows) and maintains an independent version per timestep (columns). Cells are colored by state.}
+    \label{fig:DSTM-darray}
+\end{figure}
+
+\subsection{Core Abstractions}
+
+From these assumptions, we build our core abstractions. First, a \texttt{darray}
+is provided as a 1D array of identically sized elements distributed across all
+simulation ranks. Distribution allows for an uneven contiguous slice of indices
+on each rank. This distributed array is backed by \textit{versioned memory}: any
+operation to an index is associated with a timestamp, and multiple
+versions of each index can exist simultaneously.
+
+Second, distributed operations are provided to access this distributed array.
+These operations are \texttt{put} (write) and \texttt{get} (read). 
+%While they target a specific index the source, respectively destination, of the data written, respectively read, is a local buffer.
+Each operation targets a specific index in the distributed array. For a put, the source of the data is a local buffer; for a get, the destination is a local buffer.
+Operations are also augmented with two timestamps: their originating time (the simulation time of the originating rank) and their destination time or delta (the time the operation takes to become visible). 
+Destination time has a subtle meaning: for writes, they are a distance forward in time that it will take for the operation to appear; for reads, they are a distance backward in time, an intent to read from an older state. 
+In both cases, local operations are allowed up to the current version. \texttt{Put} operations must be in the future (or present for local operations), as a \texttt{put} into the past may have already been passed by a neighboring (receiving) rank. 
+In the same way, \texttt{get} operations must be in the past (or present for local operations), as a \texttt{get} into the future may cause catastrophic blocking. 
+The opposite of these cases (\texttt{put} in past; \texttt{get} in future) do not align with our current paradigm but do spur interesting discussion.
+
+Finally, we also assume that the simulation structure (e.g. the network
+topology, geographic distribution of airports, transport hubs) implies (1) a
+sparse communication structure between ranks, that is, across the full runtime
+of a simulation, not every rank will require communicating with every other
+rank; (2) a distance between ranks: a number of simulation timesteps that an
+action will take to become visible to another rank. These last two assumptions
+are not limiting: a full communication graph and a distance of 0 between
+all ranks is a correct setup for our approach (equivalent to all-to-all
+synchronization at each timestep), at the cost of nullifying the optimizations it allows.
+This communication graph is communicated to the DSTM as a \texttt{distance matrix} storing the distance between each rank pair, with 0 for the distance between local ranks and null for ranks not reachable from each other. Distances are assumed symmetrical. Using the distances within our communication graph, we are able to restrict the progress on quick ranks by the distance between its neighbors (hence a full communication graph of distance 0 being equivalent to all-to-all).
+
+%\hl{to clarify, using the distances within our communication graph we are able to restrict the progress on quick ranks by the distance between it's neighbors (hence a full communication graph of distance 0 being equivalent to all-to-all). another clarification, \texttt{put} operations must be in the future (or present for local operations), as a \texttt{put} into the past may have already been passed by a neighboring (receiving rank). in the  same way \texttt{get} operations must be in the past (or present for local operations), as a \texttt{get} into the future may cause catastrophic blocking. the opposite of these cases (\texttt{put} in past; \texttt{get} in future) align with our current paradigm but do spur interesting discussion.}
+
+While we describe later in this document specific use cases, we can identify two
+main synchronization patterns using these abstractions: a pull model and a push
+model. In the pull model, each rank submits updates (puts) to local data at the
+current version, while neighbors pull data by issuing gets in the past. In the
+push model, each rank pushes updates to its neighbors in the future, while
+retrieving (gets) local information at the current version. In both
+cases, the scheme enables ranks to drift slightly apart.
+
+% We can use this figure below as a reference to how some of these features work
+%   We have a figure showing maximum drift in a simulation
+%   We have a figure showing total active versions per rank
+%%      Both of these on a ring model:
+%           The ring model could be a simple way to demonstrate what we are doing
+%           And we have the diagram above.
+%%%%%%% If you would like to reference any of that data while writing this it 
+%           resides within examples/minimal/ring_mini/profiling
+%           &              variable_mini has some ones on weight graph topographies
+
+\subsection{Version Availability}
+
+Beyond the specific abstractions for this distributed array data structure, the
+DSTM can be understood as an asynchronous messaging layer on top of which
+operations to arrays are issued. The DSTM is informed on the local time of each
+rank by two mechanisms: (1) a rank is only allowed to issue operations with a
+monotonically increasing originating time; (2) heartbeats are sent to all neighbors
+after each increase in local time. From this information about the progress in
+time of a simulation, rules about when operations are allowed to complete can be
+derived. We identify for each version of an index the following states:
+writable, readable, discardable.
+
+\paragraph{Writes} a version $t$ of an array index is created by any write of
+destination time $t$. It stays writable (available for further writes) until no
+neighbor, nor the owning rank, can issue a put to it (progressed in originating
+time past this version at time greater than $t - dist$). As a simplification,
+overlapping writes are ignored (not a conflict).
+
+\paragraph{Reads} a version $t$ of an array index become readable when it is no
+longer writable, and stay readable until no neighbor, nor the owning rank, can
+issue a get to it (progressed in originating time past this version at time
+greater than $t + dist$). At which point it become discardable.
+
+These visibility rules have an intuitive meaning: they use the distance between
+two ranks as an upper (or lower) limit to how long an operation can take to
+reach the destination rank. For example, when simulating a network, the time a
+message takes to transmit between routers limits how often two routers would
+need to synchronize.
+
+We also note that discarding versions is a memory management optimization: it
+allows the DSTM to maintain less versions of each array index, without changing
+the semantics of the program.
+
+% We can also use a figure or two to visualize how drift changes with 
+%   application structure/distance matrix (neighborhood)
+%       This is bullet point two of the contributions
+%   we can also talk about how many versions are active depending on 
+%       neighborhood size.
+
+\begin{figure*}[t]
+    \centering
+    \includegraphics[width=0.85\linewidth]{figs/big_diag.drawio.png}
+    \caption{An example execution graph of a simulation with a ring topology ($n=4$)}
+    \label{fig:DSTM-diagram}
+\end{figure*}
+
+\section{Implementation}        % runtime, comm layer, data movement
+
+% This section could be combined with the prior, if not would contain:
+%   low-level details about communication and barrier implementations
+%       3 barrier
+
+The DSTM is implemented as a prototype messaging layer on top of MPI, with
+individual messages between ranks (operations, barriers, and heartbeats) as
+asynchronous point to point operations containing a message header with
+timestamps and distances. The current implementation makes no attempt to improve
+on the granularity of operations, generating 1 message for puts and 2 messages
+for gets (request-reply).
+
+We point out here two specific implementation details of the DSTM as critical for its operation:
+\begin{itemize}
+    \item minimum virtual time: the DSTM maintains an internal virtual time clock that only advances to match the smallest
+    version available (not discarded) across all its own partitions.
+    \item barrier/termination detection: a logical ring algorithm is used to identify when the simulation finishes.
+\end{itemize}
+
+The barrier ring algorithm merits more inspection: we have indicated that local
+time information is extracted by the DSTM from the originating time of locally
+issued operations. In order to detect the simulation is done, one would have to
+progress past the last timestamp of any operation. And any pending operation
+would have to complete by detecting that neighbors have progressed past that
+last timestamp. Thus, we implement a 3 phase barrier algorithm instead of the
+more classic 2 phases to identify the case where all ranks have \textit{sent out} all
+their operations from the case where all ranks have \textit{completed} their operations.
+Thus, all ranks arranged in a logical ring, the first round the token is
+forwarded when all local operations have been issued. The second round around
+the ring, the token is forwarded when all local operations have completed, and
+the third indicates exit from the barrier. These barriers tokens are also taken into account when updating the visibility of a version.
