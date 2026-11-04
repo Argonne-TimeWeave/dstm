@@ -24,6 +24,7 @@
 
 MPI_Datatype dstm_msg_hdr_dt;
 MPI_Datatype dstm_msg_putget_dt;
+MPI_Datatype dstm_msg_accumulate_dt;
 MPI_Datatype dstm_msg_barrier_dt;
 
 /*******************************************************************************
@@ -48,18 +49,30 @@ int dstm_msg_init(void)
 	                       dstm_msg_hdr_sig, &dstm_msg_hdr_dt);
 	MPI_Type_commit(&dstm_msg_hdr_dt);
 
-	/* dstm_msg_putget_t: region(int), ptr(intptr_t), size(size_t) */
-	MPI_Datatype dstm_msg_putget_sig[5] = {MPI_INT, MPI_AINT, MPI_AINT, MPI_INT, MPI_INT};
-	int dstm_msg_putget_bl[5] = {1, 1, 1, 1, 1};
-	MPI_Aint dstm_msg_putget_disp[5] = {
+	/* dstm_msg_putget_t: region(int), ptr.offset(intptr_t), size(size_t) */
+	MPI_Datatype dstm_msg_putget_sig[3] = {MPI_INT, MPI_AINT, MPI_AINT};
+	int dstm_msg_putget_bl[3] = {1, 1, 1};
+	MPI_Aint dstm_msg_putget_disp[3] = {
 	        offsetof(dstm_msg_putget_t, ptr.region),
 	        offsetof(dstm_msg_putget_t, ptr.offset),
-	        offsetof(dstm_msg_putget_t, size), 
-            offsetof(dstm_msg_putget_t, op),
-            offsetof(dstm_msg_putget_t, datatype)};
-	MPI_Type_create_struct(5, dstm_msg_putget_bl, dstm_msg_putget_disp,
+	        offsetof(dstm_msg_putget_t, size)};
+	MPI_Type_create_struct(3, dstm_msg_putget_bl, dstm_msg_putget_disp,
 	                       dstm_msg_putget_sig, &dstm_msg_putget_dt);
 	MPI_Type_commit(&dstm_msg_putget_dt);
+
+	/* dstm_msg_accumulate_t: region(int), ptr.offset(intptr_t),
+	 * size(size_t), reduce_id(int) */
+	MPI_Datatype dstm_msg_acc_sig[4] = {MPI_INT, MPI_AINT, MPI_AINT,
+	                                    MPI_INT};
+	int dstm_msg_acc_bl[4] = {1, 1, 1, 1};
+	MPI_Aint dstm_msg_acc_disp[4] = {
+	        offsetof(dstm_msg_accumulate_t, ptr.region),
+	        offsetof(dstm_msg_accumulate_t, ptr.offset),
+	        offsetof(dstm_msg_accumulate_t, size),
+	        offsetof(dstm_msg_accumulate_t, reduce_id)};
+	MPI_Type_create_struct(4, dstm_msg_acc_bl, dstm_msg_acc_disp,
+	                       dstm_msg_acc_sig, &dstm_msg_accumulate_dt);
+	MPI_Type_commit(&dstm_msg_accumulate_dt);
 
 	/* dstm_msg_barrier_t: last_time(int64_t) */
 	MPI_Datatype dstm_msg_barrier_sig[1] = {MPI_INT64_T};
@@ -77,6 +90,7 @@ int dstm_msg_finalize(void)
 {
 	MPI_Type_free(&dstm_msg_hdr_dt);
 	MPI_Type_free(&dstm_msg_putget_dt);
+	MPI_Type_free(&dstm_msg_accumulate_dt);
 	MPI_Type_free(&dstm_msg_barrier_dt);
 	return 0;
 }
@@ -118,10 +132,11 @@ int dstm_msg_fill_hdr(dstm_msg_t *m,
 
 int dstm_msg_fill_payload(dstm_msg_t *m, dstm_ptr_t ptr, void *src, size_t size)
 {
+	/* putget and accumulate share the leading ptr/size layout; writing
+	 * through putget sets both for PUT/GET and APPEND.  The APPEND path
+	 * additionally sets u.accumulate.reduce_id after this call. */
 	m->u.putget.ptr = ptr;
 	m->u.putget.size = size;
-	m->u.putget.op       = DSTM_OP_APPEND;  /* default; overridden by accumulate */
-	m->u.putget.datatype = DSTM_DT_INT32;
 	/* src may be NULL for messages that carry no payload (GET_REQ).
 	 * When non-NULL it is a non-owning pointer into the request's buf. */
 	m->data = src;
@@ -150,9 +165,16 @@ static int dstm_msg_isend_with_data(dstm_msg_t *msg, int tag)
 	assert(msg != NULL);
 	assert(msg->data != NULL);
 
+	/* APPEND carries the reduce_id body; PUT/GET_REP carry the lean
+	 * putget body.  ptr/size alias across the two, so size is readable
+	 * through u.putget either way. */
+	int is_append = (msg->header.type == DSTM_MSG_TYPE_APPEND);
+	MPI_Datatype body_dt =
+	        is_append ? dstm_msg_accumulate_dt : dstm_msg_putget_dt;
+
 	int hsz, psz, dsz;
 	MPI_Pack_size(1, dstm_msg_hdr_dt, dstm_global_context.comm, &hsz);
-	MPI_Pack_size(1, dstm_msg_putget_dt, dstm_global_context.comm, &psz);
+	MPI_Pack_size(1, body_dt, dstm_global_context.comm, &psz);
 	MPI_Pack_size(msg->u.putget.size, MPI_CHAR, dstm_global_context.comm,
 	              &dsz);
 	size_t bufsz = hsz + psz + dsz;
@@ -164,8 +186,12 @@ static int dstm_msg_isend_with_data(dstm_msg_t *msg, int tag)
 	int pos = 0;
 	MPI_Pack(&msg->header, 1, dstm_msg_hdr_dt, msg->packbuf, bufsz, &pos,
 	         dstm_global_context.comm);
-	MPI_Pack(&msg->u.putget, 1, dstm_msg_putget_dt, msg->packbuf, bufsz,
-	         &pos, dstm_global_context.comm);
+	if (is_append)
+		MPI_Pack(&msg->u.accumulate, 1, dstm_msg_accumulate_dt,
+		         msg->packbuf, bufsz, &pos, dstm_global_context.comm);
+	else
+		MPI_Pack(&msg->u.putget, 1, dstm_msg_putget_dt, msg->packbuf,
+		         bufsz, &pos, dstm_global_context.comm);
 	MPI_Pack(msg->data, msg->u.putget.size, MPI_CHAR, msg->packbuf, bufsz,
 	         &pos, dstm_global_context.comm);
 
@@ -317,9 +343,13 @@ int dstm_msg_recvany(MPI_Status status, dstm_msg_t *msg)
 
 	switch (msg->header.type) {
 	case DSTM_MSG_TYPE_PUT:
-    case DSTM_MSG_TYPE_APPEND:
 		MPI_Unpack(msg->packbuf, bufsz, &pos, &msg->u.putget, 1,
 		           dstm_msg_putget_dt, dstm_global_context.comm);
+		msg->data = (char *)msg->packbuf + pos;
+		break;
+	case DSTM_MSG_TYPE_APPEND:
+		MPI_Unpack(msg->packbuf, bufsz, &pos, &msg->u.accumulate, 1,
+		           dstm_msg_accumulate_dt, dstm_global_context.comm);
 		msg->data = (char *)msg->packbuf + pos;
 		break;
 	case DSTM_MSG_TYPE_GET_REQ:
@@ -414,14 +444,21 @@ json_t *dstm_msg_to_json(dstm_msg_t *msg)
 
 	switch (msg->header.type) {
 	case DSTM_MSG_TYPE_PUT:
-    case DSTM_MSG_TYPE_APPEND:
 		json_object_set_new(
-		        obj, (msg->header.type == DSTM_MSG_TYPE_APPEND)
-		                     ? "append" : "put",
+		        obj, "put",
 		        json_pack("{s:I, s:i, s:I}", "dst",
 		                  (json_int_t)msg->u.putget.ptr.offset, "region",
 		                  msg->u.putget.ptr.region, "size",
 		                  (json_int_t)msg->u.putget.size));
+		break;
+	case DSTM_MSG_TYPE_APPEND:
+		json_object_set_new(
+		        obj, "append",
+		        json_pack("{s:I, s:i, s:I, s:i}", "dst",
+		                  (json_int_t)msg->u.accumulate.ptr.offset,
+		                  "region", msg->u.accumulate.ptr.region,
+		                  "size", (json_int_t)msg->u.accumulate.size,
+		                  "reduce_id", msg->u.accumulate.reduce_id));
 		break;
 	case DSTM_MSG_TYPE_GET_REQ:
 		json_object_set_new(

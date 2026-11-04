@@ -285,6 +285,9 @@ int dstm_finalize(void)
 {
 	dstm_msg_finalize();
 
+	/* Drop all registered reducers so a re-init starts clean. */
+	dstm_reduce_table_reset();
+
     /* Defensive: dstm_fini normally destroys the session matrix and
 	 * nulls the pointer, so this is a no-op in the balanced case. */
 	dstm_distance_destroy(&dstm_global_context.distances);
