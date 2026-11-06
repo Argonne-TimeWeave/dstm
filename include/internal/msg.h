@@ -60,6 +60,18 @@ struct dstm_msg_putget_s {
 };
 typedef struct dstm_msg_putget_s dstm_msg_putget_t;
 
+/* Accumulate/append body.  reduce_id selects the owner-side fold:
+ *   - DSTM_MSG_APPEND_CONCAT  -> byte-concatenation (dstm_append)
+ *   - any registered reducer id -> that reducer (dstm_accumulate)
+ * ptr/size carry the same meaning as in dstm_msg_putget_t. */
+#define DSTM_MSG_APPEND_CONCAT (-1)
+struct dstm_msg_accumulate_s {
+	dstm_ptr_t ptr;
+	size_t     size;
+	int        reduce_id;
+};
+typedef struct dstm_msg_accumulate_s dstm_msg_accumulate_t;
+
 /* Barrier token payload: carries the target logical time so that all ranks in
  * the ring can verify consistency.  src_rank in the header identifies which
  * rank forwarded this token. */
@@ -77,6 +89,7 @@ struct dstm_msg_s {
 	 */
 	union {
 		dstm_msg_putget_t putget;
+        dstm_msg_accumulate_t accumulate;
 		dstm_msg_barrier_t barrier;
 	} u;
 	/* data buffer, if needed */

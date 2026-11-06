@@ -350,6 +350,60 @@ void dstm_distance_destroy(dstm_distance_t **dist);
 typedef int64_t dstm_time_t;
 
 /*******************************************************************************
+ * ACCUMULATE / REDUCE
+ *
+ * Reductions are driven by a user-supplied function pointer rather than a
+ * fixed operator/datatype matrix.  This lets an accumulate fold arbitrary
+ * POD structs, not just scalar cells.
+ *
+ * A reducer folds one incoming contribution into the cell, in place:
+ *
+ *     void reduce(void *dst, const void *src, size_t size, void *user);
+ *
+ *   - dst : the owner's current cell bytes (size bytes).  Updated in place.
+ *   - src : one producer's contribution (size bytes).
+ *   - size: the cell width in bytes (== the structure's element size).
+ *   - user: the opaque pointer passed at registration time.
+ *
+ * The reducer runs on the OWNING rank, which applies all contributions to a
+ * given (rank, region, effective time, offset) version in MPI arrival order.
+ * A correct reducer MUST therefore be associative and commutative, so the
+ * fold is order-independent and the result is deterministic across runs.
+ *
+ * FUNCTION POINTERS DO NOT CROSS MPI.  A reducer is selected on the wire by a
+ * small integer id, not by its address.  Every rank MUST register the same
+ * reducers, in the same order, before issuing or receiving any accumulate, so
+ * that a given id names the same fold on every rank (SPMD).  Registration is a
+ * local, non-collective call; the matching order is the caller's contract.
+ ******************************************************************************/
+
+/* A user reduction: dst = fold(dst, src), both @p size bytes, in place. */
+typedef void (*dstm_reduce_fn)(void *dst, const void *src, size_t size, void *user);
+
+/* Opaque, process-wide reducer id.  Valid from registration until
+ * dstm_finalize.  Pass to dstm_accumulate and the darray/dgraph wrappers. */
+typedef int dstm_reduce_id_t;
+
+#define DSTM_REDUCE_ID_INVALID (-1)
+
+/* Maximum number of reducers that can be registered in one process. */
+#define DSTM_MAX_REDUCERS 64
+
+/**
+ * Register a reducer and return its process-wide id.
+ *
+ * Local (non-collective), but every rank MUST perform the SAME sequence of
+ * registrations so a given id denotes the same fold everywhere.  Typically
+ * called once per data structure during setup, before dstm_start.
+ *
+ * @param[in]  fn    the fold function (non-NULL)
+ * @param[in]  user  opaque pointer handed back to @p fn on every call
+ * @param[out] id    receives the new reducer id on success (non-NULL)
+ * @return DSTM_SUCCESS, -DSTM_EINVAL (NULL fn/id), -DSTM_ENOMEM (table full)
+ */
+int dstm_reduce_register(dstm_reduce_fn fn, void *user, dstm_reduce_id_t *id);
+
+/*******************************************************************************
  * DSTM START/FINISH
  ******************************************************************************/
 
@@ -543,6 +597,22 @@ int dstm_darray_put(dstm_darray_t *darray,
                     void *src,
                     dstm_time_t time,
                     dstm_time_t delta);
+
+/**
+ * Accumulate @p src onto the element at @p global_index using @p op over
+ * @p datatype, effective at (time + delta).  The element's width must be
+ * an exact multiple of the datatype width; count is element_size/dt_size.
+ *
+ * Same delta/rank invariants as dstm_darray_put.  Many ranks may
+ * accumulate onto the same element at the same effective time; the owner
+ * reduces them in arrival order (order-independent for all supported ops).
+ */
+int dstm_darray_accumulate(dstm_darray_t *darray,
+                           size_t global_index,
+                           void *src,
+                           dstm_time_t time,
+                           dstm_time_t delta,
+                           dstm_reduce_id_t reduce);
 
 /**
  * Read @p count elements from the distributed array at the global
@@ -903,6 +973,19 @@ int dstm_dgraph_vertex_put(dstm_dgraph_t *dgraph,
                            dstm_time_t delta);
 
 /**
+ * Accumulate @p src onto vertex @p vertex_id's state using @p op over
+ * @p datatype, effective at (time + delta).  Mirrors dstm_dgraph_vertex_put
+ * delta/rank rules; the owner reduces concurrent accumulates in arrival
+ * order.  vertex_state_size must be a multiple of the datatype width.
+ */
+int dstm_dgraph_vertex_accumulate(dstm_dgraph_t *dgraph,
+                                  size_t vertex_id,
+                                  void *src,
+                                  dstm_time_t time,
+                                  dstm_time_t delta,
+                                  dstm_reduce_id_t reduce);
+
+/**
  * Variant of dstm_dgraph_vertex_get that falls back to @p default_value
  * when (time + delta) is strictly negative. Matches
  * dstm_darray_get_or_default.
@@ -953,6 +1036,19 @@ int dstm_dgraph_edge_put(dstm_dgraph_t *dgraph,
                          void *src,
                          dstm_time_t time,
                          dstm_time_t delta);
+
+/**
+ * Accumulate @p src onto edge (@p u, @p v)'s state using @p op over
+ * @p datatype, effective at (time + delta).  Mirrors dstm_dgraph_edge_put
+ * rules; edge_state_size must be a multiple of the datatype width.
+ */
+int dstm_dgraph_edge_accumulate(dstm_dgraph_t *dgraph,
+                                size_t u,
+                                size_t v,
+                                void *src,
+                                dstm_time_t time,
+                                dstm_time_t delta,
+                                dstm_reduce_id_t reduce);
 
 /*******************************************************************************
  * Neighborhood queries
@@ -1414,6 +1510,60 @@ int dstm_append(int rank,
                 dstm_ptr_t dst,
                 void *src,
                 size_t size);
+
+/*******************************************************************************
+ * ACCUMULATE  (user-reducer fold onto a fixed-size version cell)
+ *
+ * Unlike dstm_append (which concatenates bytes into a growing slot),
+ * dstm_accumulate folds @p size bytes from @p src into the FIXED-SIZE cell
+ * that lives at dst, using the registered reducer @p reduce:
+ *
+ *     reduce(cell, src, size, user)
+ *
+ * A cell never grows, so many producers can accumulate onto the same
+ * (owner, time + delta, offset) version without overflow.  The fold is
+ * applied by the OWNING rank in MPI arrival order; a correct reducer is
+ * associative+commutative, so the result is order-independent and therefore
+ * deterministic across runs (the key difference from append).
+ *
+ * FIRST CONTRIBUTION SEEDS THE CELL.  You do NOT have to seed the cell or
+ * reason about your reducer's identity.  The owner tracks which cells have
+ * received a contribution in each version: the first accumulate into a cell
+ * is copied in raw, and every subsequent accumulate folds with @p reduce.
+ * So, e.g., a min over positive values returns the true minimum rather than
+ * being pulled to the calloc'd zero.
+ *
+ * DO NOT MIX put AND accumulate ON THE SAME CELL.  A put does not mark the
+ * cell as seeded, so a later accumulate would treat itself as the first
+ * contribution and overwrite the put.  For a given (owner, effective time,
+ * offset) cell, use one or the other -- either publish it with put, or build
+ * it with accumulate, never both.
+ *
+ * @p reduce must be an id returned by dstm_reduce_register on THIS rank; the
+ * owner applies the fold registered under the same id in its own table.
+ ******************************************************************************/
+
+/**
+ * Fold @p size bytes from @p src into the cell at @p dst, hosted on
+ * @p rank, effective at (time + delta), using registered reducer @p reduce.
+ *
+ * All (time, delta, rank) rules mirror dstm_put / dstm_append:
+ *   - @p region_id must equal @p dst.region.
+ *   - @p delta must be >= 0; @p delta == 0 requires the local rank.
+ *   - the target version must still be WRITABLE when applied.
+ *
+ * @return DSTM_SUCCESS, -DSTM_EINVAL (NULL src, bad region, negative
+ *         delta, unregistered @p reduce), -DSTM_EDOM (remote with
+ *         delta == 0), or the underlying transport error.
+ */
+int dstm_accumulate(int rank,
+                    int region_id,
+                    dstm_time_t time,
+                    dstm_time_t delta,
+                    dstm_ptr_t dst,
+                    void *src,
+                    size_t size,
+                    dstm_reduce_id_t reduce);
 
 #ifdef __cplusplus
 }

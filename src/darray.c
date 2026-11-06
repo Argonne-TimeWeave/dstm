@@ -301,6 +301,27 @@ int dstm_darray_put(dstm_darray_t *darray,
 	                darray->element_size);
 }
 
+int dstm_darray_accumulate(dstm_darray_t *darray,
+                           size_t global_index,
+                           void *src,
+                           dstm_time_t time,
+                           dstm_time_t delta,
+                           dstm_reduce_id_t reduce)
+{
+	if (darray == NULL || src == NULL)
+		return -DSTM_EINVAL;
+
+	int rank, region;
+	dstm_ptr_t dst;
+	darray_resolve(darray, global_index, &rank, &region, &dst);
+
+	/* Fold one whole element (element_size bytes) with the user reducer.
+	 * The reducer owns any interpretation of those bytes as scalars or
+	 * struct fields. */
+	return dstm_accumulate(rank, region, time, delta, dst, src,
+	                       darray->element_size, reduce);
+}
+
 int dstm_darray_get_range(dstm_darray_t *darray,
                           const size_t *indices,
                           size_t count,

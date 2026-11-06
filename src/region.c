@@ -549,8 +549,51 @@ void dstm_region_version_destroy(dstm_region_t *region,
 
 	DL_DELETE(region->versions, version);
     dstm_profile_version_destroyed();
+
+	/* Free the accumulate-cell bookkeeping list, if any. */
+	dstm_region_acc_cell_t *c, *ctmp;
+	DL_FOREACH_SAFE(version->acc_cells, c, ctmp)
+	{
+		DL_DELETE(version->acc_cells, c);
+		free(c);
+	}
+
 	free(version->buffer);
 	free(version);
+}
+
+int dstm_region_version_has_acc_cell(dstm_region_version_t *version,
+                                     intptr_t offset)
+{
+	if (version == NULL)
+		return 0;
+
+	dstm_region_acc_cell_t *c;
+	DL_FOREACH(version->acc_cells, c)
+	{
+		if (c->offset == offset)
+			return 1;
+	}
+	return 0;
+}
+
+int dstm_region_version_mark_acc_cell(dstm_region_version_t *version,
+                                      intptr_t offset, size_t size)
+{
+	if (version == NULL)
+		return -DSTM_EINVAL;
+
+	if (dstm_region_version_has_acc_cell(version, offset))
+		return DSTM_SUCCESS;
+
+	dstm_region_acc_cell_t *c = calloc(1, sizeof(*c));
+	if (c == NULL)
+		return -DSTM_ENOMEM;
+
+	c->offset = offset;
+	c->size   = size;
+	DL_APPEND(version->acc_cells, c);
+	return DSTM_SUCCESS;
 }
 
 /*******************************************************************************

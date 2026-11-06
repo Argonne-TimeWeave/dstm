@@ -338,13 +338,72 @@ static int dstm_request_progress_in_put(dstm_request_t *req)
 	return 0;
 }
 
-/* Shared accumulate helper: append req->buf (req->size bytes) into the
- * target version's slot at req->dst.offset, which is laid out as
- * [ uint64_t byte_count | accumulated bytes ].  Creates the version on
- * demand, exactly like IN_PUT, and enforces the same WRITABLE phase rule.
+/* ---------------------------------------------------------------------------
+ * Reducer registry for dstm_accumulate.
  *
- * The region buffer is calloc'd per version, so an as-yet-untouched slot
- * reads byte_count == 0 and we start accumulating at offset 0. */
+ * Reductions are user function pointers, which cannot cross MPI.  Each rank
+ * registers the same reducers, in the same order, before issuing or receiving
+ * any accumulate; a reducer is then named on the wire by its table index
+ * (reduce_id) and looked up locally on the owner before the fold is applied.
+ *
+ * The table is process-wide and persists across dstm_start/dstm_fini sessions
+ * (registration typically happens before the first dstm_start).  It is cleared
+ * only by dstm_finalize via dstm_reduce_table_reset.
+ * ------------------------------------------------------------------------- */
+
+struct dstm_reduce_entry_s {
+	dstm_reduce_fn fn;
+	void          *user;
+	int            in_use;
+};
+
+static struct dstm_reduce_entry_s dstm_reduce_table[DSTM_MAX_REDUCERS];
+static int                        dstm_reduce_count;
+
+int dstm_reduce_register(dstm_reduce_fn fn, void *user, dstm_reduce_id_t *id)
+{
+	if (fn == NULL || id == NULL)
+		return -DSTM_EINVAL;
+	if (dstm_reduce_count >= DSTM_MAX_REDUCERS)
+		return -DSTM_ENOMEM;
+
+	int slot = dstm_reduce_count++;
+	dstm_reduce_table[slot].fn     = fn;
+	dstm_reduce_table[slot].user   = user;
+	dstm_reduce_table[slot].in_use = 1;
+	*id = slot;
+	return DSTM_SUCCESS;
+}
+
+/* 1 iff id names a registered reducer in this process. */
+static int dstm_reduce_id_valid(int id)
+{
+	return id >= 0 && id < dstm_reduce_count &&
+	       dstm_reduce_table[id].in_use;
+}
+
+/* Clear the whole table.  Called from dstm_finalize. */
+void dstm_reduce_table_reset(void)
+{
+	for (int i = 0; i < DSTM_MAX_REDUCERS; i++) {
+		dstm_reduce_table[i].fn     = NULL;
+		dstm_reduce_table[i].user   = NULL;
+		dstm_reduce_table[i].in_use = 0;
+	}
+	dstm_reduce_count = 0;
+}
+
+/* Shared accumulate helper: fold req->buf (req->size bytes) into the
+ * target version's slot at req->dst.offset.  Creates the version on demand,
+ * exactly like IN_PUT, and enforces the same WRITABLE phase rule.
+ *
+ * Two folds are selected by req->reduce_id:
+ *   - DSTM_MSG_APPEND_CONCAT: byte-concatenation into a slot laid out as
+ *     [ uint64_t byte_count | accumulated bytes ] (dqueue / dstm_append).
+ *     The region buffer is calloc'd per version, so an as-yet-untouched
+ *     slot reads byte_count == 0 and we start appending at offset 0.
+ *   - any registered reducer id: the user fold is applied in place over the
+ *     fixed-size cell at req->dst.offset (dstm_accumulate). */
 static void dstm_region_append_apply(dstm_region_t *rg, dstm_request_t *req,
                                      dstm_time_t target)
 {
@@ -362,30 +421,70 @@ static void dstm_region_append_apply(dstm_region_t *rg, dstm_request_t *req,
 		abort();
 	}
 
-	/* Slot base within the version buffer. */
-	char    *slot  = (char *)v->buffer + req->dst.offset;
-	uint64_t count;
-	memcpy(&count, slot, sizeof(uint64_t));
+	char *slot = (char *)v->buffer + req->dst.offset;
 
-	/* Overflow guard: the accumulated region must stay inside the
-	 * region buffer.  The data-structure layer (dqueue) bound-checks
-	 * before issuing, but a corrupt or oversized producer must not be
-	 * allowed to scribble past the region. */
-	size_t head    = (size_t)req->dst.offset + sizeof(uint64_t);
-	size_t written = (size_t)count;
-	if (head + written + req->size > rg->size) {
-		dstm_log_error(
-		        "append overflow on rank %d: slot at offset %td would "
-		        "exceed region size %zu (count=%" PRIu64
-		        ", add=%zu)\n",
-		        dstm_global_context.rank, req->dst.offset, rg->size,
-		        count, req->size);
-		abort();
+	if (req->reduce_id == DSTM_MSG_APPEND_CONCAT) {
+		/* ---- byte-concatenation path (dqueue / dstm_append) ---- */
+		uint64_t count;
+		memcpy(&count, slot, sizeof(uint64_t));
+
+		size_t head    = (size_t)req->dst.offset + sizeof(uint64_t);
+		size_t written = (size_t)count;
+		if (head + written + req->size > rg->size) {
+			dstm_log_error(
+			        "append overflow on rank %d: slot at offset %td "
+			        "would exceed region size %zu (count=%" PRIu64
+			        ", add=%zu)\n",
+			        dstm_global_context.rank, req->dst.offset,
+			        rg->size, count, req->size);
+			abort();
+		}
+		memcpy(slot + sizeof(uint64_t) + written, req->buf, req->size);
+		count += (uint64_t)req->size;
+		memcpy(slot, &count, sizeof(uint64_t));
+		return;
 	}
 
-	memcpy(slot + sizeof(uint64_t) + written, req->buf, req->size);
-	count += (uint64_t)req->size;
-	memcpy(slot, &count, sizeof(uint64_t));
+	/* ---- user-reducer fold path (dstm_accumulate) ---- */
+	{
+		if ((size_t)req->dst.offset + req->size > rg->size) {
+			dstm_log_error(
+			        "accumulate overflow on rank %d: cell at offset "
+			        "%td + %zu exceeds region size %zu\n",
+			        dstm_global_context.rank, req->dst.offset,
+			        req->size, rg->size);
+			abort();
+		}
+		if (!dstm_reduce_id_valid(req->reduce_id)) {
+			dstm_log_error(
+			        "accumulate on rank %d: unknown reducer id %d "
+			        "(not registered on this rank)\n",
+			        dstm_global_context.rank, req->reduce_id);
+			abort();
+		}
+
+		/* First contribution to this cell in this version SEEDS it
+		 * (raw copy); every subsequent one FOLDS with the reducer.
+		 * This removes any dependence on a reducer identity value or
+		 * on seeding the cell with a prior put -- the owner knows
+		 * which contribution is first, so the caller never has to. */
+		if (!dstm_region_version_has_acc_cell(v, req->dst.offset)) {
+			memcpy(slot, req->buf, req->size);
+			if (dstm_region_version_mark_acc_cell(
+			            v, req->dst.offset, req->size) != 0) {
+				dstm_log_error(
+				        "accumulate on rank %d: out of memory "
+				        "tracking cell at offset %td\n",
+				        dstm_global_context.rank,
+				        req->dst.offset);
+				abort();
+			}
+		} else {
+			struct dstm_reduce_entry_s *e =
+			        &dstm_reduce_table[req->reduce_id];
+			e->fn(slot, req->buf, req->size, e->user);
+		}
+	}
 }
 
 static int dstm_request_progress_local_append(dstm_request_t *req)
@@ -630,16 +729,17 @@ static void dstm_handle_incoming_msg(MPI_Status status)
 		 * request accumulates into the slot instead of
 		 * overwriting it.  Concatenation order is the order these
 		 * IN_APPEND requests are applied, i.e. MPI arrival order. */
-		dptr = (dstm_ptr_t){m.u.putget.ptr.region,
-		                    m.u.putget.ptr.offset};
+		dptr = (dstm_ptr_t){m.u.accumulate.ptr.region,
+		                    m.u.accumulate.ptr.offset};
 		dstm_request_create(&nr, DSTM_REQUEST_TYPE_IN_APPEND,
 		                    status.MPI_TAG, m.header.time,
 		                    m.header.delta, m.header.dst_rank,
 		                    m.header.region_id, dptr,
-		                    (dstm_ptr_t){0, 0}, m.u.putget.size);
-		nr->buf = malloc(m.u.putget.size);
+		                    (dstm_ptr_t){0, 0}, m.u.accumulate.size);
+		nr->reduce_id = m.u.accumulate.reduce_id;
+		nr->buf = malloc(m.u.accumulate.size);
 		assert(nr->buf != NULL);
-		memcpy(nr->buf, m.data, m.u.putget.size);
+		memcpy(nr->buf, m.data, m.u.accumulate.size);
 		dstm_msg_free_packbuf(&m);
 		DL_INSERT_INORDER(requests, nr, dstm_request_cmp_departure);
 		break;
@@ -982,30 +1082,97 @@ int dstm_append(int rank,
 
 	dstm_request_t *req;
 	if (rank == dstm_global_context.rank) {
-		/* Local append: buffer the payload so the caller's buffer
-		 * can be reused or freed immediately. */
 		dstm_request_create(&req, DSTM_REQUEST_TYPE_LOCAL_APPEND, -1,
 		                    time, delta, rank, region_id, dst,
 		                    (dstm_ptr_t){0, 0}, size);
+		req->reduce_id = DSTM_MSG_APPEND_CONCAT;
 		req->buf = malloc(size);
 		assert(req->buf != NULL);
 		memcpy(req->buf, src, size);
 	} else {
-		/* Outgoing append: async send, APPEND message type. */
 		int tag = dstm_request_new_tag();
 		dstm_request_create(&req, DSTM_REQUEST_TYPE_OUT_APPEND, tag,
 		                    time, delta, rank, region_id, dst,
 		                    (dstm_ptr_t){0, 0}, size);
+		req->reduce_id = DSTM_MSG_APPEND_CONCAT;
 		req->buf = malloc(size);
 		assert(req->buf != NULL);
 		memcpy(req->buf, src, size);
-
 		dstm_msg_fill_hdr(&req->msg, DSTM_MSG_TYPE_APPEND, time, delta,
 		                  rank, dstm_global_context.rank, region_id);
 		dstm_msg_fill_payload(&req->msg, dst, req->buf, size);
+		req->msg.u.accumulate.reduce_id = DSTM_MSG_APPEND_CONCAT;
 		dstm_msg_isend(&req->msg, tag);
 		req->status = DSTM_REQUEST_STATUS_ISEND;
 	}
+	DL_INSERT_INORDER(requests, req, dstm_request_cmp_departure);
+	return 0;
+}
+
+int dstm_accumulate(int rank,
+                    int region_id,
+                    dstm_time_t time,
+                    dstm_time_t delta,
+                    dstm_ptr_t dst,
+                    void *src,
+                    size_t size,
+                    dstm_reduce_id_t reduce)
+{
+	dstm_log_info("accumulate: %d, %d, %" PRId64 ", %" PRId64
+	              ", %d:%td, %p, size=%zu, reduce=%d\n",
+	              rank, region_id, time, delta, dst.region, dst.offset,
+	              src, size, (int)reduce);
+
+	if (region_id < 0 || region_id >= DSTM_MAX_REGIONS)
+		return -DSTM_EINVAL;
+	if (src == NULL)
+		return -DSTM_EINVAL;
+	if (region_id != dst.region)
+		return -DSTM_EINVAL;
+	if (delta < 0)
+		return -DSTM_EINVAL;
+	if (size == 0)
+		return -DSTM_EINVAL;
+	/* reduce must name a reducer registered on THIS rank; the owner
+	 * applies the reducer registered under the same id in its table.
+	 * DSTM_MSG_APPEND_CONCAT is the append sentinel, not a reducer. */
+	if (reduce == DSTM_MSG_APPEND_CONCAT || !dstm_reduce_id_valid(reduce))
+		return -DSTM_EINVAL;
+
+	if (delta == 0 && rank != dstm_global_context.rank)
+		return -DSTM_EDOM;
+
+	if (dstm_global_context.local_heartbeat_time < time) {
+		dstm_region_send_heartbeat_to_all(time);
+		dstm_global_context.local_heartbeat_time = time;
+	}
+
+	dstm_request_t *req;
+	if (rank == dstm_global_context.rank) {
+		dstm_request_create(&req, DSTM_REQUEST_TYPE_LOCAL_APPEND, -1,
+		                    time, delta, rank, region_id, dst,
+		                    (dstm_ptr_t){0, 0}, size);
+		req->reduce_id = reduce;
+		req->buf = malloc(size);
+		assert(req->buf != NULL);
+		memcpy(req->buf, src, size);
+	} else {
+		int tag = dstm_request_new_tag();
+		dstm_request_create(&req, DSTM_REQUEST_TYPE_OUT_APPEND, tag,
+		                    time, delta, rank, region_id, dst,
+		                    (dstm_ptr_t){0, 0}, size);
+		req->reduce_id = reduce;
+		req->buf = malloc(size);
+		assert(req->buf != NULL);
+		memcpy(req->buf, src, size);
+		dstm_msg_fill_hdr(&req->msg, DSTM_MSG_TYPE_APPEND, time, delta,
+		                  rank, dstm_global_context.rank, region_id);
+		dstm_msg_fill_payload(&req->msg, dst, req->buf, size);
+		req->msg.u.accumulate.reduce_id = reduce;
+		dstm_msg_isend(&req->msg, tag);
+		req->status = DSTM_REQUEST_STATUS_ISEND;
+	}
+
 	DL_INSERT_INORDER(requests, req, dstm_request_cmp_departure);
 	return 0;
 }

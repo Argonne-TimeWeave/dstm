@@ -118,10 +118,25 @@ typedef struct dstm_region_ninfo_s dstm_region_ninfo_t;
  * (distance-based check).
  ******************************************************************************/
 
+/* Records one accumulate cell that has received at least one contribution
+ * in a given version.  Used so the FIRST accumulate into a cell copies the
+ * contribution in raw (seeding the cell) and every subsequent one folds
+ * with the user reducer -- removing any dependence on a reducer identity
+ * value or on seeding the cell with a prior put. */
+struct dstm_region_acc_cell_s {
+	intptr_t offset; /* byte offset of the cell within the version buffer */
+	size_t   size;   /* cell width in bytes */
+	struct dstm_region_acc_cell_s *prev, *next; /* utlist DL linkage */
+};
+typedef struct dstm_region_acc_cell_s dstm_region_acc_cell_t;
+
 struct dstm_region_version_s {
 	dstm_time_t time; /* Logical timestamp this version represents */
 	int status; /* WRITABLE, READABLE, or DISCARDABLE */
 	void *buffer; /* Full copy of region data (malloc'd, region->size) */
+	/* Accumulate cells already seeded in this version (see
+	 * dstm_region_acc_cell_t).  NULL until the first accumulate. */
+	dstm_region_acc_cell_t *acc_cells;
 	struct dstm_region_version_s *prev, *next; /* utlist DL linkage */
 };
 typedef struct dstm_region_version_s dstm_region_version_t;
@@ -186,6 +201,15 @@ dstm_region_version_t *dstm_region_version_find_or_create(dstm_region_t *region,
  * region's version list. */
 void dstm_region_version_destroy(dstm_region_t *region,
                                  dstm_region_version_t *version);
+
+/* Accumulate-cell bookkeeping.  Returns 1 if the cell at @p offset has
+ * already been seeded in @p version (i.e. a prior accumulate recorded it),
+ * 0 otherwise.  dstm_region_version_mark_acc_cell records the cell so a
+ * later call to _has_ returns 1; it is a no-op if already recorded. */
+int dstm_region_version_has_acc_cell(dstm_region_version_t *version,
+                                     intptr_t offset);
+int dstm_region_version_mark_acc_cell(dstm_region_version_t *version,
+                                      intptr_t offset, size_t size);
 
 /*******************************************************************************
  * JSON formatting helpers
