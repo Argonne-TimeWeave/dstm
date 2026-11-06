@@ -21,9 +21,12 @@
 - Avoid re-proving/defining things many times. When given a chance to modularize or generalize existing code, take it.
 - Treat `context.tex` as read-only design context. Reconcile model changes with it, but do not clarify or modernize the document itself.
 - Mark a TODO complete only after its assumption is integrated into the relevant top-level definition and proved through the reachable-state invariant, not merely defined locally.
+- After every model change, explain what changed and why, with `file:line` pointers to the relevant model definitions/proofs, `context.tex`, and runtime source or headers.
+- Record every weak, ambiguous, inconsistent, or insufficiently formal runtime behavior discovered during modeling in `CONCERNS.md`. Include precise `file:line` evidence, the model property it affects, and whether it is an implementation bug, documentation mismatch, or unresolved design question. Keep resolved entries with their resolution rather than deleting them.
 
 # Response Preference
 
 - Short, concise, and to the point responses. 
 - If unconfident, terminate and ask a clarifying question.
 - Always give a short description of changes made in the chat box.
+- For model changes, relate the description explicitly to both the prose semantics in `context.tex` and the implementation in `../src/` or `../include/`.

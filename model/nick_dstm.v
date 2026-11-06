@@ -1675,6 +1675,8 @@ Definition timestamp_of i :=
   match i with Load t _ _ _ | Store t _ _ _ => t end.
 
 Definition live_nodes (np : node_pool) := dom (filter (λ '(_, (li, _)), li ≠ []) np).
+Definition active_node (np : node_pool) (i : node_id) : Prop :=
+  exists li e, np !! i = Some (li, e) /\ li <> [].
 Definition config' := (node_pool * mem * gmap node_id timestamp)%type.
 
 Inductive step' : config' -> config' -> Prop :=
@@ -1695,11 +1697,11 @@ Inductive step' : config' -> config' -> Prop :=
 | step'_readable np m l t v nt
   (Hload : m !! (l, t) = Some (v, Writeable))
   (Hpast : forall i,
-    i ∈ live_nodes np ->
+    active_node np i ->
     i = owner l \/ neighbors G i (owner l) ->
     exists ti, nt !! i = Some ti /\
       if Nat.eqb i (owner l)
-      then t <= ti
+      then t < ti
       else exists d,
         readable_lag G i (owner l) = Some d /\
         t < ti + d):
@@ -1713,6 +1715,16 @@ Definition monotonic (li : list instr) := forall a b ia ib, a < b -> li !! a = S
 
 Definition monotonic_program (prog : gmap node_id (list instr)) : Prop :=
   map_Forall (fun _ li => monotonic li) prog.
+
+Definition allowed_node_pool (np : node_pool) : Prop :=
+  map_Forall
+    (fun i p => Forall (fun op => operation_allowed owner i op G) (fst p))
+    np.
+
+Definition allowed_program (prog : gmap node_id (list instr)) : Prop :=
+  map_Forall
+    (fun i li => Forall (fun op => operation_allowed owner i op G) li)
+    prog.
 
 Definition heartbeat_frontier (t : timestamp) (li : list instr) :=
   forall k op, li !! k = Some op -> t <= timestamp_of op.
@@ -1755,6 +1767,82 @@ Definition monotonic_status
   map_Forall (fun _ p => monotonic (fst p)) np /\
   heartbeat_frontiers np nt.
 
+Lemma status_readability_visible np nt l t :
+  monotonic_status np nt ->
+  allowed_node_pool np ->
+  (forall i,
+    active_node np i ->
+    i = owner l \/ neighbors G i (owner l) ->
+    exists ti, nt !! i = Some ti /\
+      if Nat.eqb i (owner l)
+      then t < ti
+      else exists d,
+        readable_lag G i (owner l) = Some d /\
+        t < ti + d) ->
+  visible np l t.
+Proof.
+  intros [_ Hfront] Hallowed Hpast Hpending.
+  destruct Hpending as
+    [i [instructions [e [op [Hlookup [Hop Hwrites]]]]]].
+  destruct op as [issued_at x l' target_at | issued_at l' target_at v].
+  - exact Hwrites.
+  - cbn in Hwrites.
+    destruct Hwrites as [-> ->].
+    assert (Hactive : active_node np i).
+    {
+      exists instructions, e.
+      split; first exact Hlookup.
+      intros ->.
+      rewrite elem_of_nil in Hop.
+      contradiction.
+    }
+    assert (Hop_allowed :
+      operation_allowed owner i (Store issued_at l t v) G).
+    {
+      pose proof (Hallowed i (instructions, e) Hlookup) as Hall.
+      cbn in Hall.
+      rewrite Forall_forall in Hall.
+      exact (Hall (Store issued_at l t v) Hop).
+    }
+    assert (Hrelevant : i = owner l \/ neighbors G i (owner l)).
+    {
+      exact (proj1 Hop_allowed).
+    }
+    destruct (Hpast i Hactive Hrelevant) as [ti [Hti Hpast_i]].
+    pose proof (Hfront i instructions e ti Hlookup Hti) as Hfront_i.
+    apply elem_of_list_lookup_1 in Hop.
+    destruct Hop as [k Hop].
+    specialize (Hfront_i k (Store issued_at l t v) Hop).
+    cbn in Hop_allowed.
+    destruct Hop_allowed as [_ Htime].
+    destruct (Nat.eq_dec (owner l) i) as [Hlocal | Hremote].
+    + subst i.
+      rewrite Nat.eqb_refl in Htime, Hpast_i.
+      apply (Nat.lt_irrefl t).
+      eapply Nat.lt_le_trans.
+      * exact Hpast_i.
+      * eapply Nat.le_trans.
+        -- exact Hfront_i.
+        -- exact Htime.
+    + assert (Heqb : Nat.eqb (owner l) i = false).
+      { apply Nat.eqb_neq. exact Hremote. }
+      rewrite Heqb in Htime.
+      assert (Heqb' : Nat.eqb i (owner l) = false).
+      { apply Nat.eqb_neq. congruence. }
+      rewrite Heqb' in Hpast_i.
+      destruct Htime as [d [Hlag Hbound]].
+      destruct Hpast_i as [d' [Hlag' Hpast']].
+      rewrite Hlag in Hlag'.
+      injection Hlag' as <-.
+      apply (Nat.lt_irrefl t).
+      eapply Nat.lt_le_trans.
+      * exact Hpast'.
+      * eapply Nat.le_trans.
+        -- apply Nat.add_le_mono_r.
+           exact Hfront_i.
+        -- exact Hbound.
+Qed.
+
 Lemma monotonic_status_initial np :
   map_Forall (fun _ p => monotonic (fst p)) np ->
   monotonic_status np empty.
@@ -1791,6 +1879,71 @@ Proof.
   apply monotonic_status_initial.
   apply init_config_monotonic.
   exact Hmono.
+Qed.
+
+Lemma init_config_allowed prog :
+  allowed_program prog ->
+  allowed_node_pool (fst (init_config prog)).
+Proof.
+  intros Hallowed i [li e] Hlookup.
+  unfold init_config in Hlookup.
+  cbn [fst] in Hlookup.
+  apply (proj1 (lookup_fmap_Some
+    (fun ops : list instr => (ops, (∅ : env)))
+    prog i (li, e))) in Hlookup.
+  destruct Hlookup as [ops [Heq Hprog]].
+  inversion Heq; subst.
+  exact (Hallowed i li Hprog).
+Qed.
+
+Lemma allowed_node_pool_step np m nt np' m' nt' :
+  allowed_node_pool np ->
+  step' (np, m, nt) (np', m', nt') ->
+  allowed_node_pool np'.
+Proof.
+  intros Hallowed Hstep.
+  inversion Hstep; subst.
+  - exact Hallowed.
+  - apply map_Forall_insert_2.
+    + cbn.
+      apply Forall_inv_tail with (a := Load t1 x l t).
+      exact (Hallowed i (Load t1 x l t :: rest, e) Hi).
+    + exact Hallowed.
+  - apply map_Forall_insert_2.
+    + cbn.
+      apply Forall_inv_tail with (a := Store t1 l t v).
+      exact (Hallowed i (Store t1 l t v :: rest, e) Hi).
+    + exact Hallowed.
+  - exact Hallowed.
+Qed.
+
+Lemma allowed_node_pool_reachable np m nt np' m' nt' :
+  allowed_node_pool np ->
+  rtc step' (np, m, nt) (np', m', nt') ->
+  allowed_node_pool np'.
+Proof.
+  intros Hallowed Hrtc.
+  pose proof (@rtc_ind_r config' step'
+    (fun c => allowed_node_pool c.1.1) (np, m, nt)) as Hind.
+  specialize (Hind Hallowed).
+  specialize (Hind ltac:(
+    intros [[np1 m1] nt1] [[np2 m2] nt2] _ Hstep IH;
+    eapply allowed_node_pool_step; eauto)).
+  exact (Hind (np', m', nt') Hrtc).
+Qed.
+
+Corollary allowed_program_status_reachable prog np' m' nt' :
+  allowed_program prog ->
+  rtc step'
+    (fst (init_config prog), snd (init_config prog), empty)
+    (np', m', nt') ->
+  allowed_node_pool np'.
+Proof.
+  intros Hallowed Hrtc.
+  eapply allowed_node_pool_reachable.
+  - apply init_config_allowed.
+    exact Hallowed.
+  - exact Hrtc.
 Qed.
 
 Lemma monotonic_status_step np m nt np' m' nt' :

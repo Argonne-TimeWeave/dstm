@@ -19,7 +19,7 @@ Depends on **Foundations**.
 - Model end-of-writes signaling and barriers so the runtime can determine when a version is readable (`nick_dstm.v:25`, `nick_dstm.v:32`).
 - Model end-of-reads signaling and the runtime's barrier evidence before using the maximum distance for concrete discardability; heartbeat time alone does not prove no same-time local operation remains.
 - Generalize push/pull from one timestep to each edge's channel lag `d` (`nick_dstm.v:1638`).
-- Prove heartbeat time plus `d` makes status readability imply abstract visibility (`nick_dstm.v:1638`).
+- [x] Prove that the directed readability bound plus monotonic heartbeat frontiers makes the status readability premise imply abstract visibility (`status_readability_visible`); this requires strict local progress past the version timestamp.
 
 ## 3. Semantic correspondence
 
@@ -34,7 +34,8 @@ Abstract proofs depend on **Foundations**; concrete status proofs also depend on
 - Prove that every valid push or pull program has a deadlock-free terminating schedule (`nick_dstm.v:24`, `nick_dstm.v:336`, `nick_dstm.v:1586`, `nick_dstm.v:1595`).
 - Prove deadlock freedom for the concrete status semantics (`nick_dstm.v:334`).
 - Adapt the ring termination construction to the concrete status semantics: schedule heartbeats, prove the required versions become readable, retire them as discardable when safe, and account for runtime-style eviction.
-- Reconcile same-time local operations with heartbeat frontiers: nondecreasing issue times allow another local read or write at the announced timestamp.
+- [x] Reconcile same-time local writes with readability: nondecreasing issue times allow another local write at the announced timestamp, so the local readability check is now strict and the visibility proof covers reachable legal node pools.
+- Reconcile same-time local reads with future discardability; the maximum distance and a non-strict heartbeat alone cannot exclude another read at the announced timestamp.
 - Prove concrete ring termination only after the status semantics includes sufficient end-of-writes/end-of-reads or barrier evidence; the current abstract ring schedule does not establish those runtime facts.
 - Decide whether to prove that every reachable ring state has a terminating continuation (`ring_can_always_terminate`, `nick_dstm.v:1511`).
 - Prove ring result correctness using a preserved state invariant (`ring_correct`, `nick_dstm.v:1517`).
