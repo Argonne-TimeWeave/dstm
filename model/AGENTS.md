@@ -23,6 +23,7 @@
 - Mark a TODO complete only after its assumption is integrated into the relevant top-level definition and proved through the reachable-state invariant, not merely defined locally.
 - After every model change, explain what changed and why, with `file:line` pointers to the relevant model definitions/proofs, `context.tex`, and runtime source or headers.
 - Record every weak, ambiguous, inconsistent, or insufficiently formal runtime behavior discovered during modeling in `CONCERNS.md`. Include precise `file:line` evidence, the model property it affects, and whether it is an implementation bug, documentation mismatch, or unresolved design question. Keep resolved entries with their resolution rather than deleting them.
+- Generalize and combine duplicated, overlapping, or unnecessarily narrow `CONCERNS.md` entries when possible, while preserving every distinct technical claim, classification, model impact, precise runtime/model evidence, and resolution.
 
 # Response Preference
 

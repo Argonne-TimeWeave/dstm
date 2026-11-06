@@ -8,7 +8,7 @@ Items explicitly identified as future work in `nick_dstm.v`, ordered by dependen
 - [ ] Complete the memory/status lifecycle work begun in `nick_dstm.v`:
   - [x] Represent logical `Discardable` tombstones in the abstract semantics, guarded by the absence of pending reads, and prove retired versions preserve their value and cannot become writable again through reachable states (`retired_version_reachable`).
   - [x] Distinguish the runtime's directed minimum/readability distance from its directed maximum/discardability distance in `comm_graph`, constrain both to the same reachable channels with minimum no greater than maximum, and integrate the minimum bound through operation validity, status readability, the ring graph, and reachable heartbeat-frontier proofs.
-  - [ ] Add a sound `READABLE -> DISCARDABLE` rule to the heartbeat/status semantics using a separate discard-distance bound and explicit end-of-reads/barrier evidence.
+  - [x] Add a sound `READABLE -> DISCARDABLE` rule to the heartbeat/status semantics using a separate discard-distance bound and explicit end-of-reads evidence. Remote loads carry both the minimum look-back and maximum retention bound; `discard_safe` requires local closure and permits strict maximum-distance heartbeat evidence only for remote readers; the valid-program reachable invariant proves this excludes pending reads.
   - [ ] Relate logical tombstones to runtime eviction and prove that removing a discardable version preserves observable behavior.
 - Refine the model with message travel time and relate it to read/write limits (`nick_dstm.v:1583`).
 
@@ -35,7 +35,7 @@ Abstract proofs depend on **Foundations**; concrete status proofs also depend on
 - Prove deadlock freedom for the concrete status semantics (`nick_dstm.v:334`).
 - Adapt the ring termination construction to the concrete status semantics: schedule heartbeats, prove the required versions become readable, retire them as discardable when safe, and account for runtime-style eviction.
 - [x] Reconcile same-time local writes with readability: nondecreasing issue times allow another local write at the announced timestamp, so the local readability check is now strict and the visibility proof covers reachable legal node pools.
-- Reconcile same-time local reads with future discardability; the maximum distance and a non-strict heartbeat alone cannot exclude another read at the announced timestamp.
+- Reconcile runtime local reads with future discardability; because local loads may target any past version, no heartbeat value alone excludes a later-issued local read, so the runtime needs enforceable end-of-reads/barrier evidence.
 - Prove concrete ring termination only after the status semantics includes sufficient end-of-writes/end-of-reads or barrier evidence; the current abstract ring schedule does not establish those runtime facts.
 - Decide whether to prove that every reachable ring state has a terminating continuation (`ring_can_always_terminate`, `nick_dstm.v:1511`).
 - Prove ring result correctness using a preserved state invariant (`ring_correct`, `nick_dstm.v:1517`).

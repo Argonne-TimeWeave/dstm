@@ -97,9 +97,11 @@ Definition operation_allowed
       if Nat.eqb (owner l) issuer then
         target_at <= issued_at
       else 
-        exists d, 
-          readable_lag G issuer (owner l) = Some d /\
-          target_at + d <= issued_at
+        exists readable discardable,
+          readable_lag G issuer (owner l) = Some readable /\
+          discard_lag G issuer (owner l) = Some discardable /\
+          target_at + readable <= issued_at /\
+          issued_at <= target_at + discardable
   | Store issued_at l target_at _ =>
       target_allowed G issuer (owner l) /\
       if Nat.eqb (owner l) issuer
@@ -373,9 +375,11 @@ Lemma remote_load_targets_old_version
     (Hallowed :
        operation_allowed owner issuer
          (Load issued_at x l target_at) G) :
-  exists d,
-    readable_lag G issuer (owner l) = Some d /\
-    target_at + d <= issued_at /\
+  exists readable discardable,
+    readable_lag G issuer (owner l) = Some readable /\
+    discard_lag G issuer (owner l) = Some discardable /\
+    target_at + readable <= issued_at /\
+    issued_at <= target_at + discardable /\
     target_at < issued_at.
 Proof.
   simpl in Hallowed.
@@ -388,11 +392,14 @@ Proof.
   }
 
   rewrite Heqb in Htime.
-  destruct Htime as [d [Hlag Hbound]].
-  exists d.
+  destruct Htime as
+    [readable [discardable [Hreadable [Hdiscardable [Hlower Hupper]]]]].
+  exists readable, discardable.
   repeat split; try assumption.
 
-  pose proof (channel_positive G issuer (owner l) d Hlag) as Hpositive.
+  pose proof
+    (channel_positive G issuer (owner l) readable Hreadable)
+    as Hpositive.
   lia.
 Qed.
 
@@ -1666,8 +1673,9 @@ Variable G : comm_graph.
 
 (* This heartbeat model abstracts the runtime under the assumptions that issue times are
     monotonic and heartbeat and operation delivery is atomic.  Readability uses the
-    directed minimum bound; the separate directed maximum bound is reserved for a future
-    discardability rule with explicit end-of-reads or barrier evidence.
+    directed minimum bound.  Discardability uses the directed maximum bound, but permits
+    heartbeat evidence only for remote readers; local arbitrary look-back requires an
+    explicit end-of-reads certificate.
    The single global timestamp map also abstracts the runtime's receiver- and region-local
    knowledge.  Removing finished nodes from readability checks stands for barrier completion;
    the runtime continues checking their clocks until its distributed barrier permits bypass. *)
@@ -1678,6 +1686,30 @@ Definition live_nodes (np : node_pool) := dom (filter (λ '(_, (li, _)), li ≠ 
 Definition active_node (np : node_pool) (i : node_id) : Prop :=
   exists li e, np !! i = Some (li, e) /\ li <> [].
 Definition config' := (node_pool * mem * gmap node_id timestamp)%type.
+
+Definition node_pending_read
+    (np : node_pool) (i : node_id) (l : loc) (t : timestamp) : Prop :=
+  exists instructions e op,
+    np !! i = Some (instructions, e) /\
+    op ∈ instructions /\
+    reads_from l t op.
+
+Definition end_of_reads
+    (np : node_pool) (i : node_id) (l : loc) (t : timestamp) : Prop :=
+  ~ node_pending_read np i l t.
+
+Definition discard_safe
+    (np : node_pool) (nt : gmap node_id timestamp)
+    (l : loc) (t : timestamp) : Prop :=
+  forall i instructions e,
+    np !! i = Some (instructions, e) ->
+    i = owner l \/ neighbors G i (owner l) ->
+    end_of_reads np i l t \/
+    (i <> owner l /\
+      exists ti d,
+        nt !! i = Some ti /\
+        discard_lag G i (owner l) = Some d /\
+        t + d < ti).
 
 Inductive step' : config' -> config' -> Prop :=
 | step'_heartbeat np i op rest e m nt
@@ -1706,6 +1738,10 @@ Inductive step' : config' -> config' -> Prop :=
         readable_lag G i (owner l) = Some d /\
         t < ti + d):
   step' (np, m, nt) (np, <[(l, t) := (v, Readable)]>m, nt)
+| step'_discardable np m l t v nt
+  (Hload : m !! (l, t) = Some (v, Readable))
+  (Hsafe : discard_safe np nt l t):
+  step' (np, m, nt) (np, <[(l, t) := (v, Discardable)]>m, nt)
 (* As written, this is still optional -- we can prove that it doesn't happen any earlier, but not that it
    happens as soon as it's ready. *)
 .
@@ -1766,6 +1802,52 @@ Definition monotonic_status
     (np : node_pool) (nt : gmap node_id timestamp) : Prop :=
   map_Forall (fun _ p => monotonic (fst p)) np /\
   heartbeat_frontiers np nt.
+
+Lemma status_discardability_no_pending_read np nt l t :
+  monotonic_status np nt ->
+  allowed_node_pool np ->
+  discard_safe np nt l t ->
+  ~ pending_read np l t.
+Proof.
+  intros [_ Hfront] Hallowed Hsafe Hpending.
+  destruct Hpending as
+    [i [instructions [e [op [Hlookup [Hop Hreads]]]]]].
+  destruct op as [issued_at x l' target_at | issued_at l' target_at v].
+  - cbn in Hreads.
+    destruct Hreads as [-> ->].
+    assert (Hop_allowed :
+      operation_allowed owner i (Load issued_at x l t) G).
+    {
+      pose proof (Hallowed i (instructions, e) Hlookup) as Hall.
+      cbn in Hall.
+      rewrite Forall_forall in Hall.
+      exact (Hall (Load issued_at x l t) Hop).
+    }
+    assert (Hrelevant : i = owner l \/ neighbors G i (owner l)).
+    { exact (proj1 Hop_allowed). }
+    destruct (Hsafe i instructions e Hlookup Hrelevant)
+      as [Hended | [Hremote [ti [d [Hti [Hdiscard Hpast]]]]]].
+    + apply Hended.
+      exists instructions, e, (Load issued_at x l t).
+      repeat split; assumption.
+    + pose proof (Hfront i instructions e ti Hlookup Hti) as Hfront_i.
+      apply elem_of_list_lookup_1 in Hop.
+      destruct Hop as [k Hop].
+      specialize (Hfront_i k (Load issued_at x l t) Hop).
+      cbn in Hop_allowed.
+      destruct Hop_allowed as [_ Htime].
+      assert (Heqb : Nat.eqb (owner l) i = false).
+      { apply Nat.eqb_neq. congruence. }
+      rewrite Heqb in Htime.
+      destruct Htime as
+        [readable [discardable
+          [Hreadable [Hdiscard' [Hlower Hupper]]]]].
+      rewrite Hdiscard in Hdiscard'.
+      injection Hdiscard' as <-.
+      cbn in Hfront_i.
+      lia.
+  - exact Hreads.
+Qed.
 
 Lemma status_readability_visible np nt l t :
   monotonic_status np nt ->
@@ -1915,6 +1997,7 @@ Proof.
       exact (Hallowed i (Store t1 l t v :: rest, e) Hi).
     + exact Hallowed.
   - exact Hallowed.
+  - exact Hallowed.
 Qed.
 
 Lemma allowed_node_pool_reachable np m nt np' m' nt' :
@@ -2008,6 +2091,7 @@ Proof.
         assert (np !! j = Some (li, e')) as Hnp_old.
         { rewrite <- Hnp. symmetry. apply lookup_insert_ne. congruence. }
         eapply Hfront; eauto.
+  - split; assumption.
   - split; assumption.
 Qed.
 
@@ -2179,6 +2263,21 @@ Proof.
     + exact Hrtc.
   - exact (valid_program_status_reachable
       owner G prog np' m' nt' Hvalid Hrtc).
+Qed.
+
+Corollary valid_status_discardability_no_pending_read
+    owner G prog np' m' nt' l t :
+  valid_program owner G prog ->
+  rtc (@step' owner G)
+    (fst (init_config prog), snd (init_config prog), empty)
+    (np', m', nt') ->
+  discard_safe owner G np' nt' l t ->
+  ~ pending_read np' l t.
+Proof.
+  intros Hvalid Hrtc Hsafe.
+  destruct (valid_program_status_invariants
+    owner G prog np' m' nt' Hvalid Hrtc) as [Hmono Hallowed].
+  eapply status_discardability_no_pending_read; eauto.
 Qed.
 
 Corollary valid_status_readability_visible

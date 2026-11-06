@@ -24,8 +24,15 @@
 ### Operation deltas are not checked against installed distance bounds
 
 - **Runtime evidence:** PUT/APPEND reject only negative deltas and remote zero (`../src/ops.c:784-792`, `../src/ops.c:969-975`); GET rejects only positive deltas and remote zero (`../src/ops.c:856-864`). None checks the actual delta against `dstm_distance_get` or `dstm_distance_get_discard`, although readability treats the matrix as a lower write bound (`../src/ops.c:89-111`) and the public header describes minimum/maximum bounds (`../include/dstm.h:295-305`).
-- **Model impact:** `operation_allowed` explicitly connects every remote operation to the directed readability bound. The reachable-state visibility proof applies only to programs satisfying that premise; runtime sign checks alone do not enforce it.
+- **Model impact:** `operation_allowed` explicitly connects remote stores to the directed readability bound and remote loads to both the readable minimum and discard maximum. The reachable-state visibility proof and any future discardability proof apply only to programs satisfying those premises; runtime sign checks alone enforce neither bound. In particular, without the maximum upper bound on a load's look-back, a discard heartbeat frontier cannot exclude a farther-past pending read.
 - **Classification:** Unenforced API contract / implementation weakness. Validate deltas or clearly expose the matrix relation as a required application proof obligation.
+
+### Local discardability has no enforceable end-of-reads evidence
+
+- **Runtime evidence:** Local GET permits any nonpositive delta (`../src/ops.c:856-864`), so an operation issued at a later time may still target an arbitrarily old local version. The discard check scans only already-issued requests (`../src/ops.c:135-152`) and otherwise permits retirement once `local_heartbeat_time >= v->time` (`../src/ops.c:179-180`), which cannot exclude a future local GET into the past.
+- **Prose semantics:** `context.tex:403-406` requires progress past `t + dist` before discardability, while `context.tex:414-416` requires discarding to preserve semantics. For the local rank, distance zero and monotonic originating times do not constrain how far a GET may look back.
+- **Model impact:** `discard_safe` requires explicit `end_of_reads` evidence for the owner and uses a strict `discard_lag` heartbeat frontier only for remote readers (`nick_dstm.v:1690-1713`). Treating local heartbeat progress as sufficient would invalidate `status_discardability_no_pending_read` (`nick_dstm.v:1806-1854`).
+- **Classification:** Potential implementation correctness bug / missing API contract. Enforce a local retention window or provide barrier/end-of-reads evidence that prevents future local reads of the version before eviction.
 
 ### Barrier completion does not establish a validated closure frontier
 
