@@ -36,11 +36,8 @@
 
 ### Barrier completion does not establish a validated closure frontier
 
-Barrier completion can justify bypassing heartbeat-based readability only if no new relevant operations can be issued, all previously issued writes have been received and applied, and all ranks agree on the barrier generation, phase, and closure frontier. The current runtime does not establish those facts unconditionally.
+Single-threaded client execution supplies issue quiescence, as recorded under **Resolved under assumption**. Barrier completion still requires all previously issued writes to have been received and applied and all ranks to agree on the barrier generation, phase, and closure frontier; the current runtime does not establish those remaining facts unconditionally.
 
-- **Entry-quiescence runtime evidence:** `dstm_barrier` appends its request after existing local requests (`../src/barrier.c:238-256`), and round 1 waits for currently tracked outgoing operations before setting `barrier_all_drained` (`../src/barrier.c:87-100`, `../src/barrier.c:124-174`). No runtime flag prevents another application thread from issuing a new operation after its rank forwards the round-1 token; the public contract describes draining in-flight requests but does not state a single-threaded or no-new-operations precondition (`../include/dstm.h:431-448`).
-- **Entry-quiescence model impact:** Barrier completion can serve as explicit end-of-writes/end-of-reads evidence only under an external quiescence premise. It is not yet sound to add an unconditional barrier transition that bypasses heartbeat premises or to claim concrete ring termination.
-- **Entry-quiescence classification:** Unresolved design/API-contract question. Formalize and enforce barrier-entry quiescence, or document the required application discipline.
 - **Delivery/application runtime evidence:** Round 1 treats OUT_PUT/OUT_APPEND completion as drained (`../src/barrier.c:87-100`), but those requests finish on local `MPI_Test` send completion (`../src/ops.c:497-507`, `../src/ops.c:418-425`). Tokens travel only to the ring successor (`../src/barrier.c:73-85`) while writes can target arbitrary ranks. After the token, `barrier_all_drained` bypasses all neighbor and local-clock readability checks (`../src/barrier.c:156-174`, `../src/ops.c:89-125`). The progress loop probes only one incoming message before status promotion and request application (`../src/ops.c:709-744`).
 - **Delivery/application model impact:** The runtime does not yet supply sound explicit end-of-writes evidence for an unconditional barrier readability transition. A message can remain in transit when a version is promoted, so concrete status correspondence and ring termination remain unproved.
 - **Delivery/application classification:** Potential implementation correctness bug. Require destination acknowledgments, per-peer sequence closure, or a receive/application fence before bypassing heartbeat checks.
@@ -60,8 +57,27 @@ Barrier completion can justify bypassing heartbeat-based readability only if no 
 - **Model impact:** A minimum is conservative for future push writes, but heterogeneous pull reads require the maximum look-back for safe retention. The model therefore keeps directed readable/discard lags separate and does not claim generalized pull implies runtime discardability.
 - **Classification:** Implementation/design limitation. Preserve directed per-rank minimum and maximum reductions from the underlying edges, or restrict/document supported pull patterns.
 
-### Neighbor-clock initialization and arithmetic rely on unchecked premises
+### Timestamp arithmetic relies on an unchecked boundedness premise
 
-- **Runtime evidence:** Missing `(rank, region)` clock entries silently return time zero and callers ignore the error (`../src/region.c:461-476`, `../src/ops.c:104-110`, `../src/ops.c:169-175`); late region registration is explicitly unsafe (`../include/dstm.h:1229-1235`). Effective timestamps and frontier expressions use unchecked signed addition/subtraction (`../src/ops.c:64`, `../src/ops.c:110`, `../src/ops.c:175`, `../src/ops.c:257`, `../src/ops.c:289`).
-- **Model impact:** Rocq timestamps are naturals with total arithmetic and the status proof assumes available frontier entries for every relevant active node. Runtime correspondence requires registration and bounded-arithmetic premises not represented yet.
-- **Classification:** Documented precondition plus implementation robustness weakness.
+- **Runtime evidence:** Effective timestamps and frontier expressions use unchecked signed addition/subtraction (`../src/ops.c:64`, `../src/ops.c:110`, `../src/ops.c:175`, `../src/ops.c:257`, `../src/ops.c:289`).
+- **Model impact:** Rocq timestamps are naturals with total arithmetic. Runtime correspondence therefore depends on the bounded-arithmetic assumption in `AGENTS.md`.
+- **Classification:** Open undocumented/unvalidated premise. State safe numeric bounds in the API or check overflow and underflow in the runtime.
+
+## Resolved under assumption
+
+### Barrier entry is issue-quiescent
+
+- **Runtime evidence:** `dstm_barrier` appends its request after existing local requests (`../src/barrier.c:238-256`), and round 1 waits for currently tracked outgoing operations before setting `barrier_all_drained` (`../src/barrier.c:87-100`, `../src/barrier.c:124-174`). The public contract describes draining in-flight requests but does not state the single-threaded client precondition (`../include/dstm.h:431-448`).
+- **Assumption:** Public DSTM calls on each rank are made by one client thread; while that thread is blocked in `dstm_barrier`, it cannot issue another operation (`AGENTS.md`, **Single-threaded client calls**).
+- **Model impact:** Barrier entry is valid client-side issue-quiescence evidence. This does not prove message delivery, request application, read completion, or agreement on a closure frontier; those distinct claims remain open above.
+- **Original classification and resolution:** Former unresolved design/API-contract question; resolved for the accepted execution scope. Residual documentation mismatch: the public API should state that DSTM calls are single-threaded and that no operation may be issued concurrently with a barrier.
+
+### Neighbor clocks are initialized before traffic
+
+- **Runtime evidence:** Missing `(rank, region)` clock entries silently return time zero and callers ignore the error (`../src/region.c:461-476`, `../src/ops.c:104-110`, `../src/ops.c:169-175`); late region registration is explicitly unsafe, and the API requires registration before local or neighboring operations (`../include/dstm.h:1229-1235`).
+- **Assumption:** Every region is registered before its rank or any neighbor issues operations on it (`AGENTS.md`, **Regions registered before traffic**).
+- **Model impact:** The status proof may assume an initialized frontier entry for each relevant active node. Under the precondition, the silent-zero fallback is unreachable in modeled executions.
+- **Original classification and resolution:** Documented precondition plus implementation robustness weakness; resolved for conforming programs under the documented pre-registration assumption. Ignoring lookup failures remains a defensive-programming weakness outside that scope.
+
+## Closed
+

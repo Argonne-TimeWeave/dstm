@@ -10,6 +10,18 @@
 - Plain English description of the programming/memory model can be found at context.tex
  - context.tex is the first work that describes this programming model so it is slightly out of date but still representative and accurate.
 
+## Assumption Register
+
+Treat assumptions as part of the model/runtime contract, not as reasons to delete contrary evidence. Each assumption must state its scope, evidence or provenance, model consequence, and whether the runtime enforces it. When an assumption resolves a concern, move or mark only the affected claim as **Resolved under assumption**, retain the original evidence and classification, and record the residual documentation or enforcement gap.
+
+- **Single-threaded client calls:** Each rank invokes the public DSTM API from one client thread; while that thread is blocked in `dstm_barrier` or `dstm_fini`, it cannot issue another operation. **Provenance:** confirmed project design assumption; the public header does not currently state it. **Model consequence:** barrier entry provides client-side issue quiescence, so the model need not account for concurrent post-entry API calls. **Enforcement:** assumed application discipline, not runtime-checked. This does not establish remote delivery/application completion or validate the barrier generation/frontier.
+- **One logical timeline and one current time per rank:** All ranks use one shared simulation timeline, and a rank has no internally virtualized logical processes with distinct current times (`context.tex:318-326`). **Model consequence:** one node program and heartbeat frontier per rank are adequate abstractions. **Enforcement:** design scope, not runtime-checked.
+- **Static ranks, ownership, and communication scope:** Ranks are static and uniquely identified, state ownership is statically partitioned (`context.tex:318-326`), and the session-global distance object covers every rank pair used by every live structure (`../include/dstm.h:388-405`). **Model consequence:** `owner` and `comm_graph` remain fixed during execution. **Enforcement:** rank/ownership stability is design scope; graph coverage is a documented caller precondition.
+- **Nondecreasing originating times:** Each rank issues operations in nondecreasing logical time (`context.tex:387-393`); equal times are allowed. **Model consequence:** `monotonic_program` and reachable heartbeat frontiers may be assumed only for valid programs. **Enforcement:** heartbeat updates ignore non-increases, but the runtime does not reject a decreasing operation time.
+- **Operation/graph compatibility:** Remote operation deltas respect the installed directed minimum readability and maximum discardability bounds. The installed matrix must cover all traffic (`../include/dstm.h:388-405`), and combined matrices retain the minimum and maximum bounds (`../include/dstm.h:295-315`). **Model consequence:** `operation_allowed` is a program proof obligation used by readability and discardability safety. **Enforcement:** matrix coverage and delta compatibility are documented/application obligations; basic operations currently check only delta sign and remote zero.
+- **Regions registered before traffic:** Every region is registered before its rank or any neighbor issues operations on it (`../include/dstm.h:1227-1235`). **Model consequence:** relevant neighbor-clock entries are assumed to exist rather than silently starting late at zero. **Enforcement:** documented caller precondition, not fully runtime-checked.
+- **Timestamp arithmetic remains in range:** Runtime signed timestamp addition/subtraction is assumed not to overflow or underflow. **Model consequence:** Rocq natural-number arithmetic represents logical timestamp calculations only under this bounded-runtime premise. **Enforcement:** not runtime-checked or presently documented as a numeric bound.
+
 ## Working Rules
 
 - Do not edit the generated `Makefile`; keep `Makefile.conf` portable to the active Rocq installation.
@@ -24,6 +36,7 @@
 - After every model change, explain what changed and why, with `file:line` pointers to the relevant model definitions/proofs, `context.tex`, and runtime source or headers.
 - Record every weak, ambiguous, inconsistent, or insufficiently formal runtime behavior discovered during modeling in `CONCERNS.md`. Include precise `file:line` evidence, the model property it affects, and whether it is an implementation bug, documentation mismatch, or unresolved design question. Keep resolved entries with their resolution rather than deleting them.
 - Generalize and combine duplicated, overlapping, or unnecessarily narrow `CONCERNS.md` entries when possible, while preserving every distinct technical claim, classification, model impact, precise runtime/model evidence, and resolution.
+- Before adding or closing a concern, check the Assumption Register. Do not use an assumption outside its stated scope, and do not treat an unenforced assumption as runtime evidence. Add newly confirmed assumptions here with provenance and update affected concerns with their exact resolution status.
 
 # Response Preference
 
