@@ -460,3 +460,11 @@ Thus, all ranks arranged in a logical ring, the first round the token is
 forwarded when all local operations have been issued. The second round around
 the ring, the token is forwarded when all local operations have completed, and
 the third indicates exit from the barrier. These barriers tokens are also taken into account when updating the visibility of a version.
+
+The model in brief
+An address in DSTM is (rank, offset, time). Time is logical simulation time (dstm_time_t), not wall clock.
+Every operation carries a (time, delta) pair; the version it touches is time + delta.
+A put requires delta >= 0 (you cannot write the past), a get requires delta <= 0 (you cannot read the future). delta == 0 is legal only for the local rank; remote accesses must use a non-zero delta.
+Versions do not inherit from one another. A cell nobody wrote at time t reads as zero, even if it was written at t-1. Long-lived state has to be re-published every tick. This is the most common first-use mistake.
+A dstm_distance_t is the communication graph plus a per-edge lookahead: how many timesteps of slack exist between two ranks. It is what lets a rank decide a version is final without asking anyone. A lookahead of 0 is unsound; use 1 for "synchronise every tick".
+put is asynchronous. get blocks until the requested version is readable, and that block is the only synchronisation in the system.

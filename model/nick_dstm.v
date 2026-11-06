@@ -38,30 +38,50 @@ Definition node_id := nat.
 Record comm_graph := {
   world_size : nat;
 
-  (* None corresponds to C values -1 or 0; Some d to d > 0. *)
-  channel_lag : node_id -> node_id -> option nat;
+  (* The runtime retains two directed logical-time bounds for each reachable
+     channel.  readable_lag is the minimum distance: the smallest permitted
+     future write determines when no more writes can arrive and a version may
+     become Readable.  discard_lag is the maximum distance: the largest
+     permitted look-back determines when no more reads can arrive and a version
+     may eventually become Discardable.  Ordinary graphs use the same value for
+     both; combining graphs can make them differ.  These are operation-time
+     bounds, not physical message-delivery latency. *)
+  readable_lag : node_id -> node_id -> option nat;
+  discard_lag : node_id -> node_id -> option nat;
 
   channel_in_bounds :
     forall p q d,
-      channel_lag p q = Some d ->
+      readable_lag p q = Some d ->
       p < world_size /\ q < world_size;
 
   channel_irreflexive : 
     forall p, p < world_size -> 
-      channel_lag p p = None;
+      readable_lag p p = None;
 
   channel_positive : 
-    forall p q d, channel_lag p q = Some d -> d > 0
+    forall p q d, readable_lag p q = Some d -> d > 0;
+
+  discard_channel :
+    forall p q,
+      (exists d, readable_lag p q = Some d) <->
+      (exists d, discard_lag p q = Some d);
+
+  channel_discard_bounds :
+    forall p q readable discardable,
+      readable_lag p q = Some readable ->
+      discard_lag p q = Some discardable ->
+      readable <= discardable
 }.
 
 Definition symmetric_graph (G : comm_graph) : Prop := 
   forall p q,
     p < world_size G -> 
     q < world_size G ->
-    channel_lag G p q = channel_lag G q p.
+    readable_lag G p q = readable_lag G q p /\
+    discard_lag G p q = discard_lag G q p.
 
 Definition neighbors (G : comm_graph) (p q : node_id) : Prop :=
-  exists d, channel_lag G p q = Some d.
+  exists d, readable_lag G p q = Some d.
 
 Definition target_allowed (G : comm_graph) (issuer target : node_id) : Prop :=
   issuer = target \/ neighbors G issuer target.
@@ -78,7 +98,7 @@ Definition operation_allowed
         target_at <= issued_at
       else 
         exists d, 
-          channel_lag G issuer (owner l) = Some d /\
+          readable_lag G issuer (owner l) = Some d /\
           target_at + d <= issued_at
   | Store issued_at l target_at _ =>
       target_allowed G issuer (owner l) /\
@@ -87,7 +107,7 @@ Definition operation_allowed
         issued_at <= target_at
       else
         exists d,
-          channel_lag G issuer (owner l) = Some d /\
+          readable_lag G issuer (owner l) = Some d /\
           issued_at + d <= target_at
   end.
 
@@ -344,7 +364,7 @@ Proof.
   - exact Hneighbor.
 Qed.
 
-(* A permitted remote load reads a version at least one channel lag
+(* A permitted remote load reads a version at least one readability lag
    behind its issuing timestamp. *)
 Lemma remote_load_targets_old_version
     (issuer : node_id) (issued_at : timestamp)
@@ -354,7 +374,7 @@ Lemma remote_load_targets_old_version
        operation_allowed owner issuer
          (Load issued_at x l target_at) G) :
   exists d,
-    channel_lag G issuer (owner l) = Some d /\
+    readable_lag G issuer (owner l) = Some d /\
     target_at + d <= issued_at /\
     target_at < issued_at.
 Proof.
@@ -376,7 +396,7 @@ Proof.
   lia.
 Qed.
 
-(* A permitted remote store writes a version at least one channel lag
+(* A permitted remote store writes a version at least one readability lag
    ahead of its issuing timestamp. *)
 Lemma remote_store_targets_future_version
     (issuer : node_id) (issued_at : timestamp)
@@ -386,7 +406,7 @@ Lemma remote_store_targets_future_version
        operation_allowed owner issuer
          (Store issued_at l target_at v) G) :
   exists d,
-    channel_lag G issuer (owner l) = Some d /\
+    readable_lag G issuer (owner l) = Some d /\
     issued_at + d <= target_at /\
     issued_at < target_at.
 Proof.
@@ -544,7 +564,10 @@ Definition neighbor n n1 n2 : bool := (n2 =? (n1 + 1) `mod` n) || (n2 =? (n1 + n
 
 Program Definition ring_graph n : comm_graph := {|
   world_size := n;
-  channel_lag n1 n2 := 
+  readable_lag n1 n2 := 
+    if decide (n1 < n /\ n2 < n /\ n1 <> n2 /\
+          neighbor n n1 n2 = true) then Some 1 else None;
+  discard_lag n1 n2 :=
     if decide (n1 < n /\ n2 < n /\ n1 <> n2 /\
           neighbor n n1 n2 = true) then Some 1 else None
 |}.
@@ -579,11 +602,30 @@ Next Obligation.
   - discriminate Hlag.
 Qed.
 
+(* discard_channel *)
+Next Obligation.
+  intros n p q.
+  cbn.
+  reflexivity.
+Qed.
+
+(* channel_discard_bounds *)
+Next Obligation.
+  intros n p q readable discardable Hreadable Hdiscardable.
+  cbn in Hreadable, Hdiscardable.
+  destruct (decide
+    (p < n /\ q < n /\ p <> q /\ neighbor n p q = true)).
+  - injection Hreadable as <-.
+    injection Hdiscardable as <-.
+    lia.
+  - discriminate Hreadable.
+Qed.
+
 (* A non-local successor in the ring is connected by an edge with lag 1. *)
 Lemma ring_successor_lag n i :
   i < n ->
   (i + 1) `mod` n <> i ->
-  channel_lag (ring_graph n) i ((i + 1) `mod` n) = Some 1.
+  readable_lag (ring_graph n) i ((i + 1) `mod` n) = Some 1.
 Proof.
   intros Hi Hneq.
   cbn.
@@ -620,7 +662,7 @@ Proof.
     + lia.
   - assert
       (Hlag :
-         channel_lag (ring_graph n) i ((i + 1) `mod` n) = Some 1).
+         readable_lag (ring_graph n) i ((i + 1) `mod` n) = Some 1).
     {
       apply ring_successor_lag; assumption.
     }
@@ -1623,7 +1665,9 @@ Variable owner : loc -> node_id.
 Variable G : comm_graph.
 
 (* This heartbeat model abstracts the runtime under the assumptions that issue times are
-   monotonic, channel lags are symmetric, and heartbeat and operation delivery is atomic.
+    monotonic and heartbeat and operation delivery is atomic.  Readability uses the
+    directed minimum bound; the separate directed maximum bound is reserved for a future
+    discardability rule with explicit end-of-reads or barrier evidence.
    The single global timestamp map also abstracts the runtime's receiver- and region-local
    knowledge.  Removing finished nodes from readability checks stands for barrier completion;
    the runtime continues checking their clocks until its distributed barrier permits bypass. *)
@@ -1657,7 +1701,7 @@ Inductive step' : config' -> config' -> Prop :=
       if Nat.eqb i (owner l)
       then t <= ti
       else exists d,
-        channel_lag G i (owner l) = Some d /\
+        readable_lag G i (owner l) = Some d /\
         t < ti + d):
   step' (np, m, nt) (np, <[(l, t) := (v, Readable)]>m, nt)
 (* As written, this is still optional -- we can prove that it doesn't happen any earlier, but not that it

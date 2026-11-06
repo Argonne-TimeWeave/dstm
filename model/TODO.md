@@ -7,6 +7,7 @@ Items explicitly identified as future work in `nick_dstm.v`, ordered by dependen
 - [x] Formalize and use the assumption that each node issues instructions at monotonically increasing logical times (`monotonic_program`, `monotonic_program_status_reachable`).
 - [ ] Complete the memory/status lifecycle work begun in `nick_dstm.v`:
   - [x] Represent logical `Discardable` tombstones in the abstract semantics, guarded by the absence of pending reads, and prove retired versions preserve their value and cannot become writable again through reachable states (`retired_version_reachable`).
+  - [x] Distinguish the runtime's directed minimum/readability distance from its directed maximum/discardability distance in `comm_graph`, constrain both to the same reachable channels with minimum no greater than maximum, and integrate the minimum bound through operation validity, status readability, the ring graph, and reachable heartbeat-frontier proofs.
   - [ ] Add a sound `READABLE -> DISCARDABLE` rule to the heartbeat/status semantics using a separate discard-distance bound and explicit end-of-reads/barrier evidence.
   - [ ] Relate logical tombstones to runtime eviction and prove that removing a discardable version preserves observable behavior.
 - Refine the model with message travel time and relate it to read/write limits (`nick_dstm.v:1583`).
@@ -16,6 +17,7 @@ Items explicitly identified as future work in `nick_dstm.v`, ordered by dependen
 Depends on **Foundations**.
 
 - Model end-of-writes signaling and barriers so the runtime can determine when a version is readable (`nick_dstm.v:25`, `nick_dstm.v:32`).
+- Model end-of-reads signaling and the runtime's barrier evidence before using the maximum distance for concrete discardability; heartbeat time alone does not prove no same-time local operation remains.
 - Generalize push/pull from one timestep to each edge's channel lag `d` (`nick_dstm.v:1638`).
 - Prove heartbeat time plus `d` makes status readability imply abstract visibility (`nick_dstm.v:1638`).
 
@@ -32,6 +34,8 @@ Abstract proofs depend on **Foundations**; concrete status proofs also depend on
 - Prove that every valid push or pull program has a deadlock-free terminating schedule (`nick_dstm.v:24`, `nick_dstm.v:336`, `nick_dstm.v:1586`, `nick_dstm.v:1595`).
 - Prove deadlock freedom for the concrete status semantics (`nick_dstm.v:334`).
 - Adapt the ring termination construction to the concrete status semantics: schedule heartbeats, prove the required versions become readable, retire them as discardable when safe, and account for runtime-style eviction.
+- Reconcile same-time local operations with heartbeat frontiers: nondecreasing issue times allow another local read or write at the announced timestamp.
+- Prove concrete ring termination only after the status semantics includes sufficient end-of-writes/end-of-reads or barrier evidence; the current abstract ring schedule does not establish those runtime facts.
 - Decide whether to prove that every reachable ring state has a terminating continuation (`ring_can_always_terminate`, `nick_dstm.v:1511`).
 - Prove ring result correctness using a preserved state invariant (`ring_correct`, `nick_dstm.v:1517`).
 
