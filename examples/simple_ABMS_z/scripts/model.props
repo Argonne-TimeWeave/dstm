@@ -1,0 +1,29 @@
+#random.seed = 42
+stop.at = 72
+
+# per process
+human.count = 8
+zombie.count = 0
+
+# DSTM-parity knobs
+patient.zero            = true
+incubation.ticks        = 72
+infect.prob.same.pct    = 30
+infect.prob.near.pct    = 15
+high.risk.fraction.pct  = 15
+high.risk.radius        = 1
+work                    = 0
+
+# world definition props
+min.x = -100
+min.y = -100
+max.x = 99
+max.y = 99
+grid.buffer = 2
+
+# these must multiply to total number of processes
+proc.per.x = 2
+proc.per.y = 2
+
+distribution.zombie_move = int_uniform, 0, 2
+distribution.infect_roll = int_uniform, 0, 99

@@ -1,0 +1,29 @@
+ANALYSIS:     PLANES sweep at FIXED ranks=256
+host:         cascade10
+date:         2026-10-29T18:38:04+00:00
+job id:       1012375
+alloc source: COBALT_NODEFILE  (8 nodes, using <= 8)
+nodefile:     /var/tmp/cobalt.1012375
+nodes:        cascade08 cascade09 cascade10 cascade11 cascade12 cascade13 cascade14 cascade15
+launcher:     mpirun [openmpi] 
+mpi prefix:   /soft/libraries/mpi/openmpi/4.1.1
+forwarded:    LD_LIBRARY_PATH PATH MPI_WRAP_OUTDIR
+placement:    pack   max ppn 32
+passes:       timing=1  activity=1
+fixed rung:   np=256  (8 nodes x 32 ppn)
+fixed na:     256     total_airports=65536 (256x256)
+SWEPT planes: 1 2 4 8 16 32 64 128 256
+darray exe:   /home/ncassarino/dstm/examples/airport_sim/simple_dstm/airports
+dgraph exe:   /home/ncassarino/dstm/examples/airport_sim/graph_dstm/airports
+dqueue exe:   /home/ncassarino/dstm/examples/airport_sim/queue_dstm/airports
+dqueue-batch: /home/ncassarino/dstm/examples/airport_sim/batch_queue/airports
+ross exe:     /home/ncassarino/dstm/examples/airport_sim/ross_airport
+impls:        darray graph queue queue_batch ross_opt ross_cons    variants: base
+cap/edge:     8  (GATE/queue cap = cap/edge * na; DSTM only)
+timesteps:    512    reps: 3
+ross end vt:  15360.0000  (= 512 * mean_dep=30.0)
+ross hops:    net_events / 3
+ross opt:     --synch=3 --extramem=200000
+ross cons:    --synch=2 --lookahead=1.00
+dumps under:  /home/ncassarino/dstm/examples/airport_sim/scripts/q_d_a/results_planes_sweep/planes_sweep_np256_20261029-183804/dumps
+timeout:      100s

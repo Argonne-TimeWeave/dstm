@@ -1,0 +1,7 @@
+python3 visualize_staleness.py     --stale-delay 10 --steps 100 --timestamp 99 --node-size 2.5 --edge-width 0.12 --dpi 300
+
+python3 congestion_fourstep.py \
+        --ranks 1 --mode stale --steps 80 \
+        --ticks 10 30 50 70 \
+        --rate 32 --cars 0 --cap 3 --seed 42 \
+        --output congestion-fourstep.pdf

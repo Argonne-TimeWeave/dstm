@@ -1,0 +1,28 @@
+host:         cascade10
+date:         2026-10-29T14:21:41+00:00
+job id:       1012353
+alloc source: COBALT_NODEFILE  (8 nodes, using <= 8)
+nodefile:     /var/tmp/cobalt.1012353
+nodes:        cascade08 cascade09 cascade10 cascade11 cascade12 cascade13 cascade14 cascade15
+launcher:     mpirun [openmpi] 
+mpi prefix:   /soft/libraries/mpi/openmpi/4.1.1
+forwarded:    LD_LIBRARY_PATH PATH MPI_WRAP_OUTDIR
+placement:    pack   max ppn 32
+passes:       timing=1  activity=1
+darray exe:   /home/ncassarino/dstm/examples/airport_sim/simple_dstm/airports
+dgraph exe:   /home/ncassarino/dstm/examples/airport_sim/graph_dstm/airports
+dqueue exe:   /home/ncassarino/dstm/examples/airport_sim/queue_dstm/airports
+ross exe:     /home/ncassarino/dstm/examples/airport_sim/ross_airport
+modes:        weak strong
+impls:        darray graph queue ross_opt ross_cons    variants: base
+weak ladder:  16:1:16 64:2:32 256:8:32
+strong ladr:  16:1:16 32:1:32 64:2:32 128:4:32 256:8:32
+na/rank:      256 (weak)   total: 16384 (strong)
+cap/edge:     8  (GATE/queue cap = cap/edge * na; DSTM only)
+planes:       4    timesteps: 512    reps: 3
+ross end vt:  15360.0000  (= 512 * mean_dep=30.0)
+ross hops:    net_events / 3
+ross opt:     --synch=3 --extramem=200000
+ross cons:    --synch=2 --lookahead=1.00
+dumps under:  /home/ncassarino/dstm/examples/airport_sim/scripts/q_d_a/results/20261029-142141/dumps
+timeout:      600s

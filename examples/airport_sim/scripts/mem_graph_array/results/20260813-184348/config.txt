@@ -1,0 +1,22 @@
+host:         cascade10
+date:         2026-08-13T18:43:48+00:00
+job id:       991820
+alloc source: COBALT_NODEFILE  (8 nodes, using <= 8)
+nodefile:     /var/tmp/cobalt.991820
+nodes:        cascade07 cascade08 cascade09 cascade10 cascade12 cascade13 cascade14 cascade15
+launcher:     mpirun [openmpi] 
+mpi prefix:   /soft/libraries/mpi/openmpi/4.1.1
+forwarded:    LD_LIBRARY_PATH PATH
+placement:    pack   max ppn 32
+darray exe:   /home/ncassarino/dstm/examples/airport_sim/simple_dstm/airports
+dgraph exe:   /home/ncassarino/dstm/examples/airport_sim/graph_dstm/airports
+modes:        weak strong
+impls:        darray graph    variants: base
+weak ladder:  4:1:4 16:1:16 64:2:32 256:8:32
+strong ladr:  4:1:4 16:1:16 32:1:32 64:2:32 128:4:32 256:8:32
+na/rank:      64 (weak)   total: 4096 (strong)
+planes:       4    timesteps: 4096    reps: 2
+cap/edge:     8  (GATE_CAPACITY = cap * na)
+sampler:      20 ms, comm 'airports', warmup 0.5s
+retry mult:   8x timesteps if ranks are missed
+timeout:      900s
