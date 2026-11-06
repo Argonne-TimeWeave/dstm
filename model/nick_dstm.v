@@ -2073,8 +2073,8 @@ End status_semantics.
    precisely when it needs to).
 *)
 
-(* Here, valid means push (remote write at t+1, local read at t) or pull (local write at t,
-   remote read at t-1).  Deadlock freedom means every reachable state is finished or can step.
+(* Here, valid means push (remote write at t+d, local read at t) or pull (local write at t,
+   remote read at t-d), using the directed channel lag d.  Deadlock freedom means every reachable state is finished or can step.
    Multiple writes may overwrite a Writeable version.  The implementation broadcasts advancing
    logical times as heartbeats and uses per-region neighbor times plus distance to close versions. *)
 
@@ -2086,7 +2086,10 @@ Definition push_instr
   | Load issued_at _ l target_at =>
       owner l = issuer /\ target_at = issued_at
   | Store issued_at l target_at _ =>
-      owner l <> issuer /\ target_at = S issued_at
+      owner l <> issuer /\
+      exists d,
+        readable_lag G issuer (owner l) = Some d /\
+        target_at = issued_at + d
   end.
 
 Definition pull_instr
@@ -2095,7 +2098,10 @@ Definition pull_instr
   operation_allowed owner issuer op G /\
   match op with
   | Load issued_at _ l target_at =>
-      owner l <> issuer /\ issued_at = S target_at
+      owner l <> issuer /\
+      exists d,
+        readable_lag G issuer (owner l) = Some d /\
+        issued_at = target_at + d
   | Store issued_at l target_at _ =>
       owner l = issuer /\ target_at = issued_at
   end.
@@ -2116,5 +2122,84 @@ Definition valid_program
   monotonic_program prog /\
   (push_program owner G prog \/ pull_program owner G prog).
 
-(* TODO: generalize push/pull from one step to channel lag d; then prove that heartbeat time
-   plus d makes the status readability test imply abstract visibility. *)
+Lemma push_program_allowed owner G prog :
+  push_program owner G prog -> allowed_program owner G prog.
+Proof.
+  intros Hpush i ops Hlookup.
+  rewrite Forall_forall.
+  intros op Hop.
+  pose proof (Hpush i ops Hlookup) as Hops.
+  rewrite Forall_forall in Hops.
+  exact (proj1 (Hops op Hop)).
+Qed.
+
+Lemma pull_program_allowed owner G prog :
+  pull_program owner G prog -> allowed_program owner G prog.
+Proof.
+  intros Hpull i ops Hlookup.
+  rewrite Forall_forall.
+  intros op Hop.
+  pose proof (Hpull i ops Hlookup) as Hops.
+  rewrite Forall_forall in Hops.
+  exact (proj1 (Hops op Hop)).
+Qed.
+
+Lemma valid_program_allowed owner G prog :
+  valid_program owner G prog -> allowed_program owner G prog.
+Proof.
+  intros [_ [Hpush | Hpull]].
+  - exact (push_program_allowed owner G prog Hpush).
+  - exact (pull_program_allowed owner G prog Hpull).
+Qed.
+
+Corollary valid_program_status_reachable owner G prog np' m' nt' :
+  valid_program owner G prog ->
+  rtc (@step' owner G)
+    (fst (init_config prog), snd (init_config prog), empty)
+    (np', m', nt') ->
+  allowed_node_pool owner G np'.
+Proof.
+  intros Hvalid Hrtc.
+  eapply allowed_program_status_reachable.
+  - exact (valid_program_allowed owner G prog Hvalid).
+  - exact Hrtc.
+Qed.
+
+Corollary valid_program_status_invariants owner G prog np' m' nt' :
+  valid_program owner G prog ->
+  rtc (@step' owner G)
+    (fst (init_config prog), snd (init_config prog), empty)
+    (np', m', nt') ->
+  monotonic_status np' nt' /\ allowed_node_pool owner G np'.
+Proof.
+  intros Hvalid Hrtc.
+  split.
+  - eapply monotonic_program_status_reachable.
+    + exact (proj1 Hvalid).
+    + exact Hrtc.
+  - exact (valid_program_status_reachable
+      owner G prog np' m' nt' Hvalid Hrtc).
+Qed.
+
+Corollary valid_status_readability_visible
+    owner G prog np' m' nt' l t :
+  valid_program owner G prog ->
+  rtc (@step' owner G)
+    (fst (init_config prog), snd (init_config prog), empty)
+    (np', m', nt') ->
+  (forall i,
+    active_node np' i ->
+    i = owner l \/ neighbors G i (owner l) ->
+    exists ti, nt' !! i = Some ti /\
+      if Nat.eqb i (owner l)
+      then t < ti
+      else exists d,
+        readable_lag G i (owner l) = Some d /\
+        t < ti + d) ->
+  visible np' l t.
+Proof.
+  intros Hvalid Hrtc Hpast.
+  destruct (valid_program_status_invariants
+    owner G prog np' m' nt' Hvalid Hrtc) as [Hmono Hallowed].
+  eapply status_readability_visible; eauto.
+Qed.

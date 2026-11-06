@@ -18,7 +18,7 @@ Depends on **Foundations**.
 
 - Model end-of-writes signaling and barriers so the runtime can determine when a version is readable (`nick_dstm.v:25`, `nick_dstm.v:32`).
 - Model end-of-reads signaling and the runtime's barrier evidence before using the maximum distance for concrete discardability; heartbeat time alone does not prove no same-time local operation remains.
-- Generalize push/pull from one timestep to each edge's channel lag `d` (`nick_dstm.v:1638`).
+- [x] Generalize push/pull from one timestep to each directed edge's readability lag `d`, integrate the generalized forms into `valid_program`, and prove valid programs carry operation validity through reachable status states and the readability visibility theorem.
 - [x] Prove that the directed readability bound plus monotonic heartbeat frontiers makes the status readability premise imply abstract visibility (`status_readability_visible`); this requires strict local progress past the version timestamp.
 
 ## 3. Semantic correspondence
