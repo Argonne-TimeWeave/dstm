@@ -6,7 +6,7 @@
 
 - **Runtime evidence:** `../src/ops.c:114-124` says the local clock must move strictly past the version, but the implemented test only blocks while `local_heartbeat_time < v->time`, so equality permits `WRITABLE -> READABLE`. Heartbeats advance only when an operation has a strictly greater issue time at `../src/ops.c:794-799`, `../src/ops.c:866-871`, and `../src/ops.c:977-981`.
 - **Prose semantics:** `context.tex:397-406` says readability requires that the owner and every neighbor have progressed past the version so they can no longer issue a write to it. `context.tex:390-393` requires originating times to be monotonic, which permits multiple operations at the same time.
-- **Model impact:** A heartbeat equal to the version timestamp cannot exclude a remaining same-time local store. The sound readability premise therefore requires strict local progress, `t < ti`, at `nick_dstm.v:1697-1708`; `status_readability_visible` relies on that inequality at `nick_dstm.v:1770-1844`.
+- **Model impact:** A heartbeat equal to the version timestamp cannot exclude a remaining same-time local store. The sound readability premise therefore requires strict local progress, `t < ti`, in `readable_safe` at `nick_dstm.v:1779-1790`; `status_readability_visible` relies on that inequality at `nick_dstm.v:1938-2003`.
 - **Classification:** Implementation/prose mismatch. Either the runtime needs a strict-past check or explicit end-of-writes/barrier evidence must rule out remaining same-time stores.
 
 ### Heartbeats do not order earlier operations before later clock evidence
@@ -31,7 +31,7 @@
 
 - **Runtime evidence:** Local GET permits any nonpositive delta (`../src/ops.c:856-864`), so an operation issued at a later time may still target an arbitrarily old local version. The discard check scans only already-issued requests (`../src/ops.c:135-152`) and otherwise permits retirement once `local_heartbeat_time >= v->time` (`../src/ops.c:179-180`), which cannot exclude a future local GET into the past.
 - **Prose semantics:** `context.tex:403-406` requires progress past `t + dist` before discardability, while `context.tex:414-416` requires discarding to preserve semantics. For the local rank, distance zero and monotonic originating times do not constrain how far a GET may look back.
-- **Model impact:** `discard_safe` requires explicit `end_of_reads` evidence for the owner and uses a strict `discard_lag` heartbeat frontier only for remote readers (`nick_dstm.v:1690-1713`). Treating local heartbeat progress as sufficient would invalidate `status_discardability_no_pending_read` (`nick_dstm.v:1806-1854`).
+- **Model impact:** `discard_safe` requires explicit `end_of_reads` evidence for the owner and uses a strict `discard_lag` heartbeat frontier only for remote readers (`nick_dstm.v:1792-1803`). Treating local heartbeat progress as sufficient would invalidate `status_discardability_no_pending_read` (`nick_dstm.v:1892-1936`).
 - **Classification:** Potential implementation correctness bug / missing API contract. Enforce a local retention window or provide barrier/end-of-reads evidence that prevents future local reads of the version before eviction.
 
 ### Barrier completion does not establish a validated closure frontier
@@ -80,4 +80,3 @@ Single-threaded client execution supplies issue quiescence, as recorded under **
 - **Original classification and resolution:** Documented precondition plus implementation robustness weakness; resolved for conforming programs under the documented pre-registration assumption. Ignoring lookup failures remains a defensive-programming weakness outside that scope.
 
 ## Closed
-

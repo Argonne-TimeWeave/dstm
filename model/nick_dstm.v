@@ -1776,6 +1776,19 @@ Definition end_of_reads
     (np : node_pool) (i : node_id) (l : loc) (t : timestamp) : Prop :=
   ~ node_pending_read np i l t.
 
+Definition readable_safe
+    (np : node_pool) (nt : gmap node_id timestamp)
+    (l : loc) (t : timestamp) : Prop :=
+  forall i,
+    active_node np i ->
+    i = owner l \/ neighbors G i (owner l) ->
+    exists ti, nt !! i = Some ti /\
+      if Nat.eqb i (owner l)
+      then t < ti
+      else exists d,
+        readable_lag G i (owner l) = Some d /\
+        t < ti + d.
+
 Definition discard_safe
     (np : node_pool) (nt : gmap node_id timestamp)
     (l : loc) (t : timestamp) : Prop :=
@@ -1806,15 +1819,7 @@ Inductive step' : config' -> config' -> Prop :=
     step' (np, m, nt) (<[i := (rest, e)]>np, <[(l, t) := (v, Writeable)]>m, <[i := t1]>nt)
 | step'_readable np m l t v nt
   (Hload : m !! (l, t) = Some (v, Writeable))
-  (Hpast : forall i,
-    active_node np i ->
-    i = owner l \/ neighbors G i (owner l) ->
-    exists ti, nt !! i = Some ti /\
-      if Nat.eqb i (owner l)
-      then t < ti
-      else exists d,
-        readable_lag G i (owner l) = Some d /\
-        t < ti + d):
+  (Hpast : readable_safe np nt l t):
   step' (np, m, nt) (np, <[(l, t) := (v, Readable)]>m, nt)
 | step'_discardable np m l t v nt
   (Hload : m !! (l, t) = Some (v, Readable))
@@ -1933,15 +1938,7 @@ Qed.
 Lemma status_readability_visible np nt l t :
   monotonic_status np nt ->
   allowed_node_pool np ->
-  (forall i,
-    active_node np i ->
-    i = owner l \/ neighbors G i (owner l) ->
-    exists ti, nt !! i = Some ti /\
-      if Nat.eqb i (owner l)
-      then t < ti
-      else exists d,
-        readable_lag G i (owner l) = Some d /\
-        t < ti + d) ->
+  readable_safe np nt l t ->
   visible np l t.
 Proof.
   intros [_ Hfront] Hallowed Hpast Hpending.
@@ -2004,6 +2001,34 @@ Proof.
         -- apply Nat.add_le_mono_r.
            exact Hfront_i.
         -- exact Hbound.
+Qed.
+
+Theorem abstract_step_lifts_with_evidence np m nt np' m' :
+  step owner G (np, m) (np', m') ->
+  (forall l t v,
+    np' = np ->
+    m' = <[(l, t) := (v, Readable)]>m ->
+    readable_safe np nt l t) ->
+  (forall l t v,
+    np' = np ->
+    m' = <[(l, t) := (v, Discardable)]>m ->
+    discard_safe np nt l t) ->
+  exists nt', step' (np, m, nt) (np', m', nt').
+Proof.
+  intros Hstep Hreadable Hdiscardable.
+  inversion Hstep; subst.
+  - exists (<[i := t1]>nt).
+    eapply step'_load; eassumption.
+  - exists (<[i := t1]>nt).
+    eapply step'_store; eassumption.
+  - exists nt.
+    eapply step'_readable.
+    + exact Hload.
+    + eapply Hreadable; reflexivity.
+  - exists nt.
+    eapply step'_discardable.
+    + exact Hload.
+    + eapply Hdiscardable; reflexivity.
 Qed.
 
 Lemma status_step_refines_abstract np m nt np' m' nt' :
@@ -2270,8 +2295,12 @@ Proof.
   - exact Hrtc.
 Qed.
 
-(* If all nodes' programs are monotonic, then this implementation can do anything that the nondeterministic
-   implementation can do. *)
+(* Intended completeness direction: if all nodes' programs are monotonic, then
+   the status semantics can reproduce anything the nondeterministic semantics
+   can do.  The current premises are insufficient: an abstract readability
+   step may be enabled without a strictly later heartbeat or validated barrier
+   evidence.  abstract_step_lifts_with_evidence proves the justified
+   single-step form once that evidence is supplied. *)
 Theorem monotonic_step'_safe np : map_Forall (λ _ '(li, _), monotonic li) np ->
   forall m np' m', rtc (step owner G) (np, m) (np', m') ->
   exists nt', rtc step' (np, m, empty) (np', m', nt').
@@ -2437,15 +2466,7 @@ Corollary valid_status_readability_visible
   rtc (@step' owner G)
     (fst (init_config prog), snd (init_config prog), empty)
     (np', m', nt') ->
-  (forall i,
-    active_node np' i ->
-    i = owner l \/ neighbors G i (owner l) ->
-    exists ti, nt' !! i = Some ti /\
-      if Nat.eqb i (owner l)
-      then t < ti
-      else exists d,
-        readable_lag G i (owner l) = Some d /\
-        t < ti + d) ->
+  readable_safe owner G np' nt' l t ->
   visible np' l t.
 Proof.
   intros Hvalid Hrtc Hpast.

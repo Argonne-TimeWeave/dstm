@@ -2,7 +2,7 @@
 
 - `nick_dstm.v` is a Rocq model.
 - The abstract semantics marks a version readable after all possible writes finish; the status semantics approximates this using monotonic logical-time heartbeats and channel lag.
-- A valid program has nondecreasing per-node originating times and is characterized as push (remote write in the future, local read now) or pull (local write now, remote read in the past). Deadlock freedom means every reachable state is finished or can step.
+- A valid program has nondecreasing per-node originating times and is classified globally for the current scope as push (remote write in the future, local read now) or pull (local write now, remote read in the past). Do not model a valid program by mixing push and pull instructions within one program. Prove the two classes separately where their progress arguments differ. Deadlock freedom means every reachable state is finished or can step.
 - "Monotonic" means nondecreasing, not strictly increasing; multiple operations may share an originating time, as in `ring_program`.
 - Channel lags may vary. Generalizing push/pull beyond one timestep depends on formalizing heartbeat frontiers; see `TODO.md` for the dependency-ordered plan.
 - Runtime behavior is documented in `../src/` and `../include/`, especially heartbeat and version-state logic in `../src/ops.c`.

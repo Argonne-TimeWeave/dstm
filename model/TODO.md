@@ -4,6 +4,8 @@ Items explicitly identified as future work in `nick_dstm.v`, ordered by dependen
 
 ## 1. Foundations
 
+- [x] Keep push and pull as separate, non-mixed valid program classes in `valid_program`: the whole program satisfies `push_program` or the whole program satisfies `pull_program`.
+- [ ] State and prove progress results separately for push-only and pull-only programs rather than assuming one proof covers both.
 - [x] Formalize and use the assumption that each node issues instructions at monotonically increasing logical times (`monotonic_program`, `monotonic_program_status_reachable`).
 - [ ] Complete the memory/status lifecycle work begun in `nick_dstm.v`:
   - [x] Represent logical `Discardable` tombstones in the abstract semantics, guarded by the absence of pending reads, and prove retired versions preserve their value and cannot become writable again through reachable states (`retired_version_reachable`).
@@ -26,13 +28,15 @@ Depends on **Foundations**.
 Depends on **Heartbeats and readability**.
 
 - [x] Prove the safety direction: every reachable status execution of a valid monotonic program erases to an abstract execution, with heartbeat-only steps treated as stuttering (`valid_status_reachable_abstract`).
-- Prove the promptness/completeness direction: abstract readability transitions can eventually be reproduced by the status semantics once sufficient heartbeat or barrier evidence exists; this remains dependent on end-of-writes signaling.
+- Prove the promptness/completeness direction:
+  - The evidence-conditional single-transition result is formalized: every abstract load or store step lifts directly, and abstract readability or discardability lifts when its respective concrete evidence is explicitly available (`abstract_step_lifts_with_evidence`).
+  - [ ] Prove that sufficient heartbeat or barrier evidence eventually becomes available; this remains dependent on sound end-of-writes signaling, delivery/application ordering, and validated barrier closure.
 
 ## 4. Progress and correctness
 
 Abstract proofs depend on **Foundations**; concrete status proofs also depend on **Semantic correspondence**.
 
-- Prove that every valid push or pull program has a deadlock-free terminating schedule (`nick_dstm.v:24`, `nick_dstm.v:336`, `nick_dstm.v:1586`, `nick_dstm.v:1595`).
+- Prove separately that every valid push-only program and every valid pull-only program has a deadlock-free terminating schedule (`nick_dstm.v:24`, `nick_dstm.v:336`, `nick_dstm.v:1586`, `nick_dstm.v:1595`). Do not rely on mixed push/pull programs in the current scope.
 - Prove deadlock freedom for the concrete status semantics (`nick_dstm.v:334`).
 - Adapt the ring termination construction to the concrete status semantics: schedule heartbeats, prove the required versions become readable, retire them as discardable when safe, and account for runtime-style eviction.
 - [x] Reconcile same-time local writes with readability: nondecreasing issue times allow another local write at the announced timestamp, so the local readability check is now strict and the visibility proof covers reachable legal node pools.
