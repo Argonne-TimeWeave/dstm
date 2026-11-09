@@ -2,6 +2,13 @@
 
 ## Open
 
+### Program validity does not ensure that a requested version exists
+
+- **Runtime evidence:** Gets block until the exact version exists and is readable (`../src/ops.c:277-297`, `../src/ops.c:428-493`), while versions are created by writes rather than reads (`../src/region.c:512-541`). The queue explicitly creates empty versions to avoid waiting on absent versions (`../src/dqueue.c:53-59`).
+- **Prose semantics:** Operations address an exact effective timestamp (`context.tex:482-504`), and version histories may contain gaps because versions do not inherit state (`context.tex:587-590`).
+- **Model impact:** `push_program` and `pull_program` constrain operation shape and distance but do not require a producer for every load. The separate head-store progress theorems therefore cannot yet be extended to global abstract deadlock freedom: a valid singleton load of an absent version is stuck.
+- **Classification:** Missing program well-formedness condition. Add an explicit producer/version-existence and dependency premise before proving load progress or deadlock freedom.
+
 ### Local readability implementation and model use different strictness
 
 - **Runtime evidence:** `../src/ops.c:114-124` says the local clock must move strictly past the version, but the implemented test only blocks while `local_heartbeat_time < v->time`, so equality permits `WRITABLE -> READABLE`. Heartbeats advance only when an operation has a strictly greater issue time at `../src/ops.c:794-799`, `../src/ops.c:866-871`, and `../src/ops.c:977-981`.

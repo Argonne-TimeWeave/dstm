@@ -468,3 +468,186 @@ A put requires delta >= 0 (you cannot write the past), a get requires delta <= 0
 Versions do not inherit from one another. A cell nobody wrote at time t reads as zero, even if it was written at t-1. Long-lived state has to be re-published every tick. This is the most common first-use mistake.
 A dstm_distance_t is the communication graph plus a per-edge lookahead: how many timesteps of slack exist between two ranks. It is what lets a rank decide a version is final without asking anyone. A lookahead of 0 is unsound; use 1 for "synchronise every tick".
 put is asynchronous. get blocks until the requested version is readable, and that block is the only synchronisation in the system.
+
+## Most recent accurate context:
+
+\section{An Overview of DSTM}
+\label{ref:overview}
+The goal of our runtime/programming model is to express locality and sparsity in order to allow faster ranks to race ahead of slower ones. We achieve this by representing time as a dimension with our data structures, allowing for communication to occur at a specific timestamp. In this case, each rank has a history of data over time, allowing for writes to be asynchronously in the future and reads to not blocking the rank being read from. Our attempt to achieve this goal has resulted in the abstractions mentioned within this section, while implementation details follow in Section~\ref{ref:implementation}.
+
+\subsection{Timestamped Operations}
+
+% puts, gets, append, accumulate
+
+The array, graph, and queue interfaces are built on four timestamped
+communication operations (Table~\ref{tab:timestamped-operations}):
+\texttt{get}, \texttt{put}, \texttt{append}, and \texttt{accumulate}. Each operation specifies an originating
+simulation time $t$ and a time offset $\Delta$, producing an effective
+timestamp
+\[
+    t_{\mathrm{eff}} = t + \Delta .
+\]
+The operation accesses the version of the destination region associated
+with $t_{\mathrm{eff}}$, rather than the destination rank's current
+simulation time.
+
+A \texttt{put} writes state at the effective timestamp and completes
+asynchronously. Puts may target the future ($\Delta > 0$), or the local
+present ($\Delta = 0$ for a local operation). A remote put cannot target
+the present, because the destination rank may have already made that
+version readable. Similarly, puts cannot target the past.
+
+A \texttt{get} reads state at the effective timestamp and blocks until
+that version becomes readable. Gets may target the past
+($\Delta < 0$), or the local present ($\Delta = 0$ for a local
+operation). Remote gets cannot target the present or future because the
+requested version may not yet be complete.
+
+%paragraph for accumulate/append since each data structure can use either
+%   accumulate or append
+In addition to overwriting state, we extend DSTM by providing \texttt{append} and
+\texttt{accumulate} operations for combining multiple writes to the same
+effective timestamp. The queue uses \texttt{append} to concatenate
+contributions from multiple producers; their order is determined by message
+arrival and is therefore not guaranteed. Arrays and graph vertices and edges
+provide \texttt{accumulate}, which combines contributions using a
+user-registered reduction function. The first contribution initializes the
+target value, and subsequent contributions are folded into it. Both operations
+follow the timestamp rules of \texttt{put}: they are asynchronous and may
+target the future, or the local present. A program must not mix
+\texttt{put} and \texttt{accumulate} on the same value and effective
+timestamp.
+
+\begin{table}[t]
+\centering
+\caption{Timestamped DSTM operations. This work extends the earlier
+\texttt{put}/\texttt{get} interface with \texttt{append} and
+\texttt{accumulate}.}
+\label{tab:timestamped-operations}
+\begin{tabular}{llll}
+\toprule
+Operation & Effect & Remote $\Delta$ & Completion \\
+\midrule
+\texttt{get}        & Read version          & $<0$ & Blocking \\
+\texttt{put}        & Overwrite value       & $>0$ & Asynchronous \\
+\texttt{append}     & Concatenate value     & $>0$ & Asynchronous \\
+\texttt{accumulate} & Reduce into value     & $>0$ & Asynchronous \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Versioned State}
+\label{ref:versions}
+Each DSTM data structure is backed by a region containing multiple
+versions of its state. A version is identified by its simulation
+timestamp and moves through three states: writable, readable, and
+discardable. Puts, appends, and accumulates contribute only while a version is
+writable. Gets complete after the version becomes readable, indicating
+that no permitted writer can still modify it. Once no rank can issue a
+valid get for the version, it becomes discardable and its storage may
+be reclaimed. The same version lifecycle applies to arrays, graphs, and
+queues.
+
+\subsection{Distance Matrix and Progress}
+DSTM represents communication locality using an application-provided
+distance matrix. For a pair of ranks, a positive entry specifies the
+minimum number of simulation timesteps separating an operation from its
+effect on the destination rank. A negative entry indicates that the
+ranks do not communicate, while the diagonal is zero. The matrix can
+therefore be viewed as a weighted communication graph
+(Fig.~\ref{fig:dist_matrix}).
+
+The runtime combines these distances with the last known simulation time
+of each neighboring rank. This information determines whether another
+put or get could still target a particular version, and therefore when
+that version may become readable or discardable. Larger distances allow
+more drift between ranks, while shorter distances impose tighter
+progress constraints.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.8\linewidth]{diagrams/paper_dist_matrix.drawio (1).pdf}
+    \caption{Communication graph derived from the distance matrix.}
+    \label{fig:dist_matrix}
+\end{figure}
+
+\subsection{Programming Contract and Limitations}
+%timestamp monotonicity, put/get delta rules, blocking reads, distance-matrix soundness, and lack of version inheritance
+DSTM relies on three rules for safe progress. Gets are blocking, ranks issue
+operations with monotonically increasing originating timestamps, and the
+runtime sends heartbeats to neighbors when local time advances. Together with
+the distance matrix, these rules determine when no more writes can target a
+version, making it readable, and when no more gets can target it, making it
+discardable. Remote writes must target the future ($\Delta>0$), while remote
+gets must target the past ($\Delta<0$). Correctness requires the
+application-provided distance matrix to conservatively describe these
+communication constraints. Violating this contract may cause a version to
+become readable or discardable before all valid operations have completed.
+
+DSTM does not inherit state between versions. Therefore, version histories may
+contain gaps, and applications must create each version they later read. We
+have not found these gaps problematic; instead, they preserve temporal sparsity
+by avoiding unnecessary versions and storage.
+
+\section{Composable Timestamped Data Structures}
+The DSTM programming model provides three timestamped data structures:
+a distributed array, graph, and queue. These structures provide the same
+timestamped put and get abstractions but differ in their communication
+granularity, collision handling, and expected use. This section describes
+these trade-offs and then explains how multiple structures can be composed
+within a single simulation through DSTM regions.
+
+\subsection{Distributed Array}
+The simplest of the three structures is the distributed array.
+DSTM versions each index of the array, creating a two-dimensional
+space of indices and timestamps. With \texttt{put}, writes by different
+ranks to the same index and timestamp may overwrite one another.
+Applications can avoid these collisions by assigning a separate index
+to each writer or by using \texttt{accumulate} to combine contributions
+with a user-provided reduction function. However, applications must
+manage this indexing or reduction explicitly.
+
+\subsection{Distributed Graph}
+The distributed graph versions both vertex and edge state. Edges provide
+a natural location for communication between neighboring vertices,
+reducing the need for applications to construct a multi-indexed array.
+Vertex and edge state support \texttt{put}, \texttt{get}, and
+\texttt{accumulate}; when multiple ranks contribute to the same state
+and timestamp, \texttt{accumulate} combines their contributions using a
+user-provided reduction function rather than allowing them to overwrite
+one another. Separating vertex and edge state also supports different
+forms of exchange, such as storing congestion at vertices while agents
+move along edges. Graphs are therefore naturally suited to geographic
+workloads, as demonstrated by our traffic simulation.
+
+\subsection{Distributed Queue}
+The queue data structure handles collisions by appending \texttt{puts} to the same index to a queue, converting them to a \texttt{push}. Each one of these indices is versioned therefore, to avoid any timestamp complexities, our \texttt{pop} operation dequeues the entire queue. \texttt{Puts} may come in random orders as well, so the user must be prepared to handle the queue within their own application. The queue suits itself towards a large variety of applications, as in someways it is an improved version of our array data structure. One example may be a network simulation, where packets are flying all over and landing in different ranks inboxes. In this case the user will not have to worry about handling a multi-indexed mailbox, which requires some hashing computation to ensure no collisions. In this case, the user does not need to manage a multi-indexed mailbox
+or compute a mapping that prevents collisions.
+
+\subsection{Multi-Region Composition}
+With complex applications a programmer may be inspired to use more than one data structure, possibly even with different distances between ranks. DSTM provides this feature through regions. A region is a memory backing to a data structure, and in this version of DSTM it is possible to create multiple regions (and therefore data structures) within a single application. Users can take advantage of this to create more complex simulations, examples of which exist within Section~\ref{ref:traffic} \&~\ref{ref:datacenter}.
+
+In cases where two data structures within an application have different distance matrices, DSTM has some more handling to do. Given a rank pair that has multiple different distances within multiple different distance matrices, the implementation is as follows. While in single data structure applications a single integer value is used to facilitate transitions between version states, multiple data structures with different weights may cause premature transition from readable to discardable (for more details on this transition refer to Section~\ref{ref:versions}). Therefore, DSTM combines all distance matrices, collecting the maximum and minimum distance for each rank pair. The minimum is used for the transition between writeable and readable, and the maximum is used for the transition between readable and discardable.
+
+\section{Implementation of DSTM}
+\label{ref:implementation}
+
+\subsection{Architecture and Communication}
+Request model
+Progress mechanism
+idk
+
+\subsection{Progress and Memory Reclamation}
+the optimization of discardable (this is present within workshop paper so maybe not interesting; likely should replace with barrier implementation since workshop reviewers were interested.)
+
+\subsection{Multi-Region Distance Combination}
+this is a intellectual contribution. novel %this is already in section 4.4 Multi-Region Composition. Consider deleting this subsection here.
+
+\subsection{Version State Machine}
+All of the implementation details of when these version states changes and why and how.
+This is also in the workshop paper, we need to give details to how it's different for different data structures or different in the case of combined distance matrices
+
+\subsection{Rocq Validation}
+Due to DSTM's untraditional structure, efforts have been made to validate a simplification of this model. Using ROCQ (formerly known as COQ)~\cite{rocq-prover}, we can define the core abstractions and prove them. As a part of this effort we have also proved a minimal ring simulation\footnote{This proof can be found: \textit{absent for anonymity}}. We have been able to validate the abstractions and prove that a ring program can terminate. Version safety is real.
+
+Validation gives us more confidence in our abstraction and helps us explain our ideas in a more formal method.
