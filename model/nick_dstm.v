@@ -1824,6 +1824,9 @@ Inductive step' : config' -> config' -> Prop :=
    happens as soon as it's ready. *)
 .
 
+Definition erase_status (c : config') : config :=
+  let '(np, m, _) := c in (np, m).
+
 Definition monotonic (li : list instr) := forall a b ia ib, a < b -> li !! a = Some ia -> li !! b = Some ib ->
   timestamp_of ia <= timestamp_of ib.
 
@@ -2003,6 +2006,28 @@ Proof.
         -- exact Hbound.
 Qed.
 
+Lemma status_step_refines_abstract np m nt np' m' nt' :
+  monotonic_status np nt ->
+  allowed_node_pool np ->
+  step' (np, m, nt) (np', m', nt') ->
+  erase_status (np, m, nt) = erase_status (np', m', nt') \/
+  step owner G
+    (erase_status (np, m, nt))
+    (erase_status (np', m', nt')).
+Proof.
+  intros Hmono Hallowed Hstep.
+  inversion Hstep; subst.
+  - left. reflexivity.
+  - right. cbn. eapply step_load; eassumption.
+  - right. cbn. eapply step_store; eassumption.
+  - right. cbn. eapply step_readable.
+    + exact Hload.
+    + eapply status_readability_visible; eassumption.
+  - right. cbn. eapply step_discardable.
+    + exact Hload.
+    + eapply status_discardability_no_pending_read; eassumption.
+Qed.
+
 Lemma monotonic_status_initial np :
   map_Forall (fun _ p => monotonic (fst p)) np ->
   monotonic_status np empty.
@@ -2173,6 +2198,38 @@ Proof.
   - split; assumption.
 Qed.
 
+Lemma status_reachable_refines_abstract np m nt np' m' nt' :
+  monotonic_status np nt ->
+  allowed_node_pool np ->
+  rtc step' (np, m, nt) (np', m', nt') ->
+  rtc (step owner G) (np, m) (np', m').
+Proof.
+  intros Hmono Hallowed Hrtc.
+  pose proof (@rtc_ind_r config' step'
+    (fun c =>
+      rtc (step owner G) (np, m) (erase_status c) /\
+      monotonic_status c.1.1 c.2 /\
+      allowed_node_pool c.1.1)
+    (np, m, nt)) as Hind.
+  specialize (Hind ltac:(
+    split;
+    [ apply rtc_refl
+    | split; assumption ])).
+  specialize (Hind ltac:(
+    intros [[np1 m1] nt1] [[np2 m2] nt2] _ Hstep
+      [Habstract [Hmono1 Hallowed1]];
+    split;
+    [ destruct (status_step_refines_abstract
+        np1 m1 nt1 np2 m2 nt2 Hmono1 Hallowed1 Hstep)
+        as [Herase | Hmodel];
+      [ rewrite <- Herase; exact Habstract
+      | eapply rtc_r; eassumption ]
+    | split;
+      [ eapply monotonic_status_step; eassumption
+      | eapply allowed_node_pool_step; eassumption ] ])).
+  exact (proj1 (Hind (np', m', nt') Hrtc)).
+Qed.
+
 Lemma monotonic_status_reachable np m np' m' nt' :
   map_Forall (fun _ p => monotonic (fst p)) np ->
   rtc step' (np, m, empty) (np', m', nt') ->
@@ -2324,6 +2381,22 @@ Proof.
   intros Hvalid Hrtc.
   eapply allowed_program_status_reachable.
   - exact (valid_program_allowed owner G prog Hvalid).
+  - exact Hrtc.
+Qed.
+
+Theorem valid_status_reachable_abstract owner G prog np' m' nt' :
+  valid_program owner G prog ->
+  rtc (@step' owner G)
+    (fst (init_config prog), snd (init_config prog), empty)
+    (np', m', nt') ->
+  rtc (@step owner G) (init_config prog) (np', m').
+Proof.
+  intros Hvalid Hrtc.
+  eapply status_reachable_refines_abstract.
+  - apply init_config_monotonic_status.
+    exact (proj1 Hvalid).
+  - apply init_config_allowed.
+    exact (valid_program_allowed owner G prog Hvalid).
   - exact Hrtc.
 Qed.
 

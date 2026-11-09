@@ -25,7 +25,8 @@ Depends on **Foundations**.
 
 Depends on **Heartbeats and readability**.
 
-- Prove that the status semantics implements the abstract semantics for monotonic programs; distinguish safety from prompt/eventual readability (`nick_dstm.v:1566`, `nick_dstm.v:1573`, `nick_dstm.v:1591`).
+- [x] Prove the safety direction: every reachable status execution of a valid monotonic program erases to an abstract execution, with heartbeat-only steps treated as stuttering (`valid_status_reachable_abstract`).
+- Prove the promptness/completeness direction: abstract readability transitions can eventually be reproduced by the status semantics once sufficient heartbeat or barrier evidence exists; this remains dependent on end-of-writes signaling.
 
 ## 4. Progress and correctness
 

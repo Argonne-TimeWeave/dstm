@@ -44,3 +44,4 @@ Treat assumptions as part of the model/runtime contract, not as reasons to delet
 - If unconfident, terminate and ask a clarifying question.
 - Always give a short description of changes made in the chat box.
 - For model changes, relate the description explicitly to both the prose semantics in `context.tex` and the implementation in `../src/` or `../include/`.
+- At the end of every change, explain the complete result in simple terms. Cover the big picture, each new or modified definition and theorem, how the proof works case by case, what the result guarantees, what it does not guarantee, and the validation performed. Include `file:line` references, define technical terms such as safety, refinement, and stuttering in plain language, and clearly distinguish proved model properties from runtime assumptions or unresolved concerns.
