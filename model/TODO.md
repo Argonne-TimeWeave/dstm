@@ -9,7 +9,7 @@ Items explicitly identified as future work in `nick_dstm.v`, ordered by dependen
   - [x] Represent logical `Discardable` tombstones in the abstract semantics, guarded by the absence of pending reads, and prove retired versions preserve their value and cannot become writable again through reachable states (`retired_version_reachable`).
   - [x] Distinguish the runtime's directed minimum/readability distance from its directed maximum/discardability distance in `comm_graph`, constrain both to the same reachable channels with minimum no greater than maximum, and integrate the minimum bound through operation validity, status readability, the ring graph, and reachable heartbeat-frontier proofs.
   - [x] Add a sound `READABLE -> DISCARDABLE` rule to the heartbeat/status semantics using a separate discard-distance bound and explicit end-of-reads evidence. Remote loads carry both the minimum look-back and maximum retention bound; `discard_safe` requires local closure and permits strict maximum-distance heartbeat evidence only for remote readers; the valid-program reachable invariant proves this excludes pending reads.
-  - [ ] Relate logical tombstones to runtime eviction and prove that removing a discardable version preserves observable behavior.
+  - [x] Relate logical tombstones to runtime eviction and prove that removing a discardable version preserves observable behavior.
 - Refine the model with message travel time and relate it to read/write limits (`nick_dstm.v:1583`).
 
 ## 2. Heartbeats and readability

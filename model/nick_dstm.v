@@ -181,6 +181,19 @@ Inductive step : config -> config -> Prop :=
 (* It's the runtime's responsibility to ensure that this is done at the right time to make the program work. *)
 .
 
+Inductive evict : config -> config -> Prop :=
+| evict_discardable np m l t v
+    (Hdiscardable : m !! (l, t) = Some (v, Discardable))
+    (Hunused : ~ pending_write np l t) :
+    evict (np, m) (np, delete (l, t) m).
+
+Inductive runtime_step : config -> config -> Prop :=
+| runtime_step_model c c' (Hstep : step c c') : runtime_step c c'
+| runtime_step_evict c c' (Hevict : evict c c') : runtime_step c c'.
+
+Definition observationally_equivalent (c c' : config) : Prop :=
+  fst c = fst c'.
+
 Definition init_config (prog : gmap node_id (list instr)) : config := ((λ i, (i, ∅)) <$> prog, ∅).
 
 (* I added some proofs for some random basic properties *)
@@ -229,6 +242,63 @@ Proof.
   - exact Hi.
   - exact Hcheck.
   - left. exact Habsent.
+Qed.
+
+Lemma eviction_removes_version
+    (np : node_pool) (m m' : mem)
+    (Hevict : evict (np, m) (np, m')) :
+  exists l t v,
+    m !! (l, t) = Some (v, Discardable) /\
+    m' !! (l, t) = None.
+Proof.
+  inversion Hevict; subst.
+  exists l, t, v.
+  split.
+  - exact Hdiscardable.
+  - apply lookup_delete.
+Qed.
+
+Lemma eviction_preserves_other_versions
+    (m : mem) (l l' : loc) (t t' : timestamp)
+    (Hdifferent : (l', t') <> (l, t)) :
+  delete (l, t) m !! (l', t') = m !! (l', t').
+Proof.
+  apply lookup_delete_ne.
+  congruence.
+Qed.
+
+Lemma eviction_preserves_observations c c' :
+  evict c c' -> observationally_equivalent c c'.
+Proof.
+  intros Hevict.
+  inversion Hevict.
+  reflexivity.
+Qed.
+
+Lemma evictions_preserve_observations c c' :
+  rtc evict c c' -> observationally_equivalent c c'.
+Proof.
+  intros Hevicts.
+  induction Hevicts.
+  - reflexivity.
+  - unfold observationally_equivalent in *.
+    transitivity (fst y).
+    + exact (eviction_preserves_observations x y H).
+    + exact IHHevicts.
+Qed.
+
+Lemma no_pending_write_blocks_store
+    (np : node_pool) (i : node_id) (t1 : timestamp)
+    (l : loc) (t : timestamp) (v : val)
+    (rest : list instr) (e : env)
+    (Hunused : ~ pending_write np l t)
+    (Hi : np !! i = Some (Store t1 l t v :: rest, e)) :
+  False.
+Proof.
+  apply Hunused.
+  exists i, (Store t1 l t v :: rest), e, (Store t1 l t v).
+  repeat split; try assumption.
+  apply elem_of_cons. left. reflexivity.
 Qed.
 
 (* Once a version is Readable, one execution step preserves its value and
@@ -449,6 +519,14 @@ Proof.
 Qed.
 
 Definition finished (c : config) := map_Forall (λ _ '(is, _), is = []) (fst c).
+
+Lemma eviction_preserves_finished c c' :
+  evict c c' -> (finished c <-> finished c').
+Proof.
+  intros Hevict.
+  inversion Hevict.
+  reflexivity.
+Qed.
 
 (* This would also be an interesting property to prove on the status_semantics, which uses a more concrete
    scheduling strategy. *)
