@@ -2222,6 +2222,9 @@ Definition monotonic (li : list instr) := forall a b ia ib, a < b -> li !! a = S
 Definition monotonic_program (prog : gmap node_id (list instr)) : Prop :=
   map_Forall (fun _ li => monotonic li) prog.
 
+Definition monotonic_node_pool (np : node_pool) : Prop :=
+  map_Forall (fun _ p => monotonic (fst p)) np.
+
 Definition allowed_node_pool (np : node_pool) : Prop :=
   map_Forall
     (fun i p => Forall (fun op => operation_allowed owner i op G) (fst p))
@@ -2315,6 +2318,56 @@ Proof.
   - lia.
   - exact Hia.
   - exact Hib.
+Qed.
+
+Lemma monotonic_node_pool_init prog :
+  monotonic_program prog ->
+  monotonic_node_pool (fst (init_config prog)).
+Proof.
+  intros Hmono i [li e] Hlookup.
+  unfold init_config in Hlookup.
+  cbn [fst] in Hlookup.
+  apply (proj1 (lookup_fmap_Some
+    (fun ops : list instr => (ops, (∅ : env)))
+    prog i (li, e))) in Hlookup.
+  destruct Hlookup as [ops [Heq Hprog]].
+  inversion Heq; subst.
+  exact (Hmono i li Hprog).
+Qed.
+
+Lemma monotonic_node_pool_step np m np' m' :
+  monotonic_node_pool np ->
+  step owner G (np, m) (np', m') ->
+  monotonic_node_pool np'.
+Proof.
+  intros Hmono Hstep.
+  inversion Hstep; subst.
+  - apply map_Forall_insert_2.
+    + cbn. eapply monotonic_tail.
+      exact (Hmono i (Load t1 x l t :: rest, e) Hi).
+    + exact Hmono.
+  - apply map_Forall_insert_2.
+    + cbn. eapply monotonic_tail.
+      exact (Hmono i (Store t1 l t v :: rest, e) Hi).
+    + exact Hmono.
+  - exact Hmono.
+  - exact Hmono.
+Qed.
+
+Lemma monotonic_program_abstract_reachable prog np m :
+  monotonic_program prog ->
+  rtc (step owner G) (init_config prog) (np, m) ->
+  monotonic_node_pool np.
+Proof.
+  intros Hmono Hrtc.
+  pose proof (@rtc_ind_r config (step owner G)
+    (fun c => monotonic_node_pool (fst c))
+    (init_config prog)) as Hind.
+  specialize (Hind (monotonic_node_pool_init prog Hmono)).
+  specialize (Hind ltac:(
+    intros [np1 m1] [np2 m2] _ Hstep IH;
+    eapply monotonic_node_pool_step; eauto)).
+  exact (Hind (np, m) Hrtc).
 Qed.
 
 Definition heartbeat_frontiers
@@ -2892,6 +2945,123 @@ Definition pull_program
     (owner : loc -> node_id) (G : comm_graph)
     (prog : gmap node_id (list instr)) : Prop :=
   map_Forall (λ issuer ops, Forall (pull_instr owner G issuer) ops) prog.
+
+Lemma push_load_store_dependency_decreases
+    owner G reader writer load_at x l target_at store_at v :
+  push_instr owner G reader (Load load_at x l target_at) ->
+  push_instr owner G writer (Store store_at l target_at v) ->
+  store_at < load_at.
+Proof.
+  intros Hload Hstore.
+  destruct Hload as [_ [Hlocal ->]].
+  destruct Hstore as [_ [_ [d [Hlag Htarget]]]].
+  pose proof (channel_positive G writer (owner l) d Hlag).
+  lia.
+Qed.
+
+Lemma pull_load_store_dependency_decreases
+    owner G reader writer load_at x l target_at store_at v :
+  pull_instr owner G reader (Load load_at x l target_at) ->
+  pull_instr owner G writer (Store store_at l target_at v) ->
+  store_at < load_at.
+Proof.
+  intros Hload Hstore.
+  destruct Hload as [_ [_ [d [Hlag Hload_time]]]].
+  destruct Hstore as [_ [_ Hstore_time]].
+  pose proof (channel_positive G reader (owner l) d Hlag).
+  lia.
+Qed.
+
+Lemma pending_write_has_no_later_head np l t :
+  monotonic_node_pool np ->
+  pending_write np l t ->
+  exists writer head rest e store_at v,
+    np !! writer = Some (head :: rest, e) /\
+    Store store_at l t v ∈ head :: rest /\
+    timestamp_of head <= store_at.
+Proof.
+  intros Hmono Hpending.
+  destruct Hpending as
+    [writer [instructions [e [op [Hlookup [Hop Hwrites]]]]]].
+  destruct op as [load_at x l' target_at | store_at l' target_at v].
+  - exact (False_rect _ Hwrites).
+  - cbn in Hwrites. destruct Hwrites as [-> ->].
+    destruct instructions as [|head rest].
+    + rewrite elem_of_nil in Hop. contradiction.
+    + exists writer, head, rest, e, store_at, v.
+      repeat split; try assumption.
+      pose proof (Hmono writer (head :: rest, e) Hlookup) as Hlist.
+      pose proof (monotonic_heartbeat_frontier head rest Hlist) as Hfront.
+      apply elem_of_list_lookup_1 in Hop.
+      destruct Hop as [k Hop].
+      exact (Hfront k (Store store_at l t v) Hop).
+Qed.
+
+Theorem push_program_head_load_pending_write_descends
+    owner G prog np m reader load_at x l target_at load_rest load_env :
+  monotonic_program prog ->
+  push_program owner G prog ->
+  rtc (@step owner G) (init_config prog) (np, m) ->
+  np !! reader = Some (Load load_at x l target_at :: load_rest, load_env) ->
+  pending_write np l target_at ->
+  exists writer head rest e,
+    np !! writer = Some (head :: rest, e) /\
+    timestamp_of head < load_at.
+Proof.
+  intros Hmono Hpush Hrtc Hload Hpending.
+  pose proof (monotonic_program_abstract_reachable
+    owner G prog np m Hmono Hrtc) as Hmono_np.
+  destruct (pending_write_has_no_later_head
+    np l target_at Hmono_np Hpending)
+    as [writer [head [rest [e [store_at [v [Hwriter [Hstore Hhead]]]]]]]].
+  pose proof (instruction_property_abstract_reachable
+    owner G (push_instr owner G) prog np m Hpush Hrtc) as Hpush_np.
+  pose proof (Hpush_np reader
+    (Load load_at x l target_at :: load_rest, load_env) Hload) as Hloads.
+  pose proof (Hpush_np writer (head :: rest, e) Hwriter) as Hstores.
+  apply Forall_inv in Hloads.
+  rewrite Forall_forall in Hstores.
+  pose proof (Hstores (Store store_at l target_at v) Hstore) as Hstore_push.
+  exists writer, head, rest, e.
+  split; first exact Hwriter.
+  pose proof (push_load_store_dependency_decreases
+    owner G reader writer load_at x l target_at store_at v
+    Hloads Hstore_push).
+  lia.
+Qed.
+
+Theorem pull_program_head_load_pending_write_descends
+    owner G prog np m reader load_at x l target_at load_rest load_env :
+  monotonic_program prog ->
+  pull_program owner G prog ->
+  rtc (@step owner G) (init_config prog) (np, m) ->
+  np !! reader = Some (Load load_at x l target_at :: load_rest, load_env) ->
+  pending_write np l target_at ->
+  exists writer head rest e,
+    np !! writer = Some (head :: rest, e) /\
+    timestamp_of head < load_at.
+Proof.
+  intros Hmono Hpull Hrtc Hload Hpending.
+  pose proof (monotonic_program_abstract_reachable
+    owner G prog np m Hmono Hrtc) as Hmono_np.
+  destruct (pending_write_has_no_later_head
+    np l target_at Hmono_np Hpending)
+    as [writer [head [rest [e [store_at [v [Hwriter [Hstore Hhead]]]]]]]].
+  pose proof (instruction_property_abstract_reachable
+    owner G (pull_instr owner G) prog np m Hpull Hrtc) as Hpull_np.
+  pose proof (Hpull_np reader
+    (Load load_at x l target_at :: load_rest, load_env) Hload) as Hloads.
+  pose proof (Hpull_np writer (head :: rest, e) Hwriter) as Hstores.
+  apply Forall_inv in Hloads.
+  rewrite Forall_forall in Hstores.
+  pose proof (Hstores (Store store_at l target_at v) Hstore) as Hstore_pull.
+  exists writer, head, rest, e.
+  split; first exact Hwriter.
+  pose proof (pull_load_store_dependency_decreases
+    owner G reader writer load_at x l target_at store_at v
+    Hloads Hstore_pull).
+  lia.
+Qed.
 
 Definition valid_program
     (owner : loc -> node_id) (G : comm_graph)
