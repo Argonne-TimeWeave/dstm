@@ -2,12 +2,12 @@
 
 ## Open
 
-### Program validity does not ensure that a requested version exists
+### Producer existence does not ensure dependency-ordered load progress
 
-- **Runtime evidence:** Gets block until the exact version exists and is readable (`../src/ops.c:277-297`, `../src/ops.c:428-493`), while versions are created by writes rather than reads (`../src/region.c:512-541`). The queue explicitly creates empty versions to avoid waiting on absent versions (`../src/dqueue.c:53-59`).
+- **Runtime evidence:** Darray gets block until the exact version exists and is readable (`../src/ops.c:277-297`, `../src/ops.c:428-493`), while versions are created by writes rather than reads (`../src/region.c:512-541`).
 - **Prose semantics:** Operations address an exact effective timestamp (`context.tex:482-504`), and version histories may contain gaps because versions do not inherit state (`context.tex:587-590`).
-- **Model impact:** `push_program` and `pull_program` constrain operation shape and distance but do not require a producer for every load. The separate head-store progress theorems therefore cannot yet be extended to global abstract deadlock freedom: a valid singleton load of an absent version is stuck.
-- **Classification:** Missing program well-formedness condition. Add an explicit producer/version-existence and dependency premise before proving load progress or deadlock freedom.
+- **Model impact:** `valid_program` now requires `load_versions_produced`, so a valid singleton load of an absent version is rejected. `pending_loads_available_reachable` proves that every remaining load either still has a possible store or has an existing writable/readable exact version, and `allowed_program_reachable_head_load_progress` proves the readability transition and load step after all possible stores have executed. Producer existence alone does not order dependencies: a required producer may itself be blocked behind a load, so global abstract deadlock freedom is still unproved.
+- **Classification:** Partially resolved missing program well-formedness condition. Exact producer existence is formalized and preserved; a sound acyclic or otherwise progress-enabling dependency condition remains open.
 
 ### Local readability implementation and model use different strictness
 
@@ -30,7 +30,7 @@
 
 ### Operation deltas are not checked against installed distance bounds
 
-- **Runtime evidence:** PUT/APPEND reject only negative deltas and remote zero (`../src/ops.c:784-792`, `../src/ops.c:969-975`); GET rejects only positive deltas and remote zero (`../src/ops.c:856-864`). None checks the actual delta against `dstm_distance_get` or `dstm_distance_get_discard`, although readability treats the matrix as a lower write bound (`../src/ops.c:89-111`) and the public header describes minimum/maximum bounds (`../include/dstm.h:295-305`).
+- **Runtime evidence:** PUT rejects only negative deltas and remote zero (`../src/ops.c:784-792`); GET rejects only positive deltas and remote zero (`../src/ops.c:856-864`). Neither checks the actual delta against `dstm_distance_get` or `dstm_distance_get_discard`, although readability treats the matrix as a lower write bound (`../src/ops.c:89-111`) and the public header describes minimum/maximum bounds (`../include/dstm.h:295-305`).
 - **Model impact:** `operation_allowed` explicitly connects remote stores to the directed readability bound and remote loads to both the readable minimum and discard maximum. The reachable-state visibility proof and any future discardability proof apply only to programs satisfying those premises; runtime sign checks alone enforce neither bound. In particular, without the maximum upper bound on a load's look-back, a discard heartbeat frontier cannot exclude a farther-past pending read.
 - **Classification:** Unenforced API contract / implementation weakness. Validate deltas or clearly expose the matrix relation as a required application proof obligation.
 
@@ -45,7 +45,7 @@
 
 Single-threaded client execution supplies issue quiescence, as recorded under **Resolved under assumption**. Barrier completion still requires all previously issued writes to have been received and applied and all ranks to agree on the barrier generation, phase, and closure frontier; the current runtime does not establish those remaining facts unconditionally.
 
-- **Delivery/application runtime evidence:** Round 1 treats OUT_PUT/OUT_APPEND completion as drained (`../src/barrier.c:87-100`), but those requests finish on local `MPI_Test` send completion (`../src/ops.c:497-507`, `../src/ops.c:418-425`). Tokens travel only to the ring successor (`../src/barrier.c:73-85`) while writes can target arbitrary ranks. After the token, `barrier_all_drained` bypasses all neighbor and local-clock readability checks (`../src/barrier.c:156-174`, `../src/ops.c:89-125`). The progress loop probes only one incoming message before status promotion and request application (`../src/ops.c:709-744`).
+- **Delivery/application runtime evidence:** Round 1 treats OUT_PUT completion as drained (`../src/barrier.c:87-100`), but those requests finish on local `MPI_Test` send completion (`../src/ops.c:497-507`). Tokens travel only to the ring successor (`../src/barrier.c:73-85`) while writes can target arbitrary ranks. After the token, `barrier_all_drained` bypasses all neighbor and local-clock readability checks (`../src/barrier.c:156-174`, `../src/ops.c:89-125`). The progress loop probes only one incoming message before status promotion and request application (`../src/ops.c:709-744`).
 - **Delivery/application model impact:** The runtime does not yet supply sound explicit end-of-writes evidence for an unconditional barrier readability transition. A message can remain in transit when a version is promoted, so concrete status correspondence and ring termination remain unproved.
 - **Delivery/application classification:** Potential implementation correctness bug. Require destination acknowledgments, per-peer sequence closure, or a receive/application fence before bypassing heartbeat checks.
 - **Protocol runtime and documentation evidence:** Receipt only increments a scalar counter and logs `last_time` (`../src/ops.c:685-693`); the DFA infers token phase from local state (`../src/barrier.c:142-217`). The public contract requires equal `last_time` values (`../include/dstm.h:442-444`), but no comparison is performed. Public documentation calls the algorithm two-pass (`../include/dstm.h:431-440`) while runtime/internal documentation describes three rounds (`../src/barrier.c:19-58`, `../include/internal/request.h:51-79`).
@@ -54,15 +54,9 @@ Single-threaded client execution supplies issue quiescence, as recorded under **
 
 ### Request ordering is not a stable effective-time order
 
-- **Runtime evidence:** The used comparator sorts by base time and then delta with subtraction returned as `int` (`../src/request.c:34-43`), whereas `dstm_time_t` is 64-bit (`../include/dstm.h:348-350`). An effective-time comparator exists at `../src/request.c:25-32` but is not used for the insertions at `../src/ops.c:644-659`, `../src/ops.c:829`, `../src/ops.c:916`, and `../src/ops.c:1009`. Equal keys have no sequence tie-breaker; APPEND order is therefore not a stable issue order.
-- **Model impact:** The proof model intentionally permits same-time operations but executes each node's list order. Runtime overwrite/append results for equal keys can differ, and arithmetic truncation can violate even the documented departure order. This does not invalidate the all-entry pending-write scan, but it blocks stronger value-correspondence claims.
+- **Runtime evidence:** The used comparator sorts by base time and then delta with subtraction returned as `int` (`../src/request.c:34-43`), whereas `dstm_time_t` is 64-bit (`../include/dstm.h:348-350`). An effective-time comparator exists at `../src/request.c:25-32` but is not used for darray PUT/GET insertions at `../src/ops.c:829` and `../src/ops.c:916`. Equal keys have no sequence tie-breaker.
+- **Model impact:** The proof model intentionally permits same-time operations but executes each node's list order. Runtime overwrite results for equal keys can differ, and arithmetic truncation can violate even the documented departure order. This does not invalidate the all-entry pending-write scan, but it blocks stronger value-correspondence claims.
 - **Classification:** Implementation weakness / underspecified nondeterminism. Use comparison without subtraction and specify or encode equal-key ordering if observable values depend on it.
-
-### Rank-pair graph derivation loses heterogeneous pull bounds and direction
-
-- **Runtime evidence:** Graph derivation reduces cross-rank edge weights to a minimum and symmetrizes opposing directions (`../src/dgraph.c:1235-1248`, `../src/dgraph.c:1272-1279`, `../src/dgraph.c:1309-1333`). Ordinary matrices reuse their single value as both readable and discard bounds; only combining separate matrices preserves a maximum (`../include/dstm.h:295-315`). Graph operations forward caller deltas without binding a specific edge weight to them (`../src/dgraph.c:986-1021`, `../src/dgraph.c:1133-1174`).
-- **Model impact:** A minimum is conservative for future push writes, but heterogeneous pull reads require the maximum look-back for safe retention. The model therefore keeps directed readable/discard lags separate and does not claim generalized pull implies runtime discardability.
-- **Classification:** Implementation/design limitation. Preserve directed per-rank minimum and maximum reductions from the underlying edges, or restrict/document supported pull patterns.
 
 ### Timestamp arithmetic relies on an unchecked boundedness premise
 

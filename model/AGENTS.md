@@ -1,6 +1,7 @@
 # Model Context
 
 - `nick_dstm.v` is a Rocq model.
+- The current formalization scope is the distributed array (`darray`) only. Do not model or draw proof obligations, runtime assumptions, or concerns from queue push/pop/append, accumulate, or distributed-graph data-structure operations. The communication graph and the push/pull synchronization patterns remain in scope; they are not queue or graph-data-structure operations.
 - The abstract semantics marks a version readable after all possible writes finish; the status semantics approximates this using monotonic logical-time heartbeats and channel lag.
 - A valid program has nondecreasing per-node originating times and is classified globally for the current scope as push (remote write in the future, local read now) or pull (local write now, remote read in the past). Do not model a valid program by mixing push and pull instructions within one program. Prove the two classes separately where their progress arguments differ. Deadlock freedom means every reachable state is finished or can step.
 - "Monotonic" means nondecreasing, not strictly increasing; multiple operations may share an originating time, as in `ring_program`.

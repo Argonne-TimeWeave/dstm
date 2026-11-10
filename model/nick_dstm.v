@@ -227,6 +227,365 @@ Proof.
     discriminate.
 Qed.
 
+Definition pending_stores_available (np : node_pool) (m : mem) : Prop :=
+  forall l t,
+    pending_write np l t ->
+    m !! (l, t) = None \/
+    exists v, m !! (l, t) = Some (v, Writeable).
+
+Definition program_produces
+    (prog : gmap node_id (list instr)) (l : loc) (t : timestamp) : Prop :=
+  exists i instructions issued_at v,
+    prog !! i = Some instructions /\
+    Store issued_at l t v ∈ instructions.
+
+Definition load_versions_produced (prog : gmap node_id (list instr)) : Prop :=
+  forall i instructions issued_at x l t,
+    prog !! i = Some instructions ->
+    Load issued_at x l t ∈ instructions ->
+    program_produces prog l t.
+
+Definition pending_loads_available (np : node_pool) (m : mem) : Prop :=
+  forall l t,
+    pending_read np l t ->
+    pending_write np l t \/
+    exists v,
+      m !! (l, t) = Some (v, Writeable) \/
+      m !! (l, t) = Some (v, Readable).
+
+Lemma pending_write_after_head_removal
+    (np : node_pool) (i : node_id)
+    (head : instr) (rest : list instr)
+    (e e' : env) (l : loc) (t : timestamp)
+    (Hi : np !! i = Some (head :: rest, e)) :
+  pending_write (<[i := (rest, e')]> np) l t ->
+  pending_write np l t.
+Proof.
+  intros Hpending.
+  destruct Hpending as
+    [j [instructions [ej [op [Hj [Hop Hwrites]]]]]].
+  destruct (decide (j = i)) as [Heq | Hne].
+  - subst j.
+    assert (<[i := (rest, e')]> np !! i = Some (rest, e')) as Hins
+      by apply lookup_insert.
+    pose proof (eq_trans (eq_sym Hj) Hins) as Heqpair.
+    inversion Heqpair.
+    exists i, (head :: rest), e, op.
+    repeat split.
+    + exact Hi.
+    + apply elem_of_cons. right. rewrite <- H0. exact Hop.
+    + exact Hwrites.
+  - assert (np !! j = Some (instructions, ej)) as Hj_old.
+    { rewrite <- Hj. symmetry. apply lookup_insert_ne. congruence. }
+    exists j, instructions, ej, op.
+    repeat split; assumption.
+Qed.
+
+Lemma pending_read_after_head_removal
+    (np : node_pool) (i : node_id)
+    (head : instr) (rest : list instr)
+    (e e' : env) (l : loc) (t : timestamp)
+    (Hi : np !! i = Some (head :: rest, e)) :
+  pending_read (<[i := (rest, e')]> np) l t ->
+  pending_read np l t.
+Proof.
+  intros Hpending.
+  destruct Hpending as
+    [j [instructions [ej [op [Hj [Hop Hreads]]]]]].
+  destruct (decide (j = i)) as [Heq | Hne].
+  - subst j.
+    assert (<[i := (rest, e')]> np !! i = Some (rest, e')) as Hins
+      by apply lookup_insert.
+    pose proof (eq_trans (eq_sym Hj) Hins) as Heqpair.
+    inversion Heqpair.
+    exists i, (head :: rest), e, op.
+    repeat split.
+    + exact Hi.
+    + apply elem_of_cons. right. rewrite <- H0. exact Hop.
+    + exact Hreads.
+  - assert (np !! j = Some (instructions, ej)) as Hj_old.
+    { rewrite <- Hj. symmetry. apply lookup_insert_ne. congruence. }
+    exists j, instructions, ej, op.
+    repeat split; assumption.
+Qed.
+
+Lemma pending_write_after_load
+    np i issued_at x l t rest e e' ql qt
+    (Hi : np !! i = Some (Load issued_at x l t :: rest, e)) :
+  pending_write np ql qt ->
+  pending_write (<[i := (rest, e')]> np) ql qt.
+Proof.
+  intros Hpending.
+  destruct Hpending as
+    [j [instructions [ej [op [Hj [Hop Hwrites]]]]]].
+  destruct (decide (j = i)) as [-> | Hne].
+  - rewrite Hi in Hj.
+    injection Hj as <- <-.
+    rewrite elem_of_cons in Hop.
+    destruct Hop as [-> | Hop].
+    + exact (False_rect _ Hwrites).
+    + exists i, rest, e', op.
+      repeat split.
+      * apply lookup_insert.
+      * exact Hop.
+      * exact Hwrites.
+  - exists j, instructions, ej, op.
+    repeat split.
+    + transitivity (np !! j).
+      * apply lookup_insert_ne. congruence.
+      * exact Hj.
+    + exact Hop.
+    + exact Hwrites.
+Qed.
+
+Lemma pending_write_after_other_store
+    np i issued_at l t v rest e ql qt
+    (Hi : np !! i = Some (Store issued_at l t v :: rest, e))
+    (Hdifferent : (ql, qt) <> (l, t)) :
+  pending_write np ql qt ->
+  pending_write (<[i := (rest, e)]> np) ql qt.
+Proof.
+  intros Hpending.
+  destruct Hpending as
+    [j [instructions [ej [op [Hj [Hop Hwrites]]]]]].
+  destruct (decide (j = i)) as [-> | Hne].
+  - rewrite Hi in Hj.
+    injection Hj as <- <-.
+    rewrite elem_of_cons in Hop.
+    destruct Hop as [-> | Hop].
+    + cbn in Hwrites. destruct Hwrites as [-> ->]. contradiction.
+    + exists i, rest, e, op.
+      repeat split.
+      * apply lookup_insert.
+      * exact Hop.
+      * exact Hwrites.
+  - exists j, instructions, ej, op.
+    repeat split.
+    + transitivity (np !! j).
+      * apply lookup_insert_ne. congruence.
+      * exact Hj.
+    + exact Hop.
+    + exact Hwrites.
+Qed.
+
+Lemma pending_stores_available_step
+    (np np' : node_pool) (m m' : mem) :
+  pending_stores_available np m ->
+  step (np, m) (np', m') ->
+  pending_stores_available np' m'.
+Proof.
+  intros Hsafe Hstep.
+  inversion Hstep; subst.
+  - intros ql qt Hpending.
+    apply Hsafe.
+    eapply pending_write_after_head_removal; eauto.
+  - intros ql qt Hpending.
+    destruct (decide ((ql, qt) = (l, t))) as [Heq | Hne].
+    + inversion Heq; subst.
+      right. exists v. apply lookup_insert.
+    + destruct (Hsafe ql qt ltac:(
+        eapply pending_write_after_head_removal; eauto))
+        as [Habsent | [v0 Hwriteable]].
+      * left. transitivity (m !! (ql, qt)).
+        -- apply lookup_insert_ne. congruence.
+        -- exact Habsent.
+      * right. exists v0. transitivity (m !! (ql, qt)).
+        -- apply lookup_insert_ne. congruence.
+        -- exact Hwriteable.
+  - intros ql qt Hpending.
+    destruct (decide ((ql, qt) = (l, t))) as [Heq | Hne].
+    + inversion Heq; subst.
+      exfalso. exact (Hvisible Hpending).
+    + destruct (Hsafe ql qt Hpending) as [Habsent | [v0 Hwriteable]].
+      * left. transitivity (m !! (ql, qt)).
+        -- apply lookup_insert_ne. congruence.
+        -- exact Habsent.
+      * right. exists v0. transitivity (m !! (ql, qt)).
+        -- apply lookup_insert_ne. congruence.
+        -- exact Hwriteable.
+  - intros ql qt Hpending.
+    destruct (decide ((ql, qt) = (l, t))) as [Heq | Hne].
+    + inversion Heq; subst.
+      exfalso.
+      destruct (Hsafe l t Hpending) as [Habsent | [v0 Hwriteable]].
+      * rewrite Hload in Habsent. discriminate.
+      * rewrite Hload in Hwriteable. discriminate.
+    + destruct (Hsafe ql qt Hpending) as [Habsent | [v0 Hwriteable]].
+      * left. transitivity (m !! (ql, qt)).
+        -- apply lookup_insert_ne. congruence.
+        -- exact Habsent.
+      * right. exists v0. transitivity (m !! (ql, qt)).
+        -- apply lookup_insert_ne. congruence.
+        -- exact Hwriteable.
+Qed.
+
+Lemma pending_loads_available_step
+    (np np' : node_pool) (m m' : mem) :
+  pending_loads_available np m ->
+  step (np, m) (np', m') ->
+  pending_loads_available np' m'.
+Proof.
+  intros Havailable Hstep.
+  inversion Hstep; subst.
+  - intros ql qt Hread.
+    destruct (Havailable ql qt ltac:(
+      eapply pending_read_after_head_removal; eauto))
+      as [Hwrite | [v0 [Hwriteable | Hreadable]]].
+    + left. eapply pending_write_after_load; eauto.
+    + right. exists v0. left. exact Hwriteable.
+    + right. exists v0. right. exact Hreadable.
+  - intros ql qt Hread.
+    destruct (Havailable ql qt ltac:(
+      eapply pending_read_after_head_removal; eauto))
+      as [Hwrite | [v0 [Hwriteable | Hreadable]]].
+    + destruct (decide ((ql, qt) = (l, t))) as [Heq | Hne].
+      * right. exists v. left. inversion Heq; subst. apply lookup_insert.
+      * left. eapply pending_write_after_other_store; eauto.
+    + right.
+      destruct (decide ((ql, qt) = (l, t))) as [Heq | Hne].
+      * exists v. left. inversion Heq; subst. apply lookup_insert.
+      * exists v0. left.
+        transitivity (m !! (ql, qt)).
+        -- apply lookup_insert_ne. congruence.
+        -- exact Hwriteable.
+    + right.
+      destruct (decide ((ql, qt) = (l, t))) as [Heq | Hne].
+      * exists v. left. inversion Heq; subst. apply lookup_insert.
+      * exists v0. right.
+        transitivity (m !! (ql, qt)).
+        -- apply lookup_insert_ne. congruence.
+        -- exact Hreadable.
+  - intros ql qt Hread.
+    destruct (Havailable ql qt Hread)
+      as [Hwrite | [v0 [Hwriteable | Hreadable]]].
+    + destruct (decide ((ql, qt) = (l, t))) as [Heq | Hne].
+      * inversion Heq; subst. exfalso. exact (Hvisible Hwrite).
+      * left. exact Hwrite.
+    + right.
+      destruct (decide ((ql, qt) = (l, t))) as [Heq | Hne].
+      * inversion Heq; subst.
+        rewrite Hload in Hwriteable.
+        injection Hwriteable as <-.
+        exists v. right. apply lookup_insert.
+      * exists v0. left.
+        transitivity (m !! (ql, qt)).
+        -- apply lookup_insert_ne. congruence.
+        -- exact Hwriteable.
+    + right.
+      destruct (decide ((ql, qt) = (l, t))) as [Heq | Hne].
+      * inversion Heq; subst. rewrite Hload in Hreadable. discriminate.
+      * exists v0. right.
+        transitivity (m !! (ql, qt)).
+        -- apply lookup_insert_ne. congruence.
+        -- exact Hreadable.
+  - intros ql qt Hread.
+    destruct (decide ((ql, qt) = (l, t))) as [Heq | Hne].
+    + inversion Heq; subst. exfalso. exact (Hretired Hread).
+    + destruct (Havailable ql qt Hread)
+        as [Hwrite | [v0 [Hwriteable | Hreadable]]].
+      * left. exact Hwrite.
+      * right. exists v0. left.
+        transitivity (m !! (ql, qt)).
+        -- apply lookup_insert_ne. congruence.
+        -- exact Hwriteable.
+      * right. exists v0. right.
+        transitivity (m !! (ql, qt)).
+        -- apply lookup_insert_ne. congruence.
+        -- exact Hreadable.
+Qed.
+
+Lemma init_config_pending_loads_available prog :
+  load_versions_produced prog ->
+  pending_loads_available
+    (fst (init_config prog))
+    (snd (init_config prog)).
+Proof.
+  intros Hproduced l t Hread.
+  left.
+  destruct Hread as
+    [i [instructions [e [op [Hlookup [Hop Hreads]]]]]].
+  destruct op as [issued_at x l' t' | issued_at l' t' v].
+  - cbn in Hreads. destruct Hreads as [-> ->].
+    unfold init_config in Hlookup.
+    cbn [fst] in Hlookup.
+    apply (proj1 (lookup_fmap_Some
+      (fun ops : list instr => (ops, (∅ : env)))
+      prog i (instructions, e))) in Hlookup.
+    destruct Hlookup as [ops [Heq Hprog]].
+    inversion Heq; subst.
+    destruct (Hproduced i instructions issued_at x l t Hprog Hop)
+      as [j [producer [store_at [v [Hproducer Hstore]]]]].
+    exists j, producer, (∅ : env), (Store store_at l t v).
+    repeat split.
+    + unfold init_config. cbn [fst].
+      apply (proj2 (lookup_fmap_Some
+        (fun ops : list instr => (ops, (∅ : env)))
+        prog j (producer, (∅ : env)))).
+      exists producer. split.
+      * reflexivity.
+      * exact Hproducer.
+    + exact Hstore.
+  - exact (False_rect _ Hreads).
+Qed.
+
+Lemma pending_loads_available_reachable prog np m :
+  load_versions_produced prog ->
+  rtc step (init_config prog) (np, m) ->
+  pending_loads_available np m.
+Proof.
+  intros Hproduced Hrtc.
+  pose proof (@rtc_ind_r config step
+    (fun c => pending_loads_available (fst c) (snd c))
+    (init_config prog)) as Hind.
+  specialize (Hind (init_config_pending_loads_available prog Hproduced)).
+  specialize (Hind ltac:(
+    intros [np1 m1] [np2 m2] _ Hstep IH;
+    eapply pending_loads_available_step; eauto)).
+  exact (Hind (np, m) Hrtc).
+Qed.
+
+Lemma init_config_pending_stores_available prog :
+  pending_stores_available
+    (fst (init_config prog))
+    (snd (init_config prog)).
+Proof.
+  unfold init_config.
+  cbn.
+  intros l t _.
+  left. apply lookup_empty.
+Qed.
+
+Lemma pending_stores_available_reachable prog np m :
+  rtc step (init_config prog) (np, m) ->
+  pending_stores_available np m.
+Proof.
+  intros Hrtc.
+  pose proof (@rtc_ind_r config step
+    (fun c => pending_stores_available (fst c) (snd c))
+    (init_config prog)) as Hind.
+  specialize (Hind (init_config_pending_stores_available prog)).
+  specialize (Hind ltac:(
+    intros [np1 m1] [np2 m2] _ Hstep IH;
+    eapply pending_stores_available_step; eauto)).
+  exact (Hind (np, m) Hrtc).
+Qed.
+
+Lemma reachable_head_store_target_available
+    prog np m i issued_at l target_at v rest e :
+  rtc step (init_config prog) (np, m) ->
+  np !! i = Some (Store issued_at l target_at v :: rest, e) ->
+  m !! (l, target_at) = None \/
+  exists v0, m !! (l, target_at) = Some (v0, Writeable).
+Proof.
+  intros Hrtc Hi.
+  apply (pending_stores_available_reachable prog np m Hrtc).
+  exists i, (Store issued_at l target_at v :: rest), e,
+    (Store issued_at l target_at v).
+  repeat split.
+  - exact Hi.
+  - apply elem_of_cons. left. reflexivity.
+Qed.
+
 Lemma store_creates_absent_version
     (np : node_pool) (m : mem)
     (i : node_id) (t1 : timestamp)
@@ -1018,6 +1377,31 @@ Proof.
     + replace (i - 1 + 1) with i by lia.
       apply Nat.mod_small.
       exact Hin.
+Qed.
+
+Lemma ring_load_versions_produced n :
+  load_versions_produced (ring n).
+Proof.
+  intros i instructions issued_at x l t Hlookup Hload.
+  pose proof (ring_lookup_in_bounds n i instructions Hlookup) as Hin.
+  pose proof (ring_lookup n i Hin) as Hexpected.
+  pose proof (eq_trans (eq_sym Hlookup) Hexpected) as Heq.
+  injection Heq as ->.
+  unfold ring_program in Hload.
+  repeat rewrite elem_of_cons in Hload.
+  rewrite elem_of_nil in Hload.
+  destruct Hload as [Hbad | [Hbad | [Hload | Hbad]]].
+  - discriminate.
+  - discriminate.
+  - inversion Hload; subst.
+    destruct (ring_predecessor_spec n i Hin) as [Hpred Hsuccessor].
+    exists (ring_predecessor n i),
+      (ring_program n (ring_predecessor n i)), 0, 1%Z.
+    split.
+    + apply ring_lookup. exact Hpred.
+    + unfold ring_program.
+      apply elem_of_cons. left. rewrite Hsuccessor. reflexivity.
+  - contradiction.
 Qed.
 
 (* No first-store target belonging to an unprocessed node has yet
@@ -1848,6 +2232,62 @@ Definition allowed_program (prog : gmap node_id (list instr)) : Prop :=
     (fun i li => Forall (fun op => operation_allowed owner i op G) li)
     prog.
 
+Definition instruction_property_node_pool
+    (P : node_id -> instr -> Prop) (np : node_pool) : Prop :=
+  map_Forall (fun i p => Forall (P i) (fst p)) np.
+
+Lemma instruction_property_init P prog :
+  map_Forall (fun i li => Forall (P i) li) prog ->
+  instruction_property_node_pool P (fst (init_config prog)).
+Proof.
+  intros Hproperty i [li e] Hlookup.
+  unfold init_config in Hlookup.
+  cbn [fst] in Hlookup.
+  apply (proj1 (lookup_fmap_Some
+    (fun ops : list instr => (ops, (∅ : env)))
+    prog i (li, e))) in Hlookup.
+  destruct Hlookup as [ops [Heq Hprog]].
+  inversion Heq; subst.
+  exact (Hproperty i li Hprog).
+Qed.
+
+Lemma instruction_property_abstract_step P np m np' m' :
+  instruction_property_node_pool P np ->
+  step owner G (np, m) (np', m') ->
+  instruction_property_node_pool P np'.
+Proof.
+  intros Hproperty Hstep.
+  inversion Hstep; subst.
+  - apply map_Forall_insert_2.
+    + cbn.
+      apply Forall_inv_tail with (a := Load t1 x l t).
+      exact (Hproperty i (Load t1 x l t :: rest, e) Hi).
+    + exact Hproperty.
+  - apply map_Forall_insert_2.
+    + cbn.
+      apply Forall_inv_tail with (a := Store t1 l t v).
+      exact (Hproperty i (Store t1 l t v :: rest, e) Hi).
+    + exact Hproperty.
+  - exact Hproperty.
+  - exact Hproperty.
+Qed.
+
+Lemma instruction_property_abstract_reachable P prog np m :
+  map_Forall (fun i li => Forall (P i) li) prog ->
+  rtc (step owner G) (init_config prog) (np, m) ->
+  instruction_property_node_pool P np.
+Proof.
+  intros Hproperty Hrtc.
+  pose proof (@rtc_ind_r config (step owner G)
+    (fun c => instruction_property_node_pool P (fst c))
+    (init_config prog)) as Hind.
+  specialize (Hind (instruction_property_init P prog Hproperty)).
+  specialize (Hind ltac:(
+    intros [np1 m1] [np2 m2] _ Hstep IH;
+    eapply instruction_property_abstract_step; eauto)).
+  exact (Hind (np, m) Hrtc).
+Qed.
+
 Definition heartbeat_frontier (t : timestamp) (li : list instr) :=
   forall k op, li !! k = Some op -> t <= timestamp_of op.
 
@@ -2104,6 +2544,95 @@ Proof.
   destruct Hlookup as [ops [Heq Hprog]].
   inversion Heq; subst.
   exact (Hallowed i li Hprog).
+Qed.
+
+Lemma allowed_program_reachable_head_store_steps
+    prog np m i issued_at l target_at v rest e :
+  allowed_program prog ->
+  rtc (step owner G) (init_config prog) (np, m) ->
+  np !! i = Some (Store issued_at l target_at v :: rest, e) ->
+  step owner G (np, m)
+    (<[i := (rest, e)]> np,
+     <[(l, target_at) := (v, Writeable)]> m).
+Proof.
+  intros Hprogram Hrtc Hi.
+  eapply step_store.
+  - exact Hi.
+  - pose proof
+      (instruction_property_abstract_reachable
+        (fun i op => operation_allowed owner i op G)
+        prog np m Hprogram Hrtc)
+      as Hallowed.
+    pose proof
+      (Hallowed i (Store issued_at l target_at v :: rest, e) Hi)
+      as Hops.
+    apply Forall_inv in Hops. exact Hops.
+  - eapply reachable_head_store_target_available; eassumption.
+Qed.
+
+Theorem allowed_program_reachable_head_load_progress
+    prog np m i issued_at x l target_at rest e :
+  allowed_program prog ->
+  load_versions_produced prog ->
+  rtc (step owner G) (init_config prog) (np, m) ->
+  np !! i = Some (Load issued_at x l target_at :: rest, e) ->
+  visible np l target_at ->
+  (exists v,
+    m !! (l, target_at) = Some (v, Readable) /\
+    step owner G (np, m)
+      (<[i := (rest, <[x := v]> e)]> np, m)) \/
+  (exists v,
+    m !! (l, target_at) = Some (v, Writeable) /\
+    step owner G (np, m)
+      (np, <[(l, target_at) := (v, Readable)]> m) /\
+    step owner G
+      (np, <[(l, target_at) := (v, Readable)]> m)
+      (<[i := (rest, <[x := v]> e)]> np,
+       <[(l, target_at) := (v, Readable)]> m)).
+Proof.
+  intros Hprogram Hproduced Hrtc Hi Hvisible.
+  assert (Hpending : pending_read np l target_at).
+  {
+    exists i, (Load issued_at x l target_at :: rest), e,
+      (Load issued_at x l target_at).
+    repeat split.
+    - exact Hi.
+    - apply elem_of_cons. left. reflexivity.
+  }
+  pose proof
+    (pending_loads_available_reachable
+      owner G prog np m Hproduced Hrtc l target_at Hpending)
+    as Havailable.
+  destruct Havailable as [Hwrite | [v [Hwriteable | Hreadable]]].
+  - exact (False_rect _ (Hvisible Hwrite)).
+  - right. exists v. split; first exact Hwriteable.
+    split.
+    + eapply step_readable; eassumption.
+    + eapply step_load.
+      * exact Hi.
+      * pose proof
+          (instruction_property_abstract_reachable
+            (fun i op => operation_allowed owner i op G)
+            prog np m Hprogram Hrtc)
+          as Hallowed.
+        pose proof
+          (Hallowed i (Load issued_at x l target_at :: rest, e) Hi)
+          as Hops.
+        apply Forall_inv in Hops. exact Hops.
+      * apply lookup_insert.
+  - left. exists v. split; first exact Hreadable.
+    eapply step_load.
+    + exact Hi.
+    + pose proof
+        (instruction_property_abstract_reachable
+          (fun i op => operation_allowed owner i op G)
+          prog np m Hprogram Hrtc)
+        as Hallowed.
+      pose proof
+        (Hallowed i (Load issued_at x l target_at :: rest, e) Hi)
+        as Hops.
+      apply Forall_inv in Hops. exact Hops.
+    + exact Hreadable.
 Qed.
 
 Lemma allowed_node_pool_step np m nt np' m' nt' :
@@ -2368,6 +2897,7 @@ Definition valid_program
     (owner : loc -> node_id) (G : comm_graph)
     (prog : gmap node_id (list instr)) : Prop :=
   monotonic_program prog /\
+  load_versions_produced prog /\
   (push_program owner G prog \/ pull_program owner G prog).
 
 Lemma push_program_allowed owner G prog :
@@ -2395,9 +2925,59 @@ Qed.
 Lemma valid_program_allowed owner G prog :
   valid_program owner G prog -> allowed_program owner G prog.
 Proof.
-  intros [_ [Hpush | Hpull]].
+  intros [_ [_ [Hpush | Hpull]]].
   - exact (push_program_allowed owner G prog Hpush).
   - exact (pull_program_allowed owner G prog Hpull).
+Qed.
+
+Theorem push_program_reachable_head_store_progress
+    owner G prog np m i issued_at l target_at v rest e :
+  push_program owner G prog ->
+  rtc (@step owner G) (init_config prog) (np, m) ->
+  np !! i = Some (Store issued_at l target_at v :: rest, e) ->
+  owner l <> i /\
+  step owner G (np, m)
+    (<[i := (rest, e)]> np,
+     <[(l, target_at) := (v, Writeable)]> m).
+Proof.
+  intros Hpush Hrtc Hi.
+  assert (Hallowed : allowed_program owner G prog).
+  { exact (push_program_allowed owner G prog Hpush). }
+  split.
+  - pose proof
+      (instruction_property_abstract_reachable
+        owner G (push_instr owner G) prog np m Hpush Hrtc) as Hpool.
+    pose proof
+      (Hpool i (Store issued_at l target_at v :: rest, e) Hi)
+      as Hops.
+    apply Forall_inv in Hops.
+    exact (proj1 (proj2 Hops)).
+  - eapply allowed_program_reachable_head_store_steps; eassumption.
+Qed.
+
+Theorem pull_program_reachable_head_store_progress
+    owner G prog np m i issued_at l target_at v rest e :
+  pull_program owner G prog ->
+  rtc (@step owner G) (init_config prog) (np, m) ->
+  np !! i = Some (Store issued_at l target_at v :: rest, e) ->
+  owner l = i /\
+  step owner G (np, m)
+    (<[i := (rest, e)]> np,
+     <[(l, target_at) := (v, Writeable)]> m).
+Proof.
+  intros Hpull Hrtc Hi.
+  assert (Hallowed : allowed_program owner G prog).
+  { exact (pull_program_allowed owner G prog Hpull). }
+  split.
+  - pose proof
+      (instruction_property_abstract_reachable
+        owner G (pull_instr owner G) prog np m Hpull Hrtc) as Hpool.
+    pose proof
+      (Hpool i (Store issued_at l target_at v :: rest, e) Hi)
+      as Hops.
+    apply Forall_inv in Hops.
+    exact (proj1 (proj2 Hops)).
+  - eapply allowed_program_reachable_head_store_steps; eassumption.
 Qed.
 
 Corollary valid_program_status_reachable owner G prog np' m' nt' :
