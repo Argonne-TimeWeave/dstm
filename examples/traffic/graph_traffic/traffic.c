@@ -304,6 +304,9 @@ struct sim {
         dstm_dgraph_t   *g_cars;
         dstm_dgraph_t   *g_state;
 
+        /* Registered on every rank in the same order. */
+        dstm_reduce_id_t state_reduce_id;
+
         /*
          * DSTM region IDs are local backing-store identifiers, not MPI
          * ranks. The car channels use the default region, while the
@@ -492,27 +495,170 @@ struct vertex_state {
         int32_t stamp;
 };
 
+/*
+ * Fold one complete state-channel buffer into another.
+ *
+ * Each congestion entry is joined using highest-stamp-wins. For equal
+ * stamps, the float's raw bits provide a deterministic tie-break. In the
+ * current simulation equal-stamp entries should already be bit-identical,
+ * because each global edge has one authoritative writer.
+ *
+ * The function must be associative and commutative because DSTM applies
+ * contributions in MPI arrival order on the owning rank.
+ */
+static void reduce_state_message(void *dst, const void *src,
+                                 size_t size, void *user)
+{
+        const struct state_layout *L = user;
+        struct state_header       *dh;
+        const struct state_header *sh;
+        struct cong_entry         *de;
+        const struct cong_entry   *se;
+
+        assert(dst != NULL);
+        assert(src != NULL);
+        assert(L != NULL);
+        assert(size == L->bytes);
+
+        dh = state_hdr(dst);
+        sh = state_hdr_c(src);
+
+        assert(dh->magic == CHAN_MAGIC_STATE);
+        assert(sh->magic == CHAN_MAGIC_STATE);
+        assert(dh->n_state == L->n_state);
+        assert(sh->n_state == L->n_state);
+        assert(dh->state_off == L->state_off);
+        assert(sh->state_off == L->state_off);
+
+        /*
+         * Canonicalize diagnostic header fields with commutative
+         * operations. All contributions for a version should have the same
+         * tick and destination, but these rules also make the complete fold
+         * deterministic.
+         */
+        if (sh->tick > dh->tick)
+                dh->tick = sh->tick;
+        if (sh->src_vertex < dh->src_vertex)
+                dh->src_vertex = sh->src_vertex;
+        if (sh->dst_vertex < dh->dst_vertex)
+                dh->dst_vertex = sh->dst_vertex;
+
+        dh->reserved0 = 0;
+        dh->reserved1 = 0;
+
+        de = state_entries(L, dst);
+        se = state_entries_c(L, src);
+
+        for (size_t i = 0; i < L->n_state; i++) {
+                int take_src = 0;
+
+                if (se[i].stamp > de[i].stamp) {
+                        take_src = 1;
+                } else if (se[i].stamp == de[i].stamp) {
+                        /*
+                         * Equal-stamp values are expected to be identical.
+                         * Use a raw-bit maximum as a deterministic fallback
+                         * if that invariant is ever violated.
+                         */
+                        uint32_t dbits;
+                        uint32_t sbits;
+
+                        memcpy(&dbits, &de[i].value, sizeof(dbits));
+                        memcpy(&sbits, &se[i].value, sizeof(sbits));
+
+                        if (sbits > dbits)
+                                take_src = 1;
+                }
+
+                if (take_src)
+                        de[i] = se[i];
+        }
+}
+
 /*******************************************************************************
  * Step 1: publish owned vertex state
  ******************************************************************************/
 
 static void publish_vertices(int32_t t)
 {
-        /* g_state only needs a local delta-0 version on the ticks STALE
-         * will read it. BLIND and ORACLE never read g_state. */
-        int state_pub = (S.mode == REPLICA_STALE) &&
-                        (t % S.stale_delay == 0);
+        int state_pub =
+                S.mode == REPLICA_STALE &&
+                t % S.stale_delay == 0;
 
         for (size_t i = 0; i < S.nlocal; i++) {
-                struct vertex_state vs = { .queue_len = S.vqueue[i], .stamp = t };
-                int rc = dstm_dgraph_vertex_put(S.g_cars, S.v_lo + i, &vs,
-                                                (dstm_time_t)t, 0);
-                assert(rc == DSTM_SUCCESS);
+                size_t v = S.v_lo + i;
 
-                if (state_pub) {
-                        rc = dstm_dgraph_vertex_put(S.g_state, S.v_lo + i, &vs,
-                                                    (dstm_time_t)t, 0);
-                        assert(rc == DSTM_SUCCESS);
+                struct vertex_state vs = {
+                        .queue_len = S.vqueue[i],
+                        .stamp = t,
+                };
+
+                /*
+                 * Car graph remains unchanged.
+                 */
+                int rc = dstm_dgraph_vertex_put(
+                        S.g_cars,
+                        v,
+                        &vs,
+                        (dstm_time_t)t,
+                        0);
+
+                if (rc != DSTM_SUCCESS) {
+                        fprintf(stderr,
+                                "rank %d: car vertex_put failed: "
+                                "vertex=%zu city_owner=%d "
+                                "time=%d rc=%d (%s)\n",
+                                S.rank,
+                                v,
+                                city_owner(&S.city, v),
+                                t,
+                                rc,
+                                dstm_strerror(-rc));
+                        MPI_Abort(MPI_COMM_WORLD, 1);
+                }
+
+                if (!state_pub)
+                        continue;
+
+                /*
+                 * Build a complete, valid state contribution.
+                 */
+                state_reset(&S.Lstate,
+                            S.state_sendbuf,
+                            t,
+                            v,
+                            v);
+
+                memcpy(state_entries(&S.Lstate, S.state_sendbuf),
+                       S.rep.e,
+                       S.rep.n * sizeof(struct cong_entry));
+
+                /*
+                 * Use accumulate, not put, for this state vertex.
+                 */
+                rc = dstm_dgraph_vertex_accumulate(
+                        S.g_state,
+                        v,
+                        S.state_sendbuf,
+                        (dstm_time_t)t,
+                        0,
+                        S.state_reduce_id);
+
+                if (rc != DSTM_SUCCESS) {
+                        fprintf(stderr,
+                                "rank %d: state vertex_accumulate failed: "
+                                "vertex=%zu city_owner=%d "
+                                "time=%d delta=0 reducer=%d "
+                                "state_bytes=%zu rc=%d (%s)\n",
+                                S.rank,
+                                v,
+                                city_owner(&S.city, v),
+                                t,
+                                (int)S.state_reduce_id,
+                                S.Lstate.bytes,
+                                rc,
+                                dstm_strerror(-rc));
+                        MPI_Abort(MPI_COMM_WORLD, 1);
                 }
         }
 }
@@ -603,24 +749,31 @@ static void recv_state(int32_t t)
         for (size_t i = 0; i < S.nlocal; i++) {
                 size_t v = S.v_lo + i;
 
-                for (size_t ls = S.lrow_ptr[i]; ls < S.lrow_ptr[i + 1]; ls++) {
-                        size_t u = S.ldst[ls];
-                        int    rc;
+                /*
+                 * Every neighbor accumulated into vertex v. DSTM has
+                 * already reduced those contributions into one state
+                 * buffer on this rank.
+                 */
+                int rc = dstm_dgraph_vertex_get(S.g_state, v,
+                                                S.state_recvbuf,
+                                                (dstm_time_t)t, 0);
+                if (rc != DSTM_SUCCESS)
+                        continue;
+                if (state_validate(&S.Lstate, S.state_recvbuf) != 0)
+                        continue;
 
-                        rc = dstm_dgraph_edge_get(S.g_state, v, u,
-                                                  S.state_recvbuf,
-                                                  (dstm_time_t)t, 0);
-                        if (rc != DSTM_SUCCESS)
-                                continue;
-                        if (state_validate(&S.Lstate, S.state_recvbuf) != 0)
-                                continue;       /* never written yet */
-
-                        if (S.mode == REPLICA_STALE)
-                                S.st.merge_updates += cong_merge(&S.rep,
-                                        state_entries_c(&S.Lstate,
-                                                        S.state_recvbuf));
-                        S.st.recv_msgs++;
+                if (S.mode == REPLICA_STALE) {
+                        S.st.merge_updates += cong_merge(
+                                &S.rep,
+                                state_entries_c(&S.Lstate,
+                                                S.state_recvbuf));
                 }
+
+                /*
+                 * This now counts one accumulated state read rather than
+                 * one edge-state read.
+                 */
+                S.st.recv_msgs++;
         }
 }
 
@@ -1009,19 +1162,30 @@ static void send_state(int32_t t)
         for (size_t i = 0; i < S.nlocal; i++) {
                 size_t u = S.v_lo + i;
 
-                for (size_t ls = S.lrow_ptr[i]; ls < S.lrow_ptr[i + 1]; ls++) {
+                for (size_t ls = S.lrow_ptr[i];
+                     ls < S.lrow_ptr[i + 1];
+                     ls++) {
                         size_t v = S.ldst[ls];
-                        int    rc;
 
                         state_reset(&S.Lstate, S.state_sendbuf,
                                     t + delta, u, v);
 
                         memcpy(state_entries(&S.Lstate, S.state_sendbuf),
-                               S.rep.e, S.rep.n * sizeof(struct cong_entry));
+                               S.rep.e,
+                               S.rep.n * sizeof(struct cong_entry));
 
-                        rc = dstm_dgraph_edge_put(S.g_state, v, u,
-                                                  S.state_sendbuf,
-                                                  (dstm_time_t)t, delta);
+                        /*
+                         * All neighbors of v target the same vertex-state
+                         * cell at effective time t + delta. DSTM folds the
+                         * contributions with reduce_state_message().
+                         */
+                        int rc = dstm_dgraph_vertex_accumulate(
+                                S.g_state,
+                                v,
+                                S.state_sendbuf,
+                                (dstm_time_t)t,
+                                delta,
+                                S.state_reduce_id);
                         assert(rc == DSTM_SUCCESS);
 
                         S.st.sent_msgs++;
@@ -1206,6 +1370,23 @@ static int setup(const char *dir, int steps, unsigned int cap)
         car_layout_init(&S.Lcar, cap);
         state_layout_init(&S.Lstate, S.city.ne);
 
+        /*
+         * Registration is local rather than collective, but every rank
+         * must execute registrations in exactly the same order.
+         *
+         * S.Lstate has static lifetime as part of S, so the reducer's user
+         * pointer remains valid until dstm_finalize().
+         */
+        rc = dstm_reduce_register(reduce_state_message,
+                                  &S.Lstate,
+                                  &S.state_reduce_id);
+        if (rc != DSTM_SUCCESS) {
+                fprintf(stderr,
+                        "rank %d: state reducer registration failed: %d\n",
+                        S.rank, rc);
+                return -1;
+        }
+
         if (S.rank == 0) {
                 city_print_summary(&S.city);
                 printf("=== Channel layout ===\n");
@@ -1358,24 +1539,58 @@ static int setup(const char *dir, int steps, unsigned int cap)
                 return -1;
         }
 
-        rc = dstm_dgraph_create_on_region(&S.g_cars, sizeof(struct vertex_state),
-                S.Lcar.bytes, S.nlocal, S.ldeg, S.ldst, NULL, NULL, S.cars_region_id);
+        /*
+         * Car graph:
+         *   - small vertex state used to publish/advance local versions
+         *   - complete car channel stored on each edge
+         */
+        rc = dstm_dgraph_create_on_region(
+                &S.g_cars,
+                sizeof(struct vertex_state),
+                S.Lcar.bytes,
+                S.nlocal,
+                S.ldeg,
+                S.ldst,
+                NULL,
+                NULL,
+                S.cars_region_id);
+
         if (rc != DSTM_SUCCESS) {
                 fprintf(stderr,
                         "rank %d: dgraph_create_on_region(cars, region %d) "
-                        "failed: %d\n",
-                        S.rank, S.cars_region_id, rc);
+                        "failed: %d (%s)\n",
+                        S.rank,
+                        S.cars_region_id,
+                        rc,
+                        dstm_strerror(-rc));
                 return -1;
         }
 
-        rc = dstm_dgraph_create_on_region(&S.g_state, sizeof(struct vertex_state),
-                S.Lstate.bytes, S.nlocal, S.ldeg, S.ldst, NULL, NULL,
+        /*
+         * State graph:
+         *   - complete state buffer stored in each vertex
+         *   - no state is stored in edge cells
+         *   - all neighbors accumulate into the destination vertex
+         */
+        rc = dstm_dgraph_create_on_region(
+                &S.g_state,
+                S.Lstate.bytes,
+                0,
+                S.nlocal,
+                S.ldeg,
+                S.ldst,
+                NULL,
+                NULL,
                 S.state_region_id);
+
         if (rc != DSTM_SUCCESS) {
                 fprintf(stderr,
                         "rank %d: dgraph_create_on_region(state, region %d) "
-                        "failed: %d\n",
-                        S.rank, S.state_region_id, rc);
+                        "failed: %d (%s)\n",
+                        S.rank,
+                        S.state_region_id,
+                        rc,
+                        dstm_strerror(-rc));
                 return -1;
         }
 
@@ -1931,6 +2146,8 @@ int main(int argc, char *argv[])
 
         MPI_Init(&argc, &argv);
         dstm_init(&argc, &argv);
+
+        S.state_reduce_id = DSTM_REDUCE_ID_INVALID;
 
         int r;
         MPI_Comm_rank(MPI_COMM_WORLD, &r);
