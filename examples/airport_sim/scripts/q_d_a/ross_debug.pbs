@@ -1,0 +1,26 @@
+#!/bin/bash -l
+#PBS -N ross-debug
+#PBS -A timeweave
+#PBS -q debug
+#PBS -l select=1
+#PBS -l filesystems=home
+#PBS -l walltime=00:05:00
+#PBS -j oe
+
+module restore ross-env
+
+cd "$PBS_O_WORKDIR" || exit 1
+
+ldd ../../ross_airport | grep "not found" && exit 1
+
+./ross_run_scaling.sh \
+  --mode weak \
+  --impl ross_opt \
+  --weak-ladder "4:1:4" \
+  --na-per-rank 256 \
+  --planes 1 \
+  --time 10 \
+  --reps 1 \
+  --no-activity \
+  --mpirun mpiexec \
+  --mpi-flavor pals

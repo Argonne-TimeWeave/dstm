@@ -1,0 +1,163 @@
+ANALYSIS:     PLANES sweep at FIXED ranks=256
+host:         x3107c0s19b0n0
+date:         2026-11-11T16:27:22+00:00
+job id:       7837487.polaris-pbs-01.hsn.cm.polaris.alcf.anl.gov
+alloc source: PBS_NODEFILE  (10 nodes, using <= 8)
+nodefile:     /var/spool/pbs/aux/7837487.polaris-pbs-01.hsn.cm.polaris.alcf.anl.gov
+nodes:        x3107c0s19b0n0.hsn.cm.polaris.alcf.anl.gov x3107c0s19b1n0.hsn.cm.polaris.alcf.anl.gov x3107c0s1b0n0.hsn.cm.polaris.alcf.anl.gov x3107c0s1b1n0.hsn.cm.polaris.alcf.anl.gov x3107c0s25b0n0.hsn.cm.polaris.alcf.anl.gov x3107c0s25b1n0.hsn.cm.polaris.alcf.anl.gov x3107c0s31b0n0.hsn.cm.polaris.alcf.anl.gov x3107c0s31b1n0.hsn.cm.polaris.alcf.anl.gov
+launcher:     mpiexec [pals] 
+mpi prefix:   /opt/cray/pals/1.8
+forwarded:    LD_LIBRARY_PATH PATH MPI_WRAP_OUTDIR
+placement:    pack   max ppn 32
+passes:       timing=1  activity=1
+fixed rung:   np=256  (8 nodes x 32 ppn)
+fixed na:     256     total_airports=65536 (256x256)
+SWEPT planes: 1 2 4 8 16 32 64 128 256
+darray exe:   /home/ncassarino/dstm/examples/airport_sim/simple_dstm/airports
+dgraph exe:   /home/ncassarino/dstm/examples/airport_sim/graph_dstm/airports
+dqueue exe:   /home/ncassarino/dstm/examples/airport_sim/queue_dstm/airports
+dqueue-batch: /home/ncassarino/dstm/examples/airport_sim/batch_queue/airports
+ross exe:     /home/ncassarino/dstm/examples/airport_sim/ross_airport
+impls:        darray graph queue queue_batch ross_opt ross_cons    variants: base
+cap/edge:     8  (GATE/queue cap = cap/edge * na; DSTM only)
+timesteps:    512    reps: 3
+ross end vt:  15360.0000  (= 512 * mean_dep=30.0)
+ross hops:    net_events / 3
+ross opt:     --synch=3 --extramem=200000
+ross cons:    --synch=2 --lookahead=1.00
+dumps under:  /home/ncassarino/dstm/examples/airport_sim/scripts/q_d_a/results_planes_sweep/planes_sweep_np256_20261111-162722/dumps
+timeout:      100s
+
+NOTE: throughput metric = committed plane-hops / second.
+  DSTM hop = one 'Total departures:' entry.
+  ROSS hop = Net Events Processed / 3.
+NOTE: ranks are FIXED at 256; the x-axis of this analysis is PLANES.
+NOTE: activity numbers are per-rank-per-tick means from mpi_wrap.c.
+
+===== throughput vs planes @ np=256 (median of 3 reps) =====
+impl       variant      planes    elapsed(s)        hops/s
+--------------------------------------------------------------
+darray     base              1        0.9265   35470458.72
+darray     base              2        0.9277   63805895.22
+darray     base              4        0.9380   88305864.61
+darray     base              8        0.9310  100849933.40
+darray     base             16        0.9646  102534048.31
+darray     base             32        0.9317  109326096.38
+darray     base             64        0.9294  112475689.69
+darray     base            128        0.9310  116750728.25
+darray     base            256        0.9317  125442722.98
+
+graph      base              1        1.5569   21108215.04
+graph      base              2        1.9072   31036456.06
+graph      base              4        2.0715   39985952.69
+graph      base              8        2.1975   42726410.92
+graph      base             16        2.1993   44958258.54
+graph      base             32        2.2325   45626195.30
+graph      base             64        2.2353   46792194.78
+graph      base            128        2.2384   48630785.38
+graph      base            256        2.2817   51384451.94
+
+queue      base              1        0.3257  100900767.58
+queue      base              2        0.5715  103574328.96
+queue      base              4        0.7927  104492116.82
+queue      base              8        0.9031  103965549.77
+queue      base             16        0.9458  104536270.88
+queue      base             32        0.9840  102633898.37
+queue      base             64        1.0186  102228516.59
+queue      base            128        1.1357   95795780.58
+queue      base            256        1.2571   93265204.04
+
+queue_batch base              1        0.0642  511890654.21
+queue_batch base              2        0.0656  902328185.98
+queue_batch base              4        0.0676 1225355562.13
+queue_batch base              8        0.0680 1379634544.12
+queue_batch base             16        0.0801 1231485131.09
+queue_batch base             32        0.0689 1469579027.58
+queue_batch base             64        0.0695 1486482920.86
+queue_batch base            128        0.0694 1530537146.97
+queue_batch base            256        0.0896 1249138348.21
+
+ross_opt   base              1        1.2028   19046744.26
+ross_opt   base              2        2.2261   18810455.06
+ross_opt   base              4        3.2040   20815574.59
+ross_opt   base              8        3.8839   21990098.61
+ross_opt   base             16        4.0241   23546270.47
+ross_opt   base             32        4.5844   21715680.13
+ross_opt   base             64        4.6453   22115441.20
+ross_opt   base            128        5.1754   20497852.34
+ross_opt   base            256        5.7378   19470471.09
+
+ross_cons  base              1        1.6753   12862324.36
+ross_cons  base              2        2.3246   17140158.31
+ross_cons  base              4        2.7735   23424399.86
+ross_cons  base              8        3.0170   28101181.64
+ross_cons  base             16        3.1368   30151059.36
+ross_cons  base             32        3.3390   29794837.38
+ross_cons  base             64        3.6625   28041560.68
+ross_cons  base            128        3.6544   29018824.16
+ross_cons  base            256        3.7661   29658006.69
+
+===== MPI activity vs planes @ np=256 (median of 3 reps, base) =====
+impl         planes   calls/t mean        p2p/t       coll/t   bytes_sent/t
+----------------------------------------------------------------------------
+darray            1      12.642800     8.015600     0.015600   65720.450000
+darray            2      12.711600     8.015600     0.015600   65720.450000
+darray            4      12.683800     8.015600     0.015600   65720.450000
+darray            8      12.673300     8.015600     0.015600   65720.450000
+darray           16      12.720000     8.015600     0.015600   65720.450000
+darray           32      12.659000     8.015600     0.015600   65720.450000
+darray           64      12.658100     8.015600     0.015600   65720.450000
+darray          128      12.678900     8.015600     0.015600   65720.450000
+darray          256      12.723300     8.015600     0.015600   65720.450000
+
+graph             1     341.909100   229.218100     0.027300   22175.470000
+graph             2     572.318900   382.818500     0.027300   37228.310000
+graph             4     759.507100   507.600600     0.027300   49456.960000
+graph             8     841.235300   562.084300     0.027300   54796.370000
+graph            16     874.226800   584.078900     0.027300   56951.840000
+graph            32     889.322100   594.146900     0.027300   57938.500000
+graph            64     895.735900   598.418700     0.027300   58357.130000
+graph           128     900.140700   601.355300     0.027300   58644.920000
+graph           256     907.999500   606.591900     0.027300   59158.110000
+
+queue             1     380.144500   254.732000     0.015600    9090.140000
+queue             2     681.523700   455.650800     0.015600   16323.220000
+queue             4     951.997300   635.966800     0.015600   22814.600000
+queue             8    1078.556600   720.341400     0.015600   25852.080000
+queue            16    1135.641700   758.393900     0.015600   27221.970000
+queue            32    1159.629100   774.380200     0.015600   27797.480000
+queue            64    1195.737200   798.463500     0.015600   28664.470000
+queue           128    1249.142100   834.064600     0.015600   29946.110000
+queue           256    1345.923000   898.585900     0.015600   32268.880000
+
+queue_batch        1      15.293400     8.023400     0.015600    8384.630000
+queue_batch        2      15.296000     8.023400     0.015600    8384.630000
+queue_batch        4      16.181800     8.023400     0.015600    8384.630000
+queue_batch        8      16.357100     8.023400     0.015600    8384.630000
+queue_batch       16      15.629600     8.023400     0.015600    8384.630000
+queue_batch       32      16.338300     8.023400     0.015600    8384.630000
+queue_batch       64      16.332900     8.023400     0.015600    8384.630000
+queue_batch      128      16.627100     8.023400     0.015600    8384.630000
+queue_batch      256      15.497800     8.023400     0.015600    8384.630000
+
+ross_opt          1     339.726300   330.839600     8.886700   26538.550000
+ross_opt          2     537.863000   523.023100    14.839800   41960.850000
+ross_opt          4     757.762700   735.862400    21.900400   59044.470000
+ross_opt          8     901.744200   874.898500    26.845700   70206.930000
+ross_opt         16     970.242400   940.994400    29.248000   75513.820000
+ross_opt         32     997.000200   966.697400    30.314500   77578.500000
+ross_opt         64    1020.473700   989.440500    31.023400   79403.780000
+ross_opt        128    1061.878200  1029.882100    31.996100   82646.820000
+ross_opt        256    1152.852400  1118.911000    33.941400   89784.690000
+
+ross_cons         1     226.988400   164.433700    62.554700   13655.420000
+ross_cons         2     378.952100   304.081000    74.871100   24925.730000
+ross_cons         4     583.951300   495.933700    88.017600   40379.120000
+ross_cons         8     737.613100   647.667800    89.945300   52533.260000
+ross_cons        16     813.721600   723.707900    90.013700   58617.030000
+ross_cons        32     853.835500   763.724200    90.111300   61819.110000
+ross_cons        64     883.999200   793.598800    90.400400   64211.390000
+ross_cons       128     920.845600   829.783100    91.062500   67111.430000
+ross_cons       256     986.758800   894.278300    92.480500   72282.390000
+
+runs recorded: 162   timing non-ok: 0   no_dumps: 0

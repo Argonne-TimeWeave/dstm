@@ -1,0 +1,48 @@
+#!/bin/bash -l
+#PBS -N dstm-scaling
+#PBS -A timeweave
+#PBS -q prod
+#PBS -l select=10:system=polaris
+#PBS -l filesystems=home:eagle
+#PBS -l walltime=01:30:00
+#PBS -j oe
+#PBS -o ross_scaling_prod.log
+
+set -euo pipefail
+
+module restore ross-env
+
+cd "$PBS_O_WORKDIR" || exit 1
+
+echo "Job ID:    $PBS_JOBID"
+echo "Start:     $(date -Is)"
+echo "Directory: $PWD"
+echo "Nodes:     $(sort -u "$PBS_NODEFILE" | wc -l)"
+echo "MPI:       $(command -v mpiexec)"
+echo
+
+echo "Checking executables..."
+for exe in \
+    ../../simple_dstm/airports \
+    ../../graph_dstm/airports \
+    ../../queue_dstm/airports \
+    ../../ross_airport
+do
+    if [[ ! -x "$exe" ]]; then
+        echo "ERROR: missing or non-executable: $exe" >&2
+        exit 1
+    fi
+
+    if ldd "$exe" | grep -q "not found"; then
+        echo "ERROR: unresolved libraries in $exe:" >&2
+        ldd "$exe" | grep "not found" >&2
+        exit 1
+    fi
+done
+
+./ross_run_scaling.sh \
+    --mpirun mpiexec \
+    --mpi-flavor pals
+
+echo
+echo "Completed: $(date -Is)"

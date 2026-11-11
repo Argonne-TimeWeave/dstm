@@ -285,12 +285,15 @@ fi
 # MPI flavor + prefix
 # ==========================================================================
 if [[ "${MPI_FLAVOR}" == auto ]]; then
-        if "${MPIRUN}" --version 2>&1 | grep -qi "open mpi\|open-rte"; then
+        if "${MPIRUN}" --version 2>&1 | grep -qi "pals"; then
+                MPI_FLAVOR=pals
+        elif "${MPIRUN}" --version 2>&1 | grep -qi "open mpi\|open-rte"; then
                 MPI_FLAVOR=openmpi
         elif "${MPIRUN}" --version 2>&1 | grep -qi "hydra\|mpich\|intel(r) mpi"; then
                 MPI_FLAVOR=mpich
         else
-                MPI_FLAVOR=openmpi
+                echo "WARNING: could not identify MPI launcher; assuming PALS." >&2
+                MPI_FLAVOR=pals
         fi
 fi
 if [[ -z "${MPI_PREFIX}" ]]; then
@@ -373,7 +376,14 @@ hostfile_for() {
 build_launch() {
         local np="$1" nodes="$2" ppn="$3"
         LAUNCH=()
-        if [[ "${MPI_FLAVOR}" == openmpi ]]; then
+        if [[ "${MPI_FLAVOR}" == pals ]]; then
+                LAUNCH=(
+                        "${MPIRUN}"
+                        -n "${np}"
+                        -ppn "${ppn}"
+                        --hostfile "$(hostfile_for "${nodes}")"
+                )
+        elif [[ "${MPI_FLAVOR}" == openmpi ]]; then
                 LAUNCH=("${MPIRUN}" -n "${np}" --hostfile "$(hostfile_for "${nodes}")")
                 [[ -n "${MPI_PREFIX}" ]] && LAUNCH+=(--prefix "${MPI_PREFIX}")
                 if (( np > 1 )) && (( np % nodes == 0 )); then
@@ -764,6 +774,8 @@ run_one() {
                 local xarg=()
                 if [[ "${MPI_FLAVOR}" == openmpi ]]; then
                         xarg=(-x "MPI_WRAP_OUTDIR=${dumpdir}")
+                elif [[ "${MPI_FLAVOR}" == pals ]]; then
+                        xarg=(--env "MPI_WRAP_OUTDIR=${dumpdir}")
                 else
                         xarg=(-genv MPI_WRAP_OUTDIR "${dumpdir}")
                 fi
