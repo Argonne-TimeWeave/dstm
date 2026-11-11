@@ -5,12 +5,12 @@ Items explicitly identified as future work in `nick_dstm.v`, ordered by dependen
 ## 1. Foundations
 
 - [x] Keep push and pull as separate, non-mixed valid program classes in `valid_program`: the whole program satisfies `push_program` or the whole program satisfies `pull_program`.
-- [ ] State and prove progress results separately for push-only and pull-only programs rather than assuming one proof covers both.
+- [x] State and prove progress results separately for push-only and pull-only programs rather than assuming one proof covers both.
   - [x] Prove the shared abstract head-store prerequisite and specialize it separately: every reachable push head store is a remote enabled step, while every reachable pull head store is a local enabled step.
   - [x] Require every load's exact version to have a program store producer, integrate this into `valid_program`, prove the resulting pending-load availability invariant through reachable abstract states, and prove conditional head-load progress once all possible writes have executed.
-  - [ ] Add a sound dependency condition ensuring required producers can execute; producer existence alone does not rule out a producer blocked behind another load.
+  - [x] Establish the dependency argument ensuring required producers can execute; the existing push-only and pull-only timestamp rules suffice without strengthening `valid_program`.
     - [x] Prove the reusable ranking prerequisite already induced by push-only and pull-only timestamp rules: every matching producer store has a strictly smaller originating time than its load, reachable node pools preserve nondecreasing instruction times, and any still-pending producer lies behind a head with a strictly smaller originating time than the blocked load.
-    - [ ] Use finiteness to choose a minimum-time blocked head load and derive an enabled head store or visible load; only then decide whether `valid_program` needs any additional dependency condition.
+    - [x] Use finiteness to choose a minimum-time head and derive an enabled head store or visible load; strict descent rules out a blocked minimum load, so `valid_program` needs no additional dependency condition.
 - [x] Formalize and use the assumption that each node issues instructions at monotonically increasing logical times (`monotonic_program`, `monotonic_program_status_reachable`).
 - [ ] Complete the memory/status lifecycle work begun in `nick_dstm.v`:
   - [x] Represent logical `Discardable` tombstones in the abstract semantics, guarded by the absence of pending reads, and prove retired versions preserve their value and cannot become writable again through reachable states (`retired_version_reachable`).

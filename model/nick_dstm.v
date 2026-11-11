@@ -1,5 +1,6 @@
 Require Import String.
 Require Import Lia.
+Require Import Classical_Prop.
 Require Import stdpp.gmap.
 
 Module StdppCompat.
@@ -3148,6 +3149,155 @@ Proof.
     apply Forall_inv in Hops.
     exact (proj1 (proj2 Hops)).
   - eapply allowed_program_reachable_head_store_steps; eassumption.
+Qed.
+
+Lemma finite_minimum_head (np : node_pool) :
+  (forall i instructions e, np !! i = Some (instructions, e) ->
+     instructions = []) \/
+  exists i head rest e,
+    np !! i = Some (head :: rest, e) /\
+    forall j head' rest' e',
+      np !! j = Some (head' :: rest', e') ->
+      timestamp_of head <= timestamp_of head'.
+Proof.
+  induction np as [|i p np Hi IH] using map_ind.
+  - left. intros j instructions e Hlookup.
+    discriminate.
+  - destruct p as [instructions e].
+    destruct instructions as [|head rest].
+    + destruct IH as [Hfinished | [j [head' [rest' [e' [Hj Hminimum]]]]]].
+      * left. intros k instructions ek Hlookup.
+        destruct (decide (k = i)) as [-> | Hne].
+        -- assert ((instructions, ek) = ([], e)) as Heq.
+           { apply Some_inj. rewrite <- Hlookup. apply lookup_insert. }
+           inversion Heq. reflexivity.
+        -- apply (Hfinished k instructions ek).
+           transitivity (<[i := ([], e)]> np !! k).
+           ++ symmetry. apply lookup_insert_ne. congruence.
+           ++ exact Hlookup.
+      * right. exists j, head', rest', e'. split.
+        -- assert (Hji : j <> i).
+           { intros Heq. subst j.
+             pose proof (eq_trans (eq_sym Hj) Hi). discriminate. }
+           transitivity (np !! j).
+           ++ apply lookup_insert_ne. congruence.
+           ++ exact Hj.
+        -- intros k head'' rest'' ek Hlookup.
+           destruct (decide (k = i)) as [-> | Hne].
+           ++ assert ((head'' :: rest'', ek) = ([], e)) as Heq.
+              { apply Some_inj. rewrite <- Hlookup. apply lookup_insert. }
+              discriminate.
+           ++ apply (Hminimum k head'' rest'' ek).
+              transitivity (<[i := ([], e)]> np !! k).
+              ** symmetry. apply lookup_insert_ne. congruence.
+              ** exact Hlookup.
+    + destruct IH as [Hfinished | [j [head' [rest' [e' [Hj Hminimum]]]]]].
+      * right. exists i, head, rest, e. split.
+        -- apply lookup_insert.
+        -- intros k head' rest' ek Hlookup.
+           destruct (decide (k = i)) as [-> | Hne].
+           ++ assert ((head' :: rest', ek) = (head :: rest, e)) as Heq.
+              { apply Some_inj. rewrite <- Hlookup. apply lookup_insert. }
+              inversion Heq. lia.
+           ++ assert (np !! k = Some (head' :: rest', ek)) as Hold.
+              { transitivity (<[i := (head :: rest, e)]> np !! k).
+                - symmetry. apply lookup_insert_ne. congruence.
+                - exact Hlookup. }
+              pose proof (Hfinished k (head' :: rest') ek Hold).
+              discriminate.
+      * destruct (Nat.le_ge_cases (timestamp_of head) (timestamp_of head')) as [Hle | Hge].
+        -- right. exists i, head, rest, e. split.
+           ++ apply lookup_insert.
+           ++ intros k head'' rest'' ek Hlookup.
+              destruct (decide (k = i)) as [-> | Hne].
+              ** assert ((head'' :: rest'', ek) = (head :: rest, e)) as Heq.
+                 { apply Some_inj. rewrite <- Hlookup. apply lookup_insert. }
+                 inversion Heq. lia.
+              ** assert (np !! k = Some (head'' :: rest'', ek)) as Hold.
+                 { transitivity (<[i := (head :: rest, e)]> np !! k).
+                   - symmetry. apply lookup_insert_ne. congruence.
+                   - exact Hlookup. }
+                 specialize (Hminimum k head'' rest'' ek Hold). lia.
+        -- right. exists j, head', rest', e'. split.
+           ++ assert (Hji : j <> i).
+              { intros Heq. subst j.
+                pose proof (eq_trans (eq_sym Hj) Hi). discriminate. }
+              transitivity (np !! j).
+              ** apply lookup_insert_ne. congruence.
+              ** exact Hj.
+           ++ intros k head'' rest'' ek Hlookup.
+              destruct (decide (k = i)) as [-> | Hne].
+              ** assert ((head'' :: rest'', ek) = (head :: rest, e)) as Heq.
+                 { apply Some_inj. rewrite <- Hlookup. apply lookup_insert. }
+                 inversion Heq. lia.
+              ** apply (Hminimum k head'' rest'' ek).
+                 transitivity (<[i := (head :: rest, e)]> np !! k).
+                 --- symmetry. apply lookup_insert_ne. congruence.
+                 --- exact Hlookup.
+Qed.
+
+Theorem push_program_reachable_enabled_head
+    owner G prog np m :
+  monotonic_program prog ->
+  load_versions_produced prog ->
+  push_program owner G prog ->
+  rtc (@step owner G) (init_config prog) (np, m) ->
+  finished (np, m) \/ exists c', step owner G (np, m) c'.
+Proof.
+  intros Hmono Hproduced Hpush Hrtc.
+  destruct (finite_minimum_head np) as [Hfinished | [i [head [rest [e [Hi Hminimum]]]]]].
+  - left. intros i [instructions e] Hi. eapply Hfinished; eassumption.
+  - right. destruct head as [load_at x l target_at | store_at l target_at v].
+    + destruct (classic (pending_write np l target_at)) as [Hpending | Hvisible].
+      * destruct (push_program_head_load_pending_write_descends
+          owner G prog np m i load_at x l target_at rest e
+          Hmono Hpush Hrtc Hi Hpending)
+          as [writer [writer_head [writer_rest [writer_env [Hwriter Hlt]]]]].
+        specialize (Hminimum writer writer_head writer_rest writer_env Hwriter).
+        cbn in Hminimum.
+        lia.
+      * destruct (allowed_program_reachable_head_load_progress
+          owner G prog np m i load_at x l target_at rest e
+          (push_program_allowed owner G prog Hpush) Hproduced Hrtc Hi Hvisible)
+          as [[value [_ Hstep]] | [value [_ [Hreadable _]]]].
+        -- eauto.
+        -- eauto.
+    + destruct (push_program_reachable_head_store_progress
+        owner G prog np m i store_at l target_at v rest e Hpush Hrtc Hi)
+        as [_ Hstep].
+      eauto.
+Qed.
+
+Theorem pull_program_reachable_enabled_head
+    owner G prog np m :
+  monotonic_program prog ->
+  load_versions_produced prog ->
+  pull_program owner G prog ->
+  rtc (@step owner G) (init_config prog) (np, m) ->
+  finished (np, m) \/ exists c', step owner G (np, m) c'.
+Proof.
+  intros Hmono Hproduced Hpull Hrtc.
+  destruct (finite_minimum_head np) as [Hfinished | [i [head [rest [e [Hi Hminimum]]]]]].
+  - left. intros i [instructions e] Hi. eapply Hfinished; eassumption.
+  - right. destruct head as [load_at x l target_at | store_at l target_at v].
+    + destruct (classic (pending_write np l target_at)) as [Hpending | Hvisible].
+      * destruct (pull_program_head_load_pending_write_descends
+          owner G prog np m i load_at x l target_at rest e
+          Hmono Hpull Hrtc Hi Hpending)
+          as [writer [writer_head [writer_rest [writer_env [Hwriter Hlt]]]]].
+        specialize (Hminimum writer writer_head writer_rest writer_env Hwriter).
+        cbn in Hminimum.
+        lia.
+      * destruct (allowed_program_reachable_head_load_progress
+          owner G prog np m i load_at x l target_at rest e
+          (pull_program_allowed owner G prog Hpull) Hproduced Hrtc Hi Hvisible)
+          as [[value [_ Hstep]] | [value [_ [Hreadable _]]]].
+        -- eauto.
+        -- eauto.
+    + destruct (pull_program_reachable_head_store_progress
+        owner G prog np m i store_at l target_at v rest e Hpull Hrtc Hi)
+        as [_ Hstep].
+      eauto.
 Qed.
 
 Corollary valid_program_status_reachable owner G prog np' m' nt' :
