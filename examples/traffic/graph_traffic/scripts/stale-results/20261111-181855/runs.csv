@@ -1,0 +1,9 @@
+ranks,mode,stale_delay,rep,status,mean_dur,mean_hops,arrived_pct,cohort_arrived,cohort_spawned,arrived,mean_age,stale_max,run_time,mib_tick_total,mib_tick_per_rank,trip_table
+256,stale,1,1,ok,64.46,19.29,17.31,1861,10752,71667,7.69,20,34.85086,633.98,2.4765,trips/np256-n8x32-stale-sd1-r1.csv
+256,stale,2,1,ok,62.73,18.85,16.73,1799,10752,68548,15.85,40,30.13905,321.70,1.2566,trips/np256-n8x32-stale-sd2-r1.csv
+256,stale,4,1,ok,59.69,17.99,15.67,1685,10752,64829,32.16,80,27.74083,165.56,0.6467,trips/np256-n8x32-stale-sd4-r1.csv
+256,stale,8,1,ok,58.31,17.62,15.06,1619,10752,62287,64.64,160,25.91212,87.49,0.3418,trips/np256-n8x32-stale-sd8-r1.csv
+256,stale,16,1,ok,58.54,17.68,15.17,1631,10752,60140,128.99,320,24.59359,48.45,0.1893,trips/np256-n8x32-stale-sd16-r1.csv
+256,stale,32,1,ok,58.14,17.57,15.17,1631,10752,60220,255.00,640,23.87898,28.93,0.1130,trips/np256-n8x32-stale-sd32-r1.csv
+256,oracle,na,1,ok,66.89,19.94,17.79,1913,10752,72814,1.00,0,31.84200,9.18,0.0359,trips/np256-n8x32-oracle-sdna-r1.csv
+256,blind,na,1,ok,56.40,16.85,13.58,1460,10752,54866,nan,0,14.29586,9.11,0.0356,trips/np256-n8x32-blind-sdna-r1.csv

@@ -1,0 +1,42 @@
+#!/bin/bash -l
+#PBS -N traffic-stale
+#PBS -A timeweave
+#PBS -q prod
+#PBS -l select=10:system=polaris
+#PBS -l filesystems=home:eagle
+#PBS -l walltime=01:30:00
+#PBS -j oe
+#PBS -o traffic_stale_prod.log
+
+set -euo pipefail
+
+module restore ross-env
+
+cd "$PBS_O_WORKDIR" || exit 1
+
+EXE="../traffic"
+
+if [[ ! -x "$EXE" ]]; then
+        echo "ERROR: missing or non-executable: $EXE" >&2
+        exit 1
+fi
+
+if ldd "$EXE" | grep -q "not found"; then
+        echo "ERROR: unresolved shared libraries:" >&2
+        ldd "$EXE" | grep "not found" >&2
+        exit 1
+fi
+
+echo "Job:       $PBS_JOBID"
+echo "Started:   $(date -Is)"
+echo "Nodes:     $(sort -u "$PBS_NODEFILE" | wc -l)"
+echo "Launcher:  $(command -v mpiexec)"
+echo
+
+./scale_stale.sh \
+    --mpirun mpiexec \
+    --mpi-flavor pals \
+    --max-nodes 8 \
+    --max-ppn 32
+
+echo "Completed: $(date -Is)"

@@ -445,7 +445,6 @@ def plot_class_metric(
                 xs,
                 ys,
                 marker="o",
-                linewidth=2,
                 color=CLASS_COLORS[cls],
                 label="stale",
             )
@@ -476,7 +475,7 @@ def plot_class_metric(
                     xmax,
                     colors="tab:green",
                     linestyles=":",
-                    linewidth=2,
+                    linewidth=2.4,
                     label=f"oracle = {oracle:.2f}",
                 )
 
@@ -487,7 +486,7 @@ def plot_class_metric(
                     xmax,
                     colors="tab:gray",
                     linestyles="--",
-                    linewidth=2,
+                    linewidth=2.4,
                     label=f"blind = {blind:.2f}",
                 )
 
@@ -496,8 +495,8 @@ def plot_class_metric(
         ax.axhline(0.0, color="black", linewidth=0.8, alpha=0.35)
         ax.set_title(f"{cls} trips")
         ax.set_xlabel("stale delay (ticks)")
-        ax.grid(True, linestyle="--", alpha=0.35)
-        ax.legend(fontsize=8)
+        ax.grid(True, which="both", linestyle=":", alpha=0.5)
+        ax.legend(frameon=False)
 
     if not plotted:
         sys.exit(f"error: no finite stale trip metrics available for {title}")
@@ -505,7 +504,7 @@ def plot_class_metric(
     axes[0].set_ylabel(ylabel)
     fig.suptitle(title)
     fig.tight_layout(rect=(0, 0, 1, 0.93))
-    fig.savefig(out)
+    fig.savefig(out, bbox_inches="tight")
     print(f"wrote {out}")
     return fig
 
@@ -537,7 +536,6 @@ def plot_scalar_trip_metric(
         xs,
         ys,
         marker="o",
-        linewidth=2,
         color="tab:blue",
         label="stale",
     )
@@ -551,7 +549,7 @@ def plot_scalar_trip_metric(
             xmax,
             colors="tab:green",
             linestyles=":",
-            linewidth=2,
+            linewidth=2.4,
             label=f"oracle = {oracle:.3f}",
         )
 
@@ -562,7 +560,7 @@ def plot_scalar_trip_metric(
             xmax,
             colors="tab:gray",
             linestyles="--",
-            linewidth=2,
+            linewidth=2.4,
             label=f"blind = {blind:.3f}",
         )
 
@@ -576,10 +574,10 @@ def plot_scalar_trip_metric(
     ax.set_xlabel("stale delay (ticks)")
     ax.set_ylabel(ylabel)
     ax.set_title(title)
-    ax.grid(True, linestyle="--", alpha=0.4)
-    ax.legend()
+    ax.grid(True, which="both", linestyle=":", alpha=0.5)
+    ax.legend(frameon=False)
     fig.tight_layout()
-    fig.savefig(out)
+    fig.savefig(out, bbox_inches="tight")
     print(f"wrote {out}")
     return fig
 
@@ -648,7 +646,6 @@ def plot_timing(plt, rows, out):
             xs,
             ys,
             marker="o",
-            linewidth=2,
             color="tab:blue",
             label="stale",
         )
@@ -660,7 +657,7 @@ def plot_timing(plt, rows, out):
                 xmax,
                 colors="tab:green",
                 linestyles=":",
-                linewidth=2,
+                linewidth=2.4,
                 label=f"oracle = {oracle:.1f}s",
             )
 
@@ -671,7 +668,7 @@ def plot_timing(plt, rows, out):
                 xmax,
                 colors="tab:gray",
                 linestyles="--",
-                linewidth=2,
+                linewidth=2.4,
                 label=f"blind = {blind:.1f}s",
             )
 
@@ -682,8 +679,8 @@ def plot_timing(plt, rows, out):
         ax.set_xlabel("stale delay (ticks)")
         ax.set_ylabel("total run time (s)")
         ax.set_title("graph_traffic: total run time vs. stale delay")
-        ax.grid(True, linestyle="--", alpha=0.4)
-        ax.legend()
+        ax.grid(True, which="both", linestyle=":", alpha=0.5)
+        ax.legend(frameon=False)
         fig.tight_layout()
         fig.savefig(out)
         print(f"wrote {out}")
@@ -737,11 +734,11 @@ def plot_timing(plt, rows, out):
     )
 
     for ax in (ax_top, ax_bottom):
-        ax.grid(True, linestyle="--", alpha=0.4)
+        ax.grid(True, which="both", linestyle=":", alpha=0.5)
 
     ax_bottom.set_xticks(xs)
     ax_bottom.set_xlabel("stale delay (ticks)")
-    ax_bottom.legend(loc="best")
+    ax_bottom.legend(loc="best", frameon=False)
 
     fig.text(
         0.015,
@@ -753,7 +750,7 @@ def plot_timing(plt, rows, out):
     ax_top.set_title("graph_traffic: total run time vs. stale delay")
 
     fig.tight_layout()
-    fig.savefig(out)
+    fig.savefig(out, bbox_inches="tight")
     print(f"wrote {out}")
     return fig
 
@@ -773,7 +770,6 @@ def plot_movement(plt, rows, out):
         xs,
         ys,
         marker="o",
-        linewidth=2,
         color="tab:blue",
         label="stale",
     )
@@ -787,7 +783,7 @@ def plot_movement(plt, rows, out):
             xmax,
             colors="tab:green",
             linestyles=":",
-            linewidth=2,
+            linewidth=2.4,
             label=f"oracle = {oracle:.3f}",
         )
 
@@ -798,7 +794,7 @@ def plot_movement(plt, rows, out):
             xmax,
             colors="tab:gray",
             linestyles="--",
-            linewidth=2,
+            linewidth=2.4,
             label=f"blind = {blind:.3f}",
         )
 
@@ -806,10 +802,10 @@ def plot_movement(plt, rows, out):
     ax.set_xlabel("stale delay (ticks)")
     ax.set_ylabel("data movement (MiB/tick per rank)")
     ax.set_title("graph_traffic: data movement vs. stale delay")
-    ax.grid(True, linestyle="--", alpha=0.4)
-    ax.legend()
+    ax.grid(True, which="both", linestyle=":", alpha=0.5)
+    ax.legend(frameon=False)
     fig.tight_layout()
-    fig.savefig(out)
+    fig.savefig(out, bbox_inches="tight")
     print(f"wrote {out}")
     return fig
 
@@ -877,7 +873,7 @@ def main():
     parser.add_argument(
         "--dpi",
         type=int,
-        default=150,
+        default=300,
         help="output DPI; default 150",
     )
     args = parser.parse_args()
@@ -886,6 +882,28 @@ def main():
 
     if not args.show:
         matplotlib.use("Agg")
+
+    # Conference-safe fonts: embed TrueType rather than Type 3 fonts.
+    matplotlib.rcParams["pdf.fonttype"] = 42
+    matplotlib.rcParams["ps.fonttype"] = 42
+    matplotlib.rcParams["text.usetex"] = False
+
+    # Match the airport plotting scripts' conference-paper styling.
+    matplotlib.rcParams.update({
+        "font.family": "sans-serif",
+        "font.size": 16,
+        "axes.titlesize": 19,
+        "axes.labelsize": 18,
+        "xtick.labelsize": 15,
+        "ytick.labelsize": 15,
+        "legend.fontsize": 16,
+        "figure.titlesize": 21,
+        "lines.linewidth": 2.4,
+        "lines.markersize": 8,
+        "axes.grid": True,
+        "grid.linestyle": ":",
+        "grid.alpha": 0.5,
+    })
 
     import matplotlib.pyplot as plt
 
@@ -1041,7 +1059,7 @@ def main():
             move_out,
         ),
     ):
-        figure.savefig(path, dpi=args.dpi)
+        figure.savefig(path, dpi=args.dpi, bbox_inches="tight")
 
     if args.show:
         plt.show()

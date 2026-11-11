@@ -53,6 +53,7 @@ EXE="${EXE:-${ROOT}/traffic}"
 # Defaults (override via env or flags)
 # --------------------------------------------------------------------------
 MPIRUN="${MPIRUN:-mpirun}"
+MPI_FLAVOR="${MPI_FLAVOR:-auto}"             # auto | pals | openmpi | mpich
 MPI_PREFIX="${MPI_PREFIX:-}"                 # auto-derived from `which mpirun`
 MPI_ENV_VARS="${MPI_ENV_VARS:-LD_LIBRARY_PATH PATH}"
 MPI_EXTRA="${MPI_EXTRA:-}"
@@ -128,6 +129,7 @@ while [[ $# -gt 0 ]]; do
         --max-nodes)    MAX_NODES="$2"; shift 2 ;;
         --exe)          EXE="$2"; shift 2 ;;
         --mpirun)       MPIRUN="$2"; shift 2 ;;
+	--mpi-flavor)   MPI_FLAVOR="$2"; shift 2 ;;
         --mpi-prefix)   MPI_PREFIX="$2"; shift 2 ;;
         --mpi-env)      MPI_ENV_VARS="$2"; shift 2 ;;
         --mpi-extra)    MPI_EXTRA="$2"; shift 2 ;;
@@ -158,14 +160,52 @@ AVAIL_NODES=${#NODELIST[@]}
 (( AVAIL_NODES > MAX_NODES )) && AVAIL_NODES=${MAX_NODES}
 
 # --------------------------------------------------------------------------
-# MPI prefix (two dirnames up from `which mpirun`), for --prefix / orted.
+# MPI launcher flavor and Open MPI-specific options.
+#
+# Polaris uses the Cray PALS mpiexec launcher. PALS does not accept Open
+# MPI's --prefix, --map-by, or -x options, nor MPICH Hydra's -f option.
 # --------------------------------------------------------------------------
-if [[ -z "${MPI_PREFIX}" ]]; then
-        _mp="$(command -v "${MPIRUN}" 2>/dev/null)"
-        [[ -n "${_mp}" ]] && MPI_PREFIX="$(dirname "$(dirname "${_mp}")")"
+if [[ "${MPI_FLAVOR}" == auto ]]; then
+        _mpi_version="$("${MPIRUN}" --version 2>&1 || true)"
+        _mpi_path="$(command -v "${MPIRUN}" 2>/dev/null || true)"
+        _mpi_real="$(readlink -f "${_mpi_path}" 2>/dev/null || true)"
+
+        if grep -qi "open mpi\|open-rte" <<< "${_mpi_version}"; then
+                MPI_FLAVOR=openmpi
+        elif grep -qi "hydra\|mpich\|intel(r) mpi" <<< "${_mpi_version}"; then
+                MPI_FLAVOR=mpich
+        elif [[ "${_mpi_path}" == *pals* || "${_mpi_real}" == *pals* ]]; then
+                MPI_FLAVOR=pals
+        else
+                echo "ERROR: could not identify MPI launcher flavor." >&2
+                echo "       On Polaris, pass --mpi-flavor pals." >&2
+                exit 2
+        fi
 fi
+
+case "${MPI_FLAVOR}" in
+        pals|openmpi|mpich)
+                ;;
+        *)
+                echo "ERROR: invalid MPI flavor: ${MPI_FLAVOR}" >&2
+                echo "       Expected pals, openmpi, or mpich." >&2
+                exit 2
+                ;;
+esac
+
+# --prefix and -x are Open MPI options only.
 MPI_X_FLAGS=()
-for _v in ${MPI_ENV_VARS}; do MPI_X_FLAGS+=(-x "${_v}"); done
+if [[ "${MPI_FLAVOR}" == openmpi ]]; then
+        if [[ -z "${MPI_PREFIX}" ]]; then
+                _mp="$(command -v "${MPIRUN}" 2>/dev/null)"
+                [[ -n "${_mp}" ]] &&
+                        MPI_PREFIX="$(dirname "$(dirname "${_mp}")")"
+        fi
+
+        for _v in ${MPI_ENV_VARS}; do
+                MPI_X_FLAGS+=(-x "${_v}")
+        done
+fi
 
 # --------------------------------------------------------------------------
 # Preflight.
@@ -275,12 +315,40 @@ run_one() {
         trip_file="${TRIPDIR}/${tag}.csv"
 
 
-        # Batch allocation -> full recipe; interactive single node -> plain -n.
+         # Construct launcher arguments for the detected MPI implementation.
         if [[ "${ALLOC_SRC}" != "localhost" ]]; then
-                launch=("${MPIRUN}" -n "${np}" --hostfile "${ALLOC_NODEFILE}")
-                [[ -n "${MPI_PREFIX}" ]] && launch+=(--prefix "${MPI_PREFIX}")
-                (( np > 1 && np % nodes == 0 )) && launch+=(--map-by "ppr:${ppn}:node")
-                launch+=("${MPI_X_FLAGS[@]}")
+                case "${MPI_FLAVOR}" in
+                pals)
+                        # Cray PALS, used on Polaris.
+                        launch=(
+                                "${MPIRUN}"
+                                -n "${np}"
+                                -ppn "${ppn}"
+                                --hostfile "${ALLOC_NODEFILE}"
+                        )
+                        ;;
+                openmpi)
+                        launch=(
+                                "${MPIRUN}"
+                                -n "${np}"
+                                --hostfile "${ALLOC_NODEFILE}"
+                        )
+                        [[ -n "${MPI_PREFIX}" ]] &&
+                                launch+=(--prefix "${MPI_PREFIX}")
+                        if (( np > 1 && np % nodes == 0 )); then
+                                launch+=(--map-by "ppr:${ppn}:node")
+                        fi
+                        launch+=("${MPI_X_FLAGS[@]}")
+                        ;;
+                mpich)
+                        launch=(
+                                "${MPIRUN}"
+                                -n "${np}"
+                                -f "${ALLOC_NODEFILE}"
+                                -ppn "${ppn}"
+                        )
+                        ;;
+                esac
         else
                 launch=("${MPIRUN}" -n "${np}")
         fi

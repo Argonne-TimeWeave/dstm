@@ -102,13 +102,37 @@ def main():
     ap.add_argument("--show", action="store_true", help="display the plot window")
     ap.add_argument("--linear-x", action="store_true",
                     help="use a linear x-axis instead of log2(ranks)")
-    ap.add_argument("--dpi", type=int, default=150, help="output DPI (default 150)")
+    ap.add_argument("--dpi", type=int, default=300, help="output DPI (default 150)")
     args = ap.parse_args()
 
     # Import here so --help works even without matplotlib installed.
     import matplotlib
+
     if not args.show:
         matplotlib.use("Agg")
+
+    # Conference-safe fonts: embed TrueType rather than Type 3 fonts.
+    matplotlib.rcParams["pdf.fonttype"] = 42
+    matplotlib.rcParams["ps.fonttype"] = 42
+    matplotlib.rcParams["text.usetex"] = False
+
+    # Match the airport plotting scripts' conference-paper styling.
+    matplotlib.rcParams.update({
+        "font.family": "sans-serif",
+        "font.size": 16,
+        "axes.titlesize": 19,
+        "axes.labelsize": 18,
+        "xtick.labelsize": 15,
+        "ytick.labelsize": 15,
+        "legend.fontsize": 16,
+        "figure.titlesize": 21,
+        "lines.linewidth": 2.4,
+        "lines.markersize": 8,
+        "axes.grid": True,
+        "grid.linestyle": ":",
+        "grid.alpha": 0.5,
+    })
+
     import matplotlib.pyplot as plt
 
     rows = load_rows(args.csv)
@@ -126,7 +150,7 @@ def main():
         xs, ys = median_by_ranks(rows, "stale", delay=str(delay))
         if not xs:
             continue
-        ax.plot(xs, ys, marker="o", linewidth=2, color=color,
+        ax.plot(xs, ys, marker="o", color=color,
                 label=f"stale d={delay}")
         all_ranks.update(xs)
         plotted_any = True
@@ -134,14 +158,14 @@ def main():
     # Oracle (green) and blind (gray) -- delay is "na", so don't filter on it.
     oracle_x, oracle_y = median_by_ranks(rows, "oracle")
     if oracle_x:
-        ax.plot(oracle_x, oracle_y, marker="s", linewidth=2, color="tab:green",
+        ax.plot(oracle_x, oracle_y, marker="s", color="tab:green",
                 label="oracle")
         all_ranks.update(oracle_x)
         plotted_any = True
 
     blind_x, blind_y = median_by_ranks(rows, "blind")
     if blind_x:
-        ax.plot(blind_x, blind_y, marker="^", linewidth=2, color="tab:gray",
+        ax.plot(blind_x, blind_y, marker="^", color="tab:gray",
                 label="blind")
         all_ranks.update(blind_x)
         plotted_any = True
@@ -158,9 +182,8 @@ def main():
 
     ax.set_xlabel("ranks")
     ax.set_ylabel("run time (s)")
-    ax.set_title("graph_traffic: run time vs. ranks\n(lower is better)")
-    ax.grid(True, linestyle="--", alpha=0.4, which="both")
-    ax.legend()
+    ax.grid(True, which="both", linestyle=":", alpha=0.5)
+    ax.legend(frameon=False)
     fig.tight_layout()
 
     if args.show:
@@ -171,7 +194,7 @@ def main():
         import os
         out = os.path.join(os.path.dirname(os.path.abspath(args.csv)),
                            "run_time_vs_ranks.png")
-    fig.savefig(out, dpi=args.dpi)
+    fig.savefig(out, dpi=args.dpi, bbox_inches="tight")
     print(f"wrote {out}")
 
 
