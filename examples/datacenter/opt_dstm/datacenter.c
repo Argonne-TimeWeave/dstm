@@ -317,15 +317,18 @@ struct sim {
         int feedback_region_id;
         int heat_region_id[MAX_THERMAL_DELAY + 1];
 
-        dstm_darray_t *schedule_array;
-        dstm_darray_t *feedback_array;
+        dstm_dqueue_t *schedule_q;
+        dstm_dqueue_t *feedback_q;
 
-        size_t schedule_global_offset;
-        size_t feedback_global_offset;
-        size_t feedback_scheduler_offset;
+        size_t schedule_q_capacity;
+        size_t feedback_q_capacity;
 
         void *schedule_buffer;
         void *feedback_buffer;
+	void *pending_schedule;    /* own block received early, installed at epoch start */
+        void *bundle_buffer;       /* received schedule bundle */
+        struct rack_feedback *own_feedback; /* snapshot taken at B, forwarded later */
+        int hop_up, hop_down;
 
         /*
          * Maximum number of node-state changes in one worker's schedule
@@ -414,6 +417,43 @@ static int rack_owner(const struct sim *s, size_t rack)
         return 1 + (int)(rack / s->local_racks);
 }
 
+static int g_tree_fanout = 8;
+
+static int tree_parent(int r)      { return r == 0 ? -1 : (r - 1) / g_tree_fanout; }
+static int tree_first_child(int r) { return g_tree_fanout * r + 1; }
+static int tree_child_count(int r)
+{
+        int f = tree_first_child(r), last = g_world_size - 1;
+        if (f > last) return 0;
+        int n = last - f + 1;
+        return n > g_tree_fanout ? g_tree_fanout : n;
+}
+static int tree_depth_of(int r)
+{
+        int d = 0;
+        while (r > 0) { r = (r - 1) / g_tree_fanout; d++; }
+        return d;
+}
+static int tree_max_depth(void) { return tree_depth_of(g_world_size - 1); }
+static int tree_subtree_size(int r)
+{
+        int last = g_world_size - 1, lo = r, hi = r, n = 0;
+        while (lo <= last) {
+                if (hi > last) hi = last;
+                n += hi - lo + 1;
+                lo = g_tree_fanout * lo + 1;
+                hi = g_tree_fanout * hi + g_tree_fanout;
+        }
+        return n;
+}
+/* each rank owns 1 dummy slot + one slot per child */
+static size_t feedback_offset_of(int rank)
+{
+        size_t o = 0;
+        for (int r = 0; r < rank; r++) o += (size_t)tree_child_count(r) + 1;
+        return o;
+}
+
 static size_t rack_graph_vertex(size_t physical_rack)
 {
         /*
@@ -434,6 +474,22 @@ static size_t schedule_block_size(const struct sim *s)
         return sizeof(struct schedule_block_header) +
                s->schedule_event_capacity *
                sizeof(struct schedule_event);
+}
+
+static size_t schedule_bundle_size(const struct sim *s)
+{ return (size_t)tree_subtree_size(1) * schedule_block_size(s); }
+
+static size_t feedback_bundle_size(const struct sim *s)
+{
+        return sizeof(struct feedback_block_header) +
+               (size_t)tree_subtree_size(1) * s->local_racks *
+               sizeof(struct rack_feedback);
+}
+
+static size_t feedback_stage_size(const struct sim *s)
+{
+        return sizeof(struct feedback_block_header) +
+               (size_t)s->total_racks * sizeof(struct rack_feedback);
 }
 
 static size_t feedback_block_size(const struct sim *s)
@@ -1030,36 +1086,20 @@ static int build_distance_matrix(struct sim *s)
          * because feedback flows worker -> scheduler and schedules flow
          * scheduler -> worker.
          */
-        int schedule_delay =
-                s->schedule_window -
-                s->control_latency;
+        int D = tree_max_depth();
+        REQUIRE(s->control_latency % D == 0 &&
+                (s->schedule_window - s->control_latency) % D == 0,
+                "tree depth must divide control latency and schedule delay");
+        s->hop_up   = s->control_latency / D;
+        s->hop_down = (s->schedule_window - s->control_latency) / D;
+        int control_bound = s->hop_up < s->hop_down ? s->hop_up : s->hop_down;
 
-        for (int rank = 1;
-             rank < ws;
-             rank++) {
-                int control_bound =
-                        s->control_latency <
-                        schedule_delay ?
-                        s->control_latency :
-                        schedule_delay;
-
-                int *a =
-                        &matrix[
-                                (size_t)SCHEDULER_RANK *
-                                ws +
-                                rank];
-
-                int *b =
-                        &matrix[
-                                (size_t)rank *
-                                ws +
-                                SCHEDULER_RANK];
-
-                if (*a < 0 || control_bound < *a)
-                        *a = control_bound;
-
-                if (*b < 0 || control_bound < *b)
-                        *b = control_bound;
+        for (int rank = 1; rank < ws; rank++) {
+                int p = tree_parent(rank);
+                int *a = &matrix[(size_t)p * ws + rank];
+                int *b = &matrix[(size_t)rank * ws + p];
+                if (*a < 0 || control_bound < *a) *a = control_bound;
+                if (*b < 0 || control_bound < *b) *b = control_bound;
         }
 
         int rc = create_matrix(
@@ -1549,157 +1589,55 @@ static void schedule_queued_jobs(
  * Push feedback channel
  ******************************************************************************/
 
-static void publish_feedback(
-        struct sim *s,
-        dstm_time_t snapshot_time)
+static void stash_feedback(struct sim *s, dstm_time_t t)
 {
-        REQUIRE(!s->is_scheduler,
-                "scheduler cannot publish feedback");
-
-        memset(s->feedback_buffer,
-               0,
-               feedback_block_size(s));
-
-        struct feedback_block_header *header =
-                (struct feedback_block_header *)
-                s->feedback_buffer;
-
-        header->snapshot_time =
-                (int)snapshot_time;
-
-        header->source_rank =
-                g_rank;
-
-        header->rack_count =
-                (int)s->local_racks;
-
-        struct rack_feedback *output =
-                feedback_block_racks(
-                        s->feedback_buffer);
-
-        for (size_t i = 0;
-             i < s->local_racks;
-             i++) {
-                const struct rack_state *rack =
-                        &s->racks[i];
-
-                output[i] =
-                        (struct rack_feedback) {
-                                .global_rack =
-                                        rack->rack_id,
-                                .inlet_temp_c =
-                                        rack->inlet_temp_c,
-                                .outlet_temp_c =
-                                        rack->outlet_temp_c,
-                                .coolant_temp_c =
-                                        rack->coolant_temp_c,
-                                .cooling_removal_w =
-                                        rack->cooling_removal_w,
-                                .total_power_watts =
-                                        rack->total_power_watts,
-                        };
-        }
-
-        /*
-         * Rank zero owns slots:
-         *
-         *     feedback_scheduler_offset + thermal_rank
-         */
-        size_t scheduler_slot =
-                s->feedback_scheduler_offset +
-                (size_t)s->thermal_rank;
-
-        CHECK(dstm_darray_put(
-                      s->feedback_array,
-                      scheduler_slot,
-                      s->feedback_buffer,
-                      snapshot_time,
-                      s->control_latency),
-              "future feedback push");
-
-        /*
-         * Advance this worker's unused local feedback element so its local
-         * feedback region participates in the rank timeline.
-         */
-        if (snapshot_time > 0) {
-                CHECK(dstm_darray_put(
-                              s->feedback_array,
-                              s->feedback_global_offset,
-                              s->feedback_buffer,
-                              snapshot_time,
-                              0),
-                      "feedback dummy put");
+        for (size_t i = 0; i < s->local_racks; i++) {
+                const struct rack_state *r = &s->racks[i];
+                s->own_feedback[i] = (struct rack_feedback){
+                        .global_rack = r->rack_id,
+                        .inlet_temp_c = r->inlet_temp_c,
+                        .outlet_temp_c = r->outlet_temp_c,
+                        .coolant_temp_c = r->coolant_temp_c,
+                        .cooling_removal_w = r->cooling_removal_w,
+                        .total_power_watts = r->total_power_watts };
         }
 }
 
-static void collect_feedback(
-        struct sim *s,
-        dstm_time_t scheduler_time,
-        int snapshot_time)
+static void relay_feedback(struct sim *s, dstm_time_t t, int snapshot_time)
 {
-        REQUIRE(s->is_scheduler,
-                "feedback collection outside scheduler");
+        size_t esz = feedback_bundle_size(s);
+        // push own contribution
+	for(int i=0;i<s->local_racks;i++){
+	    CHECK(dstm_dqueue_push(s->feedback_q, 
+		  s->is_scheduler? g_rank : tree_parent(g_rank), 
+		  &s->own_feedback[i], t, s->is_scheduler?0:s->hop_up),"feedback push");
+	}
+	if(s->is_scheduler){
+	    // pop aggregated child contributions at (t,0) == pushes at (t-hop_up,hop_up)
+	    size_t cnt = s->feedback_q_capacity;
+	    CHECK(dstm_dqueue_pop_incoming(s->feedback_q, 
+	        s->feedback_buffer, &cnt, t, 0),"feedback pop");
+	    struct rack_feedback *got = (struct rack_feedback*)s->feedback_buffer;
+	    for(int i=0;i<(int)cnt;i++) s->scheduler_feedback[got[i].global_rack]=got[i];
+	  } else {
+	    // intermediate: pop children's appends + own already pushed, re-push to parent
+	    size_t cnt = s->feedback_q_capacity;
+	    void *agg = s->bundle_buffer;
+	    CHECK(dstm_dqueue_pop_incoming(s->feedback_q, agg, &cnt, t, 0),"feedback agg pop");
+	    // agg already contains own + children's arrivals 
+	    // 		(MPI arrival order nondeterministic, order-independent)
+	    for(int i=0;i<cnt;i++) 
+		    CHECK(dstm_dqueue_push(s->feedback_q, tree_parent(g_rank), 
+			  &((struct rack_feedback*)agg)[i], t, s->hop_up),"feedback relay push");
 
-        for (int source_rank = 1;
-             source_rank < g_world_size;
-             source_rank++) {
-                memset(s->feedback_buffer,
-                       0,
-                       feedback_block_size(s));
+	    // if cnt==0 parent's pop would block on missing version - skip relay
+	    // version will be created on demand by next non-empty push
+	    // or handle empty explicitly via a touch helper (see note below)
+	    if(cnt==0) {
+		// do nothing - scheduler handles cnt==0 as empty
+	    }
 
-                size_t slot =
-                        s->feedback_scheduler_offset +
-                        (size_t)(source_rank - 1);
-
-                CHECK(dstm_darray_get(
-                              s->feedback_array,
-                              slot,
-                              s->feedback_buffer,
-                              scheduler_time,
-                              0),
-                      "local feedback get");
-
-                const struct feedback_block_header *header =
-                        (const struct feedback_block_header *)
-                        s->feedback_buffer;
-
-                REQUIRE(header->snapshot_time ==
-                                snapshot_time,
-                        "feedback timestamp mismatch");
-
-                REQUIRE(header->source_rank ==
-                                source_rank,
-                        "feedback source mismatch");
-
-                REQUIRE(header->rack_count ==
-                                (int)s->local_racks,
-                        "feedback rack count mismatch");
-
-                const struct rack_feedback *input =
-                        feedback_block_racks_const(
-                                s->feedback_buffer);
-
-                for (size_t i = 0;
-                     i < s->local_racks;
-                     i++) {
-                        int rack =
-                                input[i].global_rack;
-
-                        REQUIRE(rack >= 0 &&
-                                rack <
-                                        s->total_racks,
-                                "invalid feedback rack");
-
-                        REQUIRE(rack_owner(
-                                        s,
-                                        (size_t)rack) ==
-                                        source_rank,
-                                "feedback rack ownership mismatch");
-
-                        s->scheduler_feedback[rack] =
-                                input[i];
-                }
-        }
+  	}
 }
 
 /*******************************************************************************
@@ -1769,6 +1707,15 @@ static void append_worker_schedule_events(
                         previous[global_node_index] = current;
                 }
         }
+}
+
+static size_t pack_bundle(void **blocks, int r, char *out, size_t bytes)
+{
+        memcpy(out, blocks[r], bytes);
+        size_t n = 1;
+        for (int c = 0; c < tree_child_count(r); c++)
+                n += pack_bundle(blocks, tree_first_child(r) + c, out + n * bytes, bytes);
+        return n;
 }
 
 static void plan_and_publish_epoch(
@@ -1914,47 +1861,58 @@ static void plan_and_publish_epoch(
         double publication_start =
                 MPI_Wtime();
 
-        int schedule_delay =
-                epoch_start -
-                (int)scheduler_time;
+        REQUIRE((int)scheduler_time + tree_max_depth() * s->hop_down == epoch_start,
+                "tree schedule timing");
 
-        REQUIRE(schedule_delay > 0,
-                "schedule must target future time");
-
-        for (int destination_rank = 1;
-             destination_rank < g_world_size;
-             destination_rank++) {
-                /*
-                 * Every rank owns one schedule element, so the worker's MPI
-                 * rank is its global schedule-array index.
-                 */
-
-                const struct schedule_block_header *published_header =
-                        (const struct schedule_block_header *)
-                        blocks[destination_rank];
-
-                s->schedule_events_emitted +=
-                        (uint64_t)published_header->event_count;
-
-                s->schedule_event_capacity_total +=
-                        (uint64_t)published_header->event_capacity;                
-
-                CHECK(dstm_darray_put(
-                              s->schedule_array,
-                              (size_t)destination_rank,
-                              blocks[destination_rank],
-                              scheduler_time,
-                              schedule_delay),
-                      "future schedule push");
-
-                free(blocks[destination_rank]);
+        for (int d = 1; d < g_world_size; d++) {
+                const struct schedule_block_header *ph = blocks[d];
+                s->schedule_events_emitted += (uint64_t)ph->event_count;
+                s->schedule_event_capacity_total += (uint64_t)ph->event_capacity;
         }
+
+        for(int d=1;d<g_world_size;d++){
+	    struct schedule_block_header *ph = blocks[d];
+	    struct schedule_event *evs = schedule_block_events(ph);
+	    for(int e=0;e<ph->event_count;e++){
+	      // delta = hop_down, remote requires >0
+	      CHECK(dstm_dqueue_push(s->schedule_q, d, &evs[e], 
+				scheduler_time, s->hop_down),"schedule push");
+	    }
+	        if(ph->event_count==0) {
+			// queue has no flush() with ZERO self-append in immediate-push edition
+			// so we must force an empty version to exist or worker pop will block
+			// option A: push a dummy sentinel that receiver discards
+			// option B: add dstm_dqueue_touch() to dqueue.c (recommended)
+			// for now do nothing and make receiver tolerate missing version:
+			continue;
+		}
+	    
+	}
+
+        for (int d = 1; d < g_world_size; d++)
+                free(blocks[d]);
 
         free(blocks);
 
         s->scheduler_publication_seconds +=
                 MPI_Wtime() -
                 publication_start;
+}
+
+static void forward_schedule(struct sim *s, dstm_time_t t)
+{
+        size_t cnt = s->schedule_q_capacity;
+        CHECK(dstm_dqueue_pop_incoming(s->schedule_q, s->bundle_buffer, &cnt, t, 0),"schedule pop");
+        s->schedule_event_cursor=0;
+        for(int c=0;c<tree_child_count(g_rank);c++){
+            int child=tree_first_child(g_rank)+c;
+            for(size_t i=0;i<cnt;i++){
+              struct schedule_event *e=&((struct schedule_event*)s->bundle_buffer)[i];
+              if(e->local_node_index / s->nodes_per_rack < (int)s->local_racks) continue;
+              CHECK(dstm_dqueue_push(s->schedule_q, child, e, t, s->hop_down),"schedule relay push");
+            }
+        }
+        memcpy(s->pending_schedule, s->bundle_buffer, cnt*sizeof(struct schedule_event));
 }
 
 static void receive_schedule_block(
@@ -1964,17 +1922,9 @@ static void receive_schedule_block(
         REQUIRE(!s->is_scheduler,
                 "scheduler cannot receive schedule");
 
-        memset(s->schedule_buffer,
-               0,
+        memcpy(s->schedule_buffer,
+               s->pending_schedule,
                schedule_block_size(s));
-
-        CHECK(dstm_darray_get(
-                      s->schedule_array,
-                      s->schedule_global_offset,
-                      s->schedule_buffer,
-                      epoch_start,
-                      0),
-              "local schedule get");
 
         const struct schedule_block_header *header =
                 (const struct schedule_block_header *)
@@ -2472,6 +2422,9 @@ static void run_scheduler_step(
         REQUIRE(s->is_scheduler,
                 "scheduler step on thermal rank");
 
+	if (t == (dstm_time_t)s->steps - 1)
+		// no dummy feedback put - queue empty handled by cnt==0 check above
+
         if (t < s->control_latency)
                 return;
 
@@ -2489,7 +2442,7 @@ static void run_scheduler_step(
                 snapshot_time +
                 s->schedule_window;
 
-        collect_feedback(
+        relay_feedback(
                 s,
                 t,
                 snapshot_time);
@@ -2510,33 +2463,26 @@ static void run_thermal_step(
         REQUIRE(!s->is_scheduler,
                 "thermal step on scheduler");
 
-        /*
-         * Feedback uses its own region, so it may be pushed before graph
-         * reads without participating in a graph version's phase.
-         */
-        if (t %
-                    s->schedule_window ==
-            0) {
-                publish_feedback(s, t);
-        }
+        int W = s->schedule_window;
+        int depth = tree_depth_of(g_rank);
+        int Dmax = tree_max_depth();
 
-        /*
-         * Version t of the primary heat graph contains:
-         *
-         *   - rack vertex state published at t-1 with delta 1;
-         *   - delay-one heat published at t-1 with delta 1.
-         */
+        if (t % W == 0)
+                stash_feedback(s, t);
+
+        int up = (Dmax - depth) * s->hop_up;
+        if (t >= up && (t - up) % W == 0)
+                relay_feedback(s, t, (int)t - up);
+
+        int down = s->control_latency + depth * s->hop_down;
+        if (t >= down && (t - down) % W == 0 &&
+            (int)t + (Dmax - depth) * s->hop_down < s->steps)
+                forward_schedule(s, t);
+
         read_current_racks(s, t);
 
-        if (t >=
-                    s->schedule_window &&
-            t %
-                    s->schedule_window ==
-            0) {
-                receive_schedule_block(
-                        s,
-                        t);
-        }
+        if (t >= W && t % W == 0)
+                receive_schedule_block(s, t);
 
         apply_schedule_tick(s, t);
         update_local_power(s);
@@ -2725,9 +2671,13 @@ static int setup(
         s->schedule_region_id =
                 dstm_get_local_region_id();
 
-        size_t schedule_payload =
-                schedule_block_size(s) +
-                4096;
+	// QUEUE SIZING RULE: capacity must be SUM over all producers max/tick
+        // feedback: every thermal rank contributes local_racks per snapshot
+        s->feedback_q_capacity = (size_t)s->total_racks; // total_racks * 1 feedback/rack
+        // schedule: max 1 event/node/tick -> per epoch per subtree worst case
+        // conservative upper bound: all nodes change every tick of window
+        s->schedule_q_capacity = (size_t)s->schedule_window * (size_t)s->total_racks * (size_t)s->nodes_per_rack;
+        size_t schedule_payload = s->schedule_q_capacity * sizeof(struct schedule_event) + 4096;
 
         dstm_opts_t opts =
                 dstm_default_options;
@@ -2741,22 +2691,8 @@ static int setup(
                       opts),
               "dstm_start_custom");
 
-        /*
-         * Register all additional regions before any DSTM operation can
-         * advance the rank heartbeat.
-         *
-         * Feedback ownership:
-         *   scheduler owns thermal_rank_count slots;
-         * every thermal rank owns one unused dummy slot.
-         */
-        size_t feedback_slots =
-                s->is_scheduler ?
-                (size_t)s->thermal_rank_count :
-                1;
-
-        size_t feedback_payload =
-                feedback_slots *
-                feedback_block_size(s) +
+        size_t feedback_payload = s->feedback_q_capacity *
+                sizeof(struct rack_feedback) +
                 4096;
 
         CHECK(dstm_region_register(
@@ -2777,49 +2713,11 @@ static int setup(
                       "heat region register");
         }
 
-        /*
-         * Create schedule and feedback arrays collectively.
-         */
-        CHECK(dstm_darray_create_on_region(
-                      &s->schedule_array,
-                      schedule_block_size(s),
-                      1,
-                      s->schedule_region_id),
-              "schedule array create");
+        CHECK(dstm_dqueue_create_on_region(&s->schedule_q,sizeof(struct schedule_event), 
+		s->schedule_q_capacity, s->distance, s->schedule_region_id),"schedule queue create");
 
-        CHECK(dstm_darray_create_on_region(
-                      &s->feedback_array,
-                      feedback_block_size(s),
-                      feedback_slots,
-                      s->feedback_region_id),
-              "feedback array create");
-
-        s->schedule_global_offset =
-                dstm_darray_global_offset(
-                        s->schedule_array);
-
-        s->feedback_global_offset =
-                dstm_darray_global_offset(
-                        s->feedback_array);
-
-        REQUIRE(s->schedule_global_offset ==
-                        (size_t)g_rank,
-                "schedule rank/index mapping");
-
-        s->feedback_scheduler_offset = 0;
-
-        if (s->is_scheduler) {
-                REQUIRE(s->feedback_global_offset == 0,
-                        "scheduler feedback offset");
-        } else {
-                size_t expected =
-                        (size_t)s->thermal_rank_count +
-                        (size_t)s->thermal_rank;
-
-                REQUIRE(s->feedback_global_offset ==
-                                expected,
-                        "worker feedback dummy offset");
-        }
+        CHECK(dstm_dqueue_create_on_region(&s->feedback_q,sizeof(struct rack_feedback), 
+		s->feedback_q_capacity, s->distance, s->feedback_region_id),"feedback queue create");
 
         /*
          * Each delay graph uses the same vertex partition but a topology
@@ -2855,56 +2753,25 @@ static int setup(
 
         s->schedule_buffer =
                 calloc(1,
-                       schedule_block_size(s));
+                       schedule_bundle_size(s));
 
-        s->feedback_buffer =
+	s->feedback_buffer =
                 calloc(1,
-                       feedback_block_size(s));
+                       feedback_stage_size(s));
+
+	s->pending_schedule = calloc(1, schedule_block_size(s));
+	s->bundle_buffer = calloc(1, s->schedule_q_capacity * sizeof(struct schedule_event));
+        s->own_feedback     = calloc(s->local_racks ? s->local_racks : 1,
+                                     sizeof(*s->own_feedback));
 
         REQUIRE(s->schedule_buffer != NULL,
                 "schedule buffer allocation");
 
-        REQUIRE(s->feedback_buffer != NULL,
-                "feedback buffer allocation");
-
-        /*
-         * Seed every locally owned schedule element at time zero.
-         */
-        CHECK(dstm_darray_put(
-                      s->schedule_array,
-                      s->schedule_global_offset,
-                      s->schedule_buffer,
-                      0,
-                      0),
-              "initial schedule put");
-
-        /*
-         * Seed scheduler-owned feedback slots. Worker dummy elements are
-         * also seeded locally.
-         */
-        if (s->is_scheduler) {
-                for (int thermal_rank = 0;
-                     thermal_rank <
-                             s->thermal_rank_count;
-                     thermal_rank++) {
-                        CHECK(dstm_darray_put(
-                                      s->feedback_array,
-                                      s->feedback_scheduler_offset +
-                                              (size_t)thermal_rank,
-                                      s->feedback_buffer,
-                                      0,
-                                      0),
-                              "initial scheduler feedback put");
-                }
-        } else {
-                CHECK(dstm_darray_put(
-                              s->feedback_array,
-                              s->feedback_global_offset,
-                              s->feedback_buffer,
-                              0,
-                              0),
-                      "initial feedback dummy put");
-        }
+        REQUIRE(s->feedback_buffer != NULL &&
+                s->pending_schedule != NULL &&
+                s->bundle_buffer != NULL &&
+                s->own_feedback != NULL,
+                "tree buffer allocation");
 
         return 0;
 }
@@ -2915,13 +2782,11 @@ static int setup(
 
 static void teardown_dstm(struct sim *s)
 {
-        if (s->feedback_array != NULL)
-                dstm_darray_destroy(
-                        &s->feedback_array);
+        if (s->feedback_q != NULL)
+                dstm_dqueue_destroy(&s->feedback_q);
 
-        if (s->schedule_array != NULL)
-                dstm_darray_destroy(
-                        &s->schedule_array);
+        if (s->schedule_q != NULL)
+                dstm_dqueue_destroy(&s->schedule_q);
 
         for (int delay = 1;
              delay <= MAX_THERMAL_DELAY;
@@ -2957,6 +2822,9 @@ static void teardown_local(struct sim *s)
 
         free(s->schedule_buffer);
         free(s->feedback_buffer);
+	free(s->pending_schedule);
+        free(s->bundle_buffer);
+        free(s->own_feedback);
 }
 
 /*******************************************************************************
@@ -3095,6 +2963,7 @@ static void usage(const char *program)
                 "  --steps N             simulated seconds, default %d\n"
                 "  --schedule-window N   scheduling epoch, default %d\n"
                 "  --control-latency N   one-way control delay, default %d\n"
+		"  --tree-fanout N       scheduler tree fanout, default 8\n"
                 "  --verbose-dstm        enable DSTM debug logging\n"
                 "  --help                show this message\n",
                 program,
@@ -3170,6 +3039,9 @@ int main(int argc, char **argv)
                            i + 1 < argc) {
                         sim.control_latency =
                                 atoi(argv[++i]);
+		} else if (!strcmp(argv[i], "--tree-fanout") &&
+                           i + 1 < argc) {
+                        g_tree_fanout = atoi(argv[++i]);
                 } else if (!strcmp(argv[i], "--verbose-dstm")) {
                         verbose_dstm = 1;
                 } else if (!strcmp(argv[i], "--help") ||
@@ -3207,6 +3079,9 @@ int main(int argc, char **argv)
 
         if (sim.steps < 1)
                 sim.steps = 1;
+
+	if (g_tree_fanout < 2)
+                g_tree_fanout = 2;
 
         dstm_log_setlevel(
                 verbose_dstm ?

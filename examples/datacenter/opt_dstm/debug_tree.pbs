@@ -1,0 +1,71 @@
+#!/bin/bash -l
+#PBS -N opt-dstm-debug
+#PBS -A timeweave
+#PBS -q debug
+#PBS -l select=2:ncpus=64
+#PBS -l place=scatter
+#PBS -l walltime=00:20:00
+#PBS -l filesystems=home:eagle
+#PBS -j oe
+
+set -uo pipefail
+
+cd "${PBS_O_WORKDIR}"
+
+module purge
+module load PrgEnv-gnu
+module unload craype-accel-nvidia80 2>/dev/null || true
+module unload darshan 2>/dev/null || true
+export MPICH_GPU_SUPPORT_ENABLED=0
+
+# ---- configuration (override with: qsub -v WORKERS=32,FANOUTS="32 8" ...) ----
+WORKERS="${WORKERS:-16}"          # thermal ranks (MPI ranks = WORKERS + 1)
+FANOUTS="${FANOUTS:-16 4}"        # fanout >= WORKERS is the old star (depth 1)
+STEPS="${STEPS:-300}"
+NODES_PER_RACK="${NODES_PER_RACK:-32}"
+RACKS_PER_WORKER="${RACKS_PER_WORKER:-8}"
+JOBS_PER_WORKER="${JOBS_PER_WORKER:-512}"
+SCHEDULE_WINDOW="${SCHEDULE_WINDOW:-60}"
+CONTROL_LATENCY="${CONTROL_LATENCY:-30}"
+
+MPIRUN=/opt/cray/pals/1.8/bin/mpiexec
+EXE="${PBS_O_WORKDIR}/datacenter"
+GEN="${PBS_O_WORKDIR}/../jobs/gen.py"
+OUT="${PBS_O_WORKDIR}/debug_results"
+mkdir -p "${OUT}"
+
+[[ -x "${EXE}" ]] || { echo "Missing ${EXE}" >&2; exit 1; }
+
+RACKS=$((RACKS_PER_WORKER * WORKERS))
+JOBS=$((JOBS_PER_WORKER * WORKERS))
+TRACE="${OUT}/trace_w${WORKERS}.csv"
+
+python3 "${GEN}" --output "${TRACE}" --jobs "${JOBS}" \
+    --simulation-seconds "${STEPS}" --max-nodes 8 --seed 42 >/dev/null
+
+# Node 0 = scheduler (root), node 1 = all workers (max 32 ranks/node here).
+mapfile -t NODES < <(awk '!seen[$0]++' "${PBS_NODEFILE}")
+HOSTS="${NODES[0]},${NODES[1]}"
+PPN=$(( WORKERS < 32 ? WORKERS : 32 ))
+(( WORKERS <= 32 )) || { echo "debug script supports <= 32 workers (1 worker node)" >&2; exit 1; }
+
+COMMON=( --racks "${RACKS}" --nodes-per-rack "${NODES_PER_RACK}"
+         --steps "${STEPS}" --schedule-window "${SCHEDULE_WINDOW}"
+         --control-latency "${CONTROL_LATENCY}" --jobs "${TRACE}" )
+
+for FAN in ${FANOUTS}; do
+    LOG="${OUT}/w${WORKERS}_fan${FAN}.log"
+    echo "=== workers=${WORKERS} fanout=${FAN} ==="
+
+    "${MPIRUN}" --hosts "${HOSTS}" \
+        --envlist "PATH,LD_LIBRARY_PATH" --env "MPICH_GPU_SUPPORT_ENABLED=0" \
+        -n 1 --ppn 1 "${EXE}" "${COMMON[@]}" --tree-fanout "${FAN}" \
+        : \
+        -n "${WORKERS}" --ppn "${PPN}" "${EXE}" "${COMMON[@]}" --tree-fanout "${FAN}" \
+        >"${LOG}" 2>&1
+    echo "exit status: $?"
+
+    grep -E "simulation runtime|wall-clock runtime|scheduler planning|scheduler publication|jobs started|jobs completed|facility energy" "${LOG}" || tail -20 "${LOG}"
+done
+
+echo "Logs in ${OUT}"

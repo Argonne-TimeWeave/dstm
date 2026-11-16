@@ -20,8 +20,18 @@ set -uo pipefail
 # opt_dstm reserves one node exclusively for scheduler rank 0.
 
 MODE="${1:-both}"
-RANKS=(2 4 8 16 32 64 128 256)
+#RANKS=(2 4 8 16 32 64 128 256)
 #RANKS=(128)
+# Example: RANKS_OVERRIDE="32"
+read -r -a RANKS <<< "${RANKS_OVERRIDE:-2 4 8 16 32 64 128 256}"
+
+# Space-separated subset: "dstm sst opt_dstm opt_sst"
+SYSTEMS="${SYSTEMS:-dstm sst opt_dstm opt_sst}"
+
+enabled()
+{
+    [[ " ${SYSTEMS} " == *" $1 "* ]]
+}
 
 REPEATS="${REPEATS:-2}"
 STEPS="${STEPS:-1000}"
@@ -29,6 +39,7 @@ NODES_PER_RACK="${NODES_PER_RACK:-32}"
 
 SCHEDULE_WINDOW="${SCHEDULE_WINDOW:-60}"
 CONTROL_LATENCY="${CONTROL_LATENCY:-30}"
+TREE_FANOUT="${TREE_FANOUT:-8}"   # K=8 gives depth 1-3 for 2..256 ranks; all divide 30
 
 STRONG_RACKS="${STRONG_RACKS:-512}"
 STRONG_JOBS="${STRONG_JOBS:-32768}"
@@ -36,11 +47,12 @@ STRONG_JOBS="${STRONG_JOBS:-32768}"
 WEAK_RACKS_PER_RANK="${WEAK_RACKS_PER_RANK:-8}"
 WEAK_JOBS_PER_RANK="${WEAK_JOBS_PER_RANK:-512}"
 
-MPIRUN="${MPIRUN:-mpirun}"
-MPIRUN_ARGS="${MPIRUN_ARGS:-}"
+export MPICH_GPU_SUPPORT_ENABLED="${MPICH_GPU_SUPPORT_ENABLED:-0}"
 
-MPI_PREFIX="${MPI_PREFIX:-}"
-MPI_ENV_VARS="${MPI_ENV_VARS:-LD_LIBRARY_PATH PATH}"
+MPIRUN="${MPIRUN:-/opt/cray/pals/1.8/bin/mpiexec}"
+MPIRUN_ARGS="${MPIRUN_ARGS:-}"
+MPI_FLAVOR="${MPI_FLAVOR:-pals}"
+
 MAX_PPN="${MAX_PPN:-32}"
 
 # Maximum nodes used by simulation/thermal ranks. opt_dstm may use one
@@ -107,19 +119,7 @@ AVAIL_WORKER_NODES="${ALLOCATED_NODES}"
 (( AVAIL_WORKER_NODES > MAX_WORKER_NODES )) &&
     AVAIL_WORKER_NODES="${MAX_WORKER_NODES}"
 
-# Open MPI needs its installation prefix on remote nodes so it can locate
-# its helper executables, including orted/prted.
-if [[ -z "${MPI_PREFIX}" ]]; then
-    _mp="$(command -v "${MPIRUN}" 2>/dev/null)"
-    if [[ -n "${_mp}" ]]; then
-        MPI_PREFIX="$(dirname "$(dirname "${_mp}")")"
-    fi
-fi
-
-MPI_X_FLAGS=()
-for _v in ${MPI_ENV_VARS}; do
-    MPI_X_FLAGS+=(-x "${_v}")
-done
+# PALS obtains its launch environment from global --env/--envlist options.
 
 # Select the number of nodes and ranks per node for a rank count.
 #
@@ -159,116 +159,95 @@ MPI_LAUNCH=()
 make_mpi_launch()
 {
     local ranks="$1"
-    local nodes="" ppn=""
+    local model_options="${2:-}"
+    local nodes ppn
     local mpi_args=()
 
-    read -r nodes ppn < <(place_for "${ranks}" "${AVAIL_WORKER_NODES}" "${MAX_WORKER_NODES}")
+    read -r nodes ppn < <(
+        place_for "${ranks}" \
+            "${AVAIL_WORKER_NODES}" \
+            "${MAX_WORKER_NODES}"
+    )
 
-    if [[ -z "${nodes}" ]]; then
-        echo "Rank count ${ranks} cannot fit on ${AVAIL_WORKER_NODES} worker nodes at ${MAX_PPN} ranks/node" >&2
-        exit 1
-    fi
+    [[ -n "${nodes}" ]] || return 1
 
-    # Preserve the existing MPIRUN_ARGS environment variable.
+    # MPIRUN_ARGS must contain PALS global options only.
     # shellcheck disable=SC2206
     mpi_args=( ${MPIRUN_ARGS} )
 
-    MPI_LAUNCH=("${MPIRUN}" "${mpi_args[@]}" -n "${ranks}")
+    MPI_LAUNCH=(
+        "${MPIRUN}"
+        "${mpi_args[@]}"
+        --hostfile "${ALLOC_NODEFILE}"
+        --envlist "PATH,LD_LIBRARY_PATH"
+        --env "MPICH_GPU_SUPPORT_ENABLED=0"
+    )
 
-    if [[ "${ALLOC_SRC}" != "localhost" ]]; then
-        MPI_LAUNCH+=(--hostfile "${ALLOC_NODEFILE}")
-
-        if [[ -n "${MPI_PREFIX}" ]]; then
-            MPI_LAUNCH+=(--prefix "${MPI_PREFIX}")
-        fi
-
-        if (( ranks > 1 && ranks % nodes == 0 )); then
-            MPI_LAUNCH+=(--map-by "ppr:${ppn}:node")
-        fi
-
-        MPI_LAUNCH+=("${MPI_X_FLAGS[@]}")
+    if [[ -n "${model_options}" ]]; then
+        MPI_LAUNCH+=(
+            --env "SST_MODEL_OPTIONS=${model_options}"
+        )
     fi
+
+    MPI_LAUNCH+=(
+        -n "${ranks}"
+        --ppn "${ppn}"
+    )
 }
 
 OPT_MPI_LAUNCH=()
-OPT_RANKFILE=""
+OPT_MPI_SCHED=()
+OPT_MPI_WORKER=()
 
 make_opt_mpi_launch()
 {
     local worker_ranks="$1"
     local worker_nodes ppn capacity
-    local total_ranks
     local mpi_args=()
-    local worker worker_node_index worker_slot mpi_rank
+    local hosts
+    local i
 
     if (( ALLOCATED_NODES < 2 )); then
-        echo "opt_dstm requires at least two allocated nodes: one scheduler node and one or more worker nodes" >&2
+        echo "Optimized runs require at least two allocated nodes" >&2
         return 1
     fi
 
     worker_nodes="${worker_ranks}"
-
     (( worker_nodes > MAX_WORKER_NODES )) &&
         worker_nodes="${MAX_WORKER_NODES}"
-
-    # NODELIST[0] is reserved exclusively for scheduler rank 0.
     (( worker_nodes > ALLOCATED_NODES - 1 )) &&
         worker_nodes=$((ALLOCATED_NODES - 1))
-
     (( worker_nodes < 1 )) && worker_nodes=1
 
     ppn=$(( (worker_ranks + worker_nodes - 1) / worker_nodes ))
-    capacity=$(( worker_nodes * MAX_PPN ))
+    capacity=$((worker_nodes * MAX_PPN))
 
     if (( worker_ranks > capacity || ppn > MAX_PPN )); then
-        echo "opt_dstm cannot fit ${worker_ranks} thermal ranks on ${worker_nodes} worker nodes at ${MAX_PPN} ranks/node" >&2
+        echo "Cannot fit ${worker_ranks} workers on ${worker_nodes} nodes at ${MAX_PPN} ranks/node" >&2
         return 1
     fi
 
-    total_ranks=$((worker_ranks + 1))
-
-    OPT_RANKFILE="${RESULT_DIR}/opt_r${worker_ranks}.rankfile"
-    : > "${OPT_RANKFILE}"
-
-    # Scheduler rank 0 is alone on the first allocated node.
-    printf 'rank 0=%s slot=0\n' \
-        "${NODELIST[0]}" \
-        >> "${OPT_RANKFILE}"
-
-    # Spread thermal ranks across nodes 1..worker_nodes. No thermal rank is
-    # placed on the scheduler node.
-    for ((worker = 0; worker < worker_ranks; worker++)); do
-        mpi_rank=$((worker + 1))
-        worker_node_index=$((1 + worker % worker_nodes))
-        worker_slot=$((worker / worker_nodes))
-
-        printf 'rank %d=%s slot=%d\n' \
-            "${mpi_rank}" \
-            "${NODELIST[worker_node_index]}" \
-            "${worker_slot}" \
-            >> "${OPT_RANKFILE}"
+    hosts="${NODELIST[0]}"
+    for ((i = 1; i <= worker_nodes; i++)); do
+        hosts+=",${NODELIST[i]}"
     done
 
-    # Preserve the existing MPIRUN_ARGS environment variable.
+    # MPIRUN_ARGS must contain PALS global options only.
     # shellcheck disable=SC2206
     mpi_args=( ${MPIRUN_ARGS} )
 
     OPT_MPI_LAUNCH=(
         "${MPIRUN}"
         "${mpi_args[@]}"
-        -n "${total_ranks}"
-        --rankfile "${OPT_RANKFILE}"
+        --hosts "${hosts}"
+        --envlist "PATH,LD_LIBRARY_PATH"
+        --env "MPICH_GPU_SUPPORT_ENABLED=0"
     )
 
-    if [[ "${ALLOC_SRC}" != "localhost" ]]; then
-        OPT_MPI_LAUNCH+=(--hostfile "${ALLOC_NODEFILE}")
-
-        if [[ -n "${MPI_PREFIX}" ]]; then
-            OPT_MPI_LAUNCH+=(--prefix "${MPI_PREFIX}")
-        fi
-
-        OPT_MPI_LAUNCH+=("${MPI_X_FLAGS[@]}")
-    fi
+    # PALS MPMD command groups. The first group consumes NODELIST[0];
+    # the worker group continues on NODELIST[1] and later nodes.
+    OPT_MPI_SCHED=(-n 1 --ppn 1)
+    OPT_MPI_WORKER=(-n "${worker_ranks}" --ppn "${ppn}")
 }
 
 mkdir -p "${TRACE_DIR}" "${LOG_DIR}"
@@ -323,286 +302,101 @@ generate_trace()
         >/dev/null
 }
 
-run_dstm()
+# Epoch-based DSTM: 1 scheduler rank + N thermal ranks (MPMD).
+# usage: run_epoch_dstm SYSTEM EXE MODE RANKS RACKS JOBS TRACE REPEAT [extra args...]
+run_epoch_dstm()
 {
-    local scaling_mode="$1"
-    local ranks="$2"
-    local racks="$3"
-    local jobs="$4"
-    local trace="$5"
-    local repeat="$6"
-    local log="${LOG_DIR}/${scaling_mode}_dstm_r${ranks}_run${repeat}.log"
-
-    local elapsed="nan"
-    local status
-
-    make_mpi_launch "${ranks}"
-
-    if "${MPI_LAUNCH[@]}" \
-        "${DSTM_EXE}" \
-        --racks "${racks}" \
-        --nodes-per-rack "${NODES_PER_RACK}" \
-        --steps "${STEPS}" \
-        --jobs "${trace}" >"${log}" 2>&1; then
-
-        if elapsed="$(
-            awk '
-                /^simulation runtime[[:space:]]*:/ {
-                    value = $(NF - 1)
-                    found = 1
-                }
-                END {
-                    if (!found)
-                        exit 1
-                    printf "%.9f\n", value
-                }
-            ' "${log}"
-        )"; then
-            status="ok"
-        else
-            status="missing_timing"
-        fi
-    else
-        status="failed"
-    fi
-
-    printf '%s,%s,%d,%d,%d,%d,%d,%d,%s,%s\n' \
-        "${scaling_mode}" "dstm" \
-        "${ranks}" "${ranks}" \
-        "${racks}" "${jobs}" "${STEPS}" "${repeat}" \
-        "${elapsed}" "${status}" \
-        >> "${RESULT_CSV}"
-
-    echo "${scaling_mode}, dstm, ranks=${ranks}, run=${repeat}: ${elapsed}s (${status})"
-
-    [[ "${status}" == "ok" ]]
-}
-
-run_opt_dstm()
-{
-    local scaling_mode="$1"
-    local worker_ranks="$2"
-    local racks="$3"
-    local jobs="$4"
-    local trace="$5"
-    local repeat="$6"
+    local system="$1" exe="$2" scaling_mode="$3" worker_ranks="$4"
+    local racks="$5" jobs="$6" trace="$7" repeat="$8"
+    shift 8
+    local extra=("$@")
 
     local mpi_ranks=$((worker_ranks + 1))
-    local log="${LOG_DIR}/${scaling_mode}_opt_dstm_r${worker_ranks}_run${repeat}.log"
-
+    local log="${LOG_DIR}/${scaling_mode}_${system}_r${worker_ranks}_run${repeat}.log"
     local elapsed="nan"
     local status
+    local args=( --racks "${racks}" --nodes-per-rack "${NODES_PER_RACK}"
+                 --steps "${STEPS}" --schedule-window "${SCHEDULE_WINDOW}"
+                 --control-latency "${CONTROL_LATENCY}" --jobs "${trace}"
+                 "${extra[@]}" )
 
     if ! make_opt_mpi_launch "${worker_ranks}"; then
         status="placement_failed"
-
-        printf '%s,%s,%d,%d,%d,%d,%d,%d,%s,%s\n' \
-            "${scaling_mode}" "opt_dstm" \
-            "${worker_ranks}" "${mpi_ranks}" \
-            "${racks}" "${jobs}" "${STEPS}" "${repeat}" \
-            "${elapsed}" "${status}" \
-            >> "${RESULT_CSV}"
-
-        echo "${scaling_mode}, opt_dstm, thermal_ranks=${worker_ranks}, mpi_ranks=${mpi_ranks}, run=${repeat}: ${elapsed}s (${status})"
-        return 1
-    fi
-
-    if "${OPT_MPI_LAUNCH[@]}" \
-        "${OPT_DSTM_EXE}" \
-        --racks "${racks}" \
-        --nodes-per-rack "${NODES_PER_RACK}" \
-        --steps "${STEPS}" \
-        --schedule-window "${SCHEDULE_WINDOW}" \
-        --control-latency "${CONTROL_LATENCY}" \
-        --jobs "${trace}" >"${log}" 2>&1; then
-
+    elif "${OPT_MPI_LAUNCH[@]}" "${OPT_MPI_SCHED[@]}" "${exe}" "${args[@]}" \
+         : "${OPT_MPI_WORKER[@]}" "${exe}" "${args[@]}" >"${log}" 2>&1; then
         if elapsed="$(
             awk '
                 /^(simulation runtime|wall-clock runtime)[[:space:]]*:/ {
-                    value = $(NF - 1)
-                    found = 1
-                }
-                END {
-                    if (!found)
-                        exit 1
-                    printf "%.9f\n", value
-                }
+                    value = $(NF - 1); found = 1 }
+                END { if (!found) exit 1; printf "%.9f\n", value }
             ' "${log}"
-        )"; then
-            status="ok"
-        else
-            status="missing_timing"
-        fi
+        )"; then status="ok"; else status="missing_timing"; fi
     else
         status="failed"
     fi
 
     printf '%s,%s,%d,%d,%d,%d,%d,%d,%s,%s\n' \
-        "${scaling_mode}" "opt_dstm" \
-        "${worker_ranks}" "${mpi_ranks}" \
-        "${racks}" "${jobs}" "${STEPS}" "${repeat}" \
-        "${elapsed}" "${status}" \
+        "${scaling_mode}" "${system}" "${worker_ranks}" "${mpi_ranks}" \
+        "${racks}" "${jobs}" "${STEPS}" "${repeat}" "${elapsed}" "${status}" \
         >> "${RESULT_CSV}"
 
-    echo "${scaling_mode}, opt_dstm, thermal_ranks=${worker_ranks}, mpi_ranks=${mpi_ranks}, run=${repeat}: ${elapsed}s (${status})"
-
+    echo "${scaling_mode}, ${system}, thermal_ranks=${worker_ranks}, mpi_ranks=${mpi_ranks}, run=${repeat}: ${elapsed}s (${status})"
     [[ "${status}" == "ok" ]]
 }
 
-run_sst()
+run_dstm()     { run_epoch_dstm dstm     "${DSTM_EXE}"     "$@"; }
+run_opt_dstm() { run_epoch_dstm opt_dstm "${OPT_DSTM_EXE}" "$@" --tree-fanout "${TREE_FANOUT}"; }
+
+# Epoch-based SST: 1 scheduler rank + N domains.
+# usage: run_epoch_sst SYSTEM DIR MODE RANKS RACKS JOBS TRACE REPEAT
+run_epoch_sst()
 {
-    local scaling_mode="$1"
-    local ranks="$2"
-    local racks="$3"
-    local jobs="$4"
-    local trace="$5"
-    local repeat="$6"
-    local log="${LOG_DIR}/${scaling_mode}_sst_r${ranks}_run${repeat}.log"
-
-    local options
-    options="--racks ${racks} --domains ${ranks} --sst-ranks ${ranks}"
-    options+=" --nodes-per-rack ${NODES_PER_RACK}"
-    options+=" --steps ${STEPS} --jobs ${trace}"
-
-    local elapsed="nan"
-    local status
-
-    make_mpi_launch "${ranks}"
-
-    if (
-        cd "${SST_DIR}" &&
-        export SST_MODEL_OPTIONS="${options}" &&
-            "${MPI_LAUNCH[@]}" -x SST_MODEL_OPTIONS sst run.py
-    ) >"${log}" 2>&1; then
-        
-        if elapsed="$(
-            awk '
-                {
-                    for (i = 1; i <= NF; i++) {
-                        if ($i ~ /^simulation_runtime_seconds=/) {
-                            split($i, value, "=")
-                            time = value[2] + 0.0
-
-                            if (!found || time > maximum)
-                                maximum = time
-
-                            found = 1
-                        }
-                    }
-                }
-                END {
-                    if (!found)
-                        exit 1
-                    printf "%.9f\n", maximum
-                }
-            ' "${log}"
-        )"; then
-            status="ok"
-        else
-            status="missing_timing"
-        fi
-    else
-        status="failed"
-    fi
-
-    printf '%s,%s,%d,%d,%d,%d,%d,%d,%s,%s\n' \
-        "${scaling_mode}" "sst" \
-        "${ranks}" "${ranks}" \
-        "${racks}" "${jobs}" "${STEPS}" "${repeat}" \
-        "${elapsed}" "${status}" \
-        >> "${RESULT_CSV}"
-
-    echo "${scaling_mode}, sst, ranks=${ranks}, run=${repeat}: ${elapsed}s (${status})"
-
-    [[ "${status}" == "ok" ]]
-}
-
-run_opt_sst()
-{
-    local scaling_mode="$1"
-    local worker_ranks="$2"
-    local racks="$3"
-    local jobs="$4"
-    local trace="$5"
-    local repeat="$6"
+    local system="$1" dir="$2" scaling_mode="$3" worker_ranks="$4"
+    local racks="$5" jobs="$6" trace="$7" repeat="$8"
 
     local mpi_ranks=$((worker_ranks + 1))
-    local log="${LOG_DIR}/${scaling_mode}_opt_sst_r${worker_ranks}_run${repeat}.log"
-
-    local options
-    options="--racks ${racks}"
-    options+=" --domains ${worker_ranks}"
-    options+=" --sst-ranks ${mpi_ranks}"
-    options+=" --nodes-per-rack ${NODES_PER_RACK}"
-    options+=" --steps ${STEPS}"
-    options+=" --schedule-window ${SCHEDULE_WINDOW}"
-    options+=" --control-latency ${CONTROL_LATENCY}"
-    options+=" --jobs ${trace}"
-
+    local log="${LOG_DIR}/${scaling_mode}_${system}_r${worker_ranks}_run${repeat}.log"
     local elapsed="nan"
     local status
+
+    local options="--racks ${racks} --domains ${worker_ranks} --sst-ranks ${mpi_ranks}"
+    options+=" --nodes-per-rack ${NODES_PER_RACK} --steps ${STEPS}"
+    options+=" --schedule-window ${SCHEDULE_WINDOW} --control-latency ${CONTROL_LATENCY}"
+    options+=" --jobs ${trace}"
 
     if ! make_opt_mpi_launch "${worker_ranks}"; then
         status="placement_failed"
-
-        printf '%s,%s,%d,%d,%d,%d,%d,%d,%s,%s\n' \
-            "${scaling_mode}" "opt_sst" \
-            "${worker_ranks}" "${mpi_ranks}" \
-            "${racks}" "${jobs}" "${STEPS}" "${repeat}" \
-            "${elapsed}" "${status}" \
-            >> "${RESULT_CSV}"
-
-        echo "${scaling_mode}, opt_sst, thermal_ranks=${worker_ranks}, mpi_ranks=${mpi_ranks}, run=${repeat}: ${elapsed}s (${status})"
-        return 1
-    fi
-
-    if (
-        cd "${OPT_SST_DIR}" &&
-        SST_MODEL_OPTIONS="${options}" && 
-            "${OPT_MPI_LAUNCH[@]}" -x SST_MODEL_OPTIONS sst run.py
+    elif (
+        cd "${dir}" &&
+        "${OPT_MPI_LAUNCH[@]}" --env "SST_MODEL_OPTIONS=${options}" \
+            "${OPT_MPI_SCHED[@]}" sst run.py \
+            : "${OPT_MPI_WORKER[@]}" sst run.py
     ) >"${log}" 2>&1; then
-
         if elapsed="$(
             awk '
-                {
-                    for (i = 1; i <= NF; i++) {
-                        if ($i ~ /^simulation_runtime_seconds=/) {
-                            split($i, value, "=")
-                            time = value[2] + 0.0
-
-                            if (!found || time > maximum)
-                                maximum = time
-
-                            found = 1
-                        }
-                    }
-                }
-                END {
-                    if (!found)
-                        exit 1
-                    printf "%.9f\n", maximum
-                }
+                { for (i = 1; i <= NF; i++)
+                    if ($i ~ /^simulation_runtime_seconds=/) {
+                        split($i, v, "="); t = v[2] + 0.0
+                        if (!found || t > m) m = t
+                        found = 1 } }
+                END { if (!found) exit 1; printf "%.9f\n", m }
             ' "${log}"
-        )"; then
-            status="ok"
-        else
-            status="missing_timing"
-        fi
+        )"; then status="ok"; else status="missing_timing"; fi
     else
         status="failed"
     fi
 
     printf '%s,%s,%d,%d,%d,%d,%d,%d,%s,%s\n' \
-        "${scaling_mode}" "opt_sst" \
-        "${worker_ranks}" "${mpi_ranks}" \
-        "${racks}" "${jobs}" "${STEPS}" "${repeat}" \
-        "${elapsed}" "${status}" \
+        "${scaling_mode}" "${system}" "${worker_ranks}" "${mpi_ranks}" \
+        "${racks}" "${jobs}" "${STEPS}" "${repeat}" "${elapsed}" "${status}" \
         >> "${RESULT_CSV}"
 
-    echo "${scaling_mode}, opt_sst, thermal_ranks=${worker_ranks}, mpi_ranks=${mpi_ranks}, run=${repeat}: ${elapsed}s (${status})"
-
+    echo "${scaling_mode}, ${system}, thermal_ranks=${worker_ranks}, mpi_ranks=${mpi_ranks}, run=${repeat}: ${elapsed}s (${status})"
     [[ "${status}" == "ok" ]]
 }
+
+run_sst()     { run_epoch_sst sst     "${SST_DIR}"     "$@"; }
+run_opt_sst() { run_epoch_sst opt_sst "${OPT_SST_DIR}" "$@"; }
 
 run_case()
 {
@@ -628,19 +422,19 @@ run_case()
     generate_trace "${trace}" "${jobs}"
 
     for ((repeat = 1; repeat <= REPEATS; repeat++)); do
-        run_dstm \
+        enabled dstm && run_dstm \
             "${scaling_mode}" "${ranks}" "${racks}" \
             "${jobs}" "${trace}" "${repeat}" || true
 
-        run_opt_dstm \
+        enabled opt_dstm && run_opt_dstm \
             "${scaling_mode}" "${ranks}" "${racks}" \
             "${jobs}" "${trace}" "${repeat}" || true
 
-        run_sst \
+        enabled sst && run_sst \
             "${scaling_mode}" "${ranks}" "${racks}" \
             "${jobs}" "${trace}" "${repeat}" || true
 
-        run_opt_sst \
+        enabled opt_sst && run_opt_sst \
             "${scaling_mode}" "${ranks}" "${racks}" \
             "${jobs}" "${trace}" "${repeat}" || true
     done

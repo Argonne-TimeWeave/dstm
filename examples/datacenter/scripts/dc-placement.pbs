@@ -1,0 +1,30 @@
+#!/bin/bash -l
+#PBS -N dc-placement
+#PBS -A timeweave
+#PBS -q prod
+#PBS -l select=10:ncpus=64
+#PBS -l place=scatter
+#PBS -l walltime=01:00:00
+#PBS -l filesystems=home:eagle
+#PBS -j oe
+
+set -euo pipefail
+
+cd "${PBS_O_WORKDIR}"
+
+module purge
+module load PrgEnv-gnu
+module unload craype-accel-nvidia80 2>/dev/null || true
+module unload darshan 2>/dev/null || true
+
+export PATH="${HOME}/sst/bin:${PATH}"
+export LD_LIBRARY_PATH="${HOME}/sst/lib:${LD_LIBRARY_PATH:-}"
+export MPICH_GPU_SUPPORT_ENABLED=0
+export MPIRUN=/opt/cray/pals/1.8/bin/mpiexec
+
+export RANKS_OVERRIDE=32
+export SYSTEMS="opt_dstm opt_sst"
+export REPEATS=5
+export STEPS=10000
+
+./placement_sweep.sh

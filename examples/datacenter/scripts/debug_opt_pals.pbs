@@ -1,0 +1,91 @@
+#!/bin/bash -l
+#PBS -N dstm-opt-pals
+#PBS -A timeweave
+#PBS -q debug
+#PBS -l select=2:ncpus=64
+#PBS -l place=scatter
+#PBS -l walltime=00:10:00
+#PBS -l filesystems=home:eagle
+#PBS -j oe
+
+set -euo pipefail
+
+cd "${PBS_O_WORKDIR}"
+
+module purge
+module load PrgEnv-gnu
+module unload craype-accel-nvidia80 2>/dev/null || true
+module unload darshan 2>/dev/null || true
+
+export PATH="${HOME}/sst/bin:${PATH}"
+export LD_LIBRARY_PATH="${HOME}/sst/lib:${LD_LIBRARY_PATH:-}"
+export MPICH_GPU_SUPPORT_ENABLED=0
+
+MPI=/opt/cray/pals/1.8/bin/mpiexec
+ROOT="$(cd "${PBS_O_WORKDIR}/.." && pwd)"
+TRACE="${PBS_O_WORKDIR}/pals-debug-trace.csv"
+
+# Build and register the optimized SST element.
+(
+    cd "${ROOT}/opt_sst"
+
+    CC \
+        $(sst-config --ELEMENT_CXXFLAGS) \
+        -O2 -std=c++17 -fPIC -shared \
+        -o libopt_dcbench.so \
+        datacenter.cc \
+        $(sst-config --ELEMENT_LDFLAGS)
+
+    sst-register \
+        opt_dcbench \
+        "opt_dcbench_LIBDIR=${ROOT}/opt_sst"
+)
+
+sst-info opt_dcbench
+
+mapfile -t NODES < <(sort -u "${PBS_NODEFILE}")
+HOSTS="${NODES[0]},${NODES[1]}"
+
+python3 "${ROOT}/jobs/gen.py" \
+    --output "${TRACE}" \
+    --jobs 16 \
+    --simulation-seconds 10 \
+    --max-nodes 8 \
+    --seed 42
+
+COMMON_MPI=(
+    "${MPI}"
+    --hosts "${HOSTS}"
+    --envlist "PATH,LD_LIBRARY_PATH"
+    --env "MPICH_GPU_SUPPORT_ENABLED=0"
+)
+
+APP_ARGS=(
+    --racks 4
+    --nodes-per-rack 32
+    --steps 10
+    --schedule-window 60
+    --control-latency 30
+    --jobs "${TRACE}"
+)
+
+echo "Testing opt_dstm"
+"${COMMON_MPI[@]}" \
+    -n 1 --ppn 1 "${ROOT}/opt_dstm/datacenter" "${APP_ARGS[@]}" \
+    : \
+    -n 2 --ppn 2 "${ROOT}/opt_dstm/datacenter" "${APP_ARGS[@]}"
+
+SST_MODEL_OPTIONS="--racks 4 --domains 2 --sst-ranks 3"
+SST_MODEL_OPTIONS+=" --nodes-per-rack 32 --steps 10"
+SST_MODEL_OPTIONS+=" --schedule-window 60 --control-latency 30"
+SST_MODEL_OPTIONS+=" --jobs ${TRACE}"
+
+echo "Testing opt_sst"
+(
+    cd "${ROOT}/opt_sst"
+    "${COMMON_MPI[@]}" \
+        --env "SST_MODEL_OPTIONS=${SST_MODEL_OPTIONS}" \
+        -n 1 --ppn 1 sst run.py \
+        : \
+        -n 2 --ppn 2 sst run.py
+)
