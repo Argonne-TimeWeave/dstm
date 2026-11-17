@@ -258,6 +258,33 @@ struct feedback_block_header {
         int rack_count;
 };
 
+/*
+ * Queue elements. A dqueue element has one fixed size, but a push ships
+ * exactly one element, so only chunks that carry data (plus one small
+ * marker per child per epoch) cross the network. Chunks identify
+ * themselves, so MPI arrival order does not matter.
+ */
+#define SCHED_CHUNK_EVENTS 128
+#define FB_CHUNK_RACKS     64
+
+enum { CHUNK_MARKER = 0, CHUNK_EVENTS = 1 };
+
+struct schedule_chunk {
+        int kind;               /* CHUNK_MARKER or CHUNK_EVENTS */
+        int destination_rank;   /* final owner of these events */
+        int event_count;
+        int pad;
+        struct schedule_event events[SCHED_CHUNK_EVENTS];
+};
+
+struct feedback_chunk {
+        int snapshot_time;
+        int source_rank;        /* last relay, informational */
+        int rack_count;
+        int pad;
+        struct rack_feedback racks[FB_CHUNK_RACKS];
+};
+
 /*******************************************************************************
  * Simulation context
  ******************************************************************************/
@@ -323,11 +350,13 @@ struct sim {
         size_t schedule_q_capacity;
         size_t feedback_q_capacity;
 
-        void *schedule_buffer;
-        void *feedback_buffer;
-	void *pending_schedule;    /* own block received early, installed at epoch start */
-        void *bundle_buffer;       /* received schedule bundle */
+        void *schedule_buffer;     /* installed block (header + events) */
+        void *feedback_buffer;     /* pop buffer: feedback_q_capacity chunks */
+        void *pending_schedule;    /* own block received early, installed at epoch start */
+        void *bundle_buffer;       /* pop buffer: schedule_q_capacity chunks */
         struct rack_feedback *own_feedback; /* snapshot taken at B, forwarded later */
+        struct rack_feedback *feedback_agg; /* own + descendants' racks */
+        size_t feedback_agg_capacity;       /* in racks */
         int hop_up, hop_down;
 
         /*
@@ -476,20 +505,37 @@ static size_t schedule_block_size(const struct sim *s)
                sizeof(struct schedule_event);
 }
 
-static size_t schedule_bundle_size(const struct sim *s)
-{ return (size_t)tree_subtree_size(1) * schedule_block_size(s); }
-
-static size_t feedback_bundle_size(const struct sim *s)
+/* Climb from dest until the parent is r: the child of r on the way to dest. */
+static int tree_child_toward(int r, int dest)
 {
-        return sizeof(struct feedback_block_header) +
-               (size_t)tree_subtree_size(1) * s->local_racks *
-               sizeof(struct rack_feedback);
+        while (tree_parent(dest) != r)
+                dest = tree_parent(dest);
+        return dest;
 }
 
-static size_t feedback_stage_size(const struct sim *s)
+/*
+ * Queue slot capacities, in chunks. Capacity only sizes this rank's local
+ * slot (and the pop copy); wire bytes are the chunks actually pushed.
+ * Schedule inbox: worst case every destination in the subtree emits a full
+ * block, plus one marker. Feedback inbox: all racks below this rank, plus
+ * one partly filled chunk per child.
+ */
+static size_t schedule_q_capacity_for(const struct sim *s, int rank)
 {
-        return sizeof(struct feedback_block_header) +
-               (size_t)s->total_racks * sizeof(struct rack_feedback);
+        if (rank == 0)
+                return 1;       /* root only seeds its own clock at the end */
+        size_t per_dest = (s->schedule_event_capacity +
+                           SCHED_CHUNK_EVENTS - 1) / SCHED_CHUNK_EVENTS;
+        return (size_t)tree_subtree_size(rank) * per_dest + 1;
+}
+
+static size_t feedback_q_capacity_for(const struct sim *s, int rank)
+{
+        int kids = tree_child_count(rank);
+        if (kids == 0)
+                return 1;       /* never popped */
+        size_t below = (size_t)(tree_subtree_size(rank) - 1) * s->local_racks;
+        return (below + FB_CHUNK_RACKS - 1) / FB_CHUNK_RACKS + (size_t)kids;
 }
 
 static size_t feedback_block_size(const struct sim *s)
@@ -1605,39 +1651,63 @@ static void stash_feedback(struct sim *s, dstm_time_t t)
 
 static void relay_feedback(struct sim *s, dstm_time_t t, int snapshot_time)
 {
-        size_t esz = feedback_bundle_size(s);
-        // push own contribution
-	for(int i=0;i<s->local_racks;i++){
-	    CHECK(dstm_dqueue_push(s->feedback_q, 
-		  s->is_scheduler? g_rank : tree_parent(g_rank), 
-		  &s->own_feedback[i], t, s->is_scheduler?0:s->hop_up),"feedback push");
-	}
-	if(s->is_scheduler){
-	    // pop aggregated child contributions at (t,0) == pushes at (t-hop_up,hop_up)
-	    size_t cnt = s->feedback_q_capacity;
-	    CHECK(dstm_dqueue_pop_incoming(s->feedback_q, 
-	        s->feedback_buffer, &cnt, t, 0),"feedback pop");
-	    struct rack_feedback *got = (struct rack_feedback*)s->feedback_buffer;
-	    for(int i=0;i<(int)cnt;i++) s->scheduler_feedback[got[i].global_rack]=got[i];
-	  } else {
-	    // intermediate: pop children's appends + own already pushed, re-push to parent
-	    size_t cnt = s->feedback_q_capacity;
-	    void *agg = s->bundle_buffer;
-	    CHECK(dstm_dqueue_pop_incoming(s->feedback_q, agg, &cnt, t, 0),"feedback agg pop");
-	    // agg already contains own + children's arrivals 
-	    // 		(MPI arrival order nondeterministic, order-independent)
-	    for(int i=0;i<cnt;i++) 
-		    CHECK(dstm_dqueue_push(s->feedback_q, tree_parent(g_rank), 
-			  &((struct rack_feedback*)agg)[i], t, s->hop_up),"feedback relay push");
+        struct rack_feedback *agg = s->feedback_agg;
+        size_t n = 0;
 
-	    // if cnt==0 parent's pop would block on missing version - skip relay
-	    // version will be created on demand by next non-empty push
-	    // or handle empty explicitly via a touch helper (see note below)
-	    if(cnt==0) {
-		// do nothing - scheduler handles cnt==0 as empty
-	    }
+        /* The scheduler owns no racks, so it contributes nothing itself. */
+        if (!s->is_scheduler) {
+                memcpy(agg, s->own_feedback, s->local_racks * sizeof(*agg));
+                n = s->local_racks;
+        }
 
-  	}
+        /*
+         * Only ranks with children have an inbox version. A pop on a leaf
+         * would wait for a version nobody writes.
+         */
+        if (tree_child_count(g_rank) > 0) {
+                size_t cnt = s->feedback_q_capacity;
+                const struct feedback_chunk *in = s->feedback_buffer;
+
+                CHECK(dstm_dqueue_pop_incoming(s->feedback_q, s->feedback_buffer,
+                                               &cnt, t, 0),
+                      "feedback pop");
+
+                for (size_t i = 0; i < cnt; i++) {
+                        REQUIRE(in[i].snapshot_time == snapshot_time,
+                                "feedback timestamp mismatch");
+                        REQUIRE(in[i].rack_count >= 0 &&
+                                n + (size_t)in[i].rack_count <=
+                                        s->feedback_agg_capacity,
+                                "feedback aggregate overflow");
+                        memcpy(agg + n, in[i].racks,
+                               (size_t)in[i].rack_count * sizeof(*agg));
+                        n += (size_t)in[i].rack_count;
+                }
+        }
+
+        if (s->is_scheduler) {
+                REQUIRE(n == (size_t)s->total_racks,
+                        "scheduler feedback incomplete");
+                for (size_t i = 0; i < n; i++)
+                        s->scheduler_feedback[agg[i].global_rack] = agg[i];
+                return;
+        }
+
+        /* One push per chunk, all to the parent, arriving at t + hop_up. */
+        for (size_t off = 0; off < n; off += FB_CHUNK_RACKS) {
+                size_t m = n - off < FB_CHUNK_RACKS ? n - off : FB_CHUNK_RACKS;
+                struct feedback_chunk c;
+
+                memset(&c, 0, sizeof(c));
+                c.snapshot_time = snapshot_time;
+                c.source_rank = g_rank;
+                c.rack_count = (int)m;
+                memcpy(c.racks, agg + off, m * sizeof(*agg));
+
+                CHECK(dstm_dqueue_push(s->feedback_q, tree_parent(g_rank), &c,
+                                       t, s->hop_up),
+                      "feedback push");
+        }
 }
 
 /*******************************************************************************
@@ -1709,13 +1779,37 @@ static void append_worker_schedule_events(
         }
 }
 
-static size_t pack_bundle(void **blocks, int r, char *out, size_t bytes)
+static void push_marker(struct sim *s, int child, dstm_time_t t)
 {
-        memcpy(out, blocks[r], bytes);
-        size_t n = 1;
-        for (int c = 0; c < tree_child_count(r); c++)
-                n += pack_bundle(blocks, tree_first_child(r) + c, out + n * bytes, bytes);
-        return n;
+        struct schedule_chunk c;
+
+        memset(&c, 0, sizeof(c));
+        c.kind = CHUNK_MARKER;
+        c.destination_rank = child;
+        CHECK(dstm_dqueue_push(s->schedule_q, child, &c, t, s->hop_down),
+              "schedule marker push");
+}
+
+static void push_events(struct sim *s, int child, int dest,
+                        const struct schedule_event *ev, int n,
+                        dstm_time_t t, int *pushed)
+{
+        for (int off = 0; off < n; off += SCHED_CHUNK_EVENTS) {
+                int m = n - off < SCHED_CHUNK_EVENTS ? n - off
+                                                     : SCHED_CHUNK_EVENTS;
+                struct schedule_chunk c;
+
+                memset(&c, 0, sizeof(c));
+                c.kind = CHUNK_EVENTS;
+                c.destination_rank = dest;
+                c.event_count = m;
+                memcpy(c.events, ev + off, (size_t)m * sizeof(*ev));
+
+                CHECK(dstm_dqueue_push(s->schedule_q, child, &c, t,
+                                       s->hop_down),
+                      "schedule push");
+                (*pushed)++;
+        }
 }
 
 static void plan_and_publish_epoch(
@@ -1870,24 +1964,27 @@ static void plan_and_publish_epoch(
                 s->schedule_event_capacity_total += (uint64_t)ph->event_capacity;
         }
 
-        for(int d=1;d<g_world_size;d++){
-	    struct schedule_block_header *ph = blocks[d];
-	    struct schedule_event *evs = schedule_block_events(ph);
-	    for(int e=0;e<ph->event_count;e++){
-	      // delta = hop_down, remote requires >0
-	      CHECK(dstm_dqueue_push(s->schedule_q, d, &evs[e], 
-				scheduler_time, s->hop_down),"schedule push");
-	    }
-	        if(ph->event_count==0) {
-			// queue has no flush() with ZERO self-append in immediate-push edition
-			// so we must force an empty version to exist or worker pop will block
-			// option A: push a dummy sentinel that receiver discards
-			// option B: add dstm_dqueue_touch() to dqueue.c (recommended)
-			// for now do nothing and make receiver tolerate missing version:
-			continue;
-		}
-	    
-	}
+        /*
+         * Push each destination's events to the root's child on the way
+         * there, arriving at scheduler_time + hop_down. Every child gets at
+         * least one element (a marker if it has no data) so that its inbox
+         * version exists and its pop cannot wait forever.
+         */
+        int *pushed = calloc((size_t)g_world_size, sizeof(*pushed));
+        REQUIRE(pushed != NULL, "push counters");
+
+        for (int d = 1; d < g_world_size; d++) {
+                const struct schedule_block_header *ph = blocks[d];
+                int child = tree_child_toward(0, d);
+
+                push_events(s, child, d, schedule_block_events_const(ph),
+                            ph->event_count, scheduler_time, &pushed[child]);
+        }
+        for (int c = 0; c < tree_child_count(0); c++)
+                if (pushed[1 + c] == 0)
+                        push_marker(s, 1 + c, scheduler_time);
+
+        free(pushed);
 
         for (int d = 1; d < g_world_size; d++)
                 free(blocks[d]);
@@ -1902,17 +1999,59 @@ static void plan_and_publish_epoch(
 static void forward_schedule(struct sim *s, dstm_time_t t)
 {
         size_t cnt = s->schedule_q_capacity;
-        CHECK(dstm_dqueue_pop_incoming(s->schedule_q, s->bundle_buffer, &cnt, t, 0),"schedule pop");
-        s->schedule_event_cursor=0;
-        for(int c=0;c<tree_child_count(g_rank);c++){
-            int child=tree_first_child(g_rank)+c;
-            for(size_t i=0;i<cnt;i++){
-              struct schedule_event *e=&((struct schedule_event*)s->bundle_buffer)[i];
-              if(e->local_node_index / s->nodes_per_rack < (int)s->local_racks) continue;
-              CHECK(dstm_dqueue_push(s->schedule_q, child, e, t, s->hop_down),"schedule relay push");
-            }
+        const struct schedule_chunk *in = s->bundle_buffer;
+
+        CHECK(dstm_dqueue_pop_incoming(s->schedule_q, s->bundle_buffer, &cnt,
+                                       t, 0),
+              "schedule pop");
+
+        struct schedule_block_header *ph = s->pending_schedule;
+        struct schedule_event *pe = schedule_block_events(ph);
+        int first = tree_first_child(g_rank);
+        int kids = tree_child_count(g_rank);
+        int *pushed = calloc((size_t)(kids ? kids : 1), sizeof(*pushed));
+
+        REQUIRE(pushed != NULL, "push counters");
+        ph->event_count = 0;
+
+        for (size_t i = 0; i < cnt; i++) {
+                const struct schedule_chunk *c = &in[i];
+
+                if (c->kind == CHUNK_MARKER)
+                        continue;
+
+                if (c->destination_rank == g_rank) {
+                        REQUIRE(ph->event_count + c->event_count <=
+                                        (int)s->schedule_event_capacity,
+                                "pending schedule overflow");
+                        memcpy(pe + ph->event_count, c->events,
+                               (size_t)c->event_count * sizeof(*pe));
+                        ph->event_count += c->event_count;
+                        continue;
+                }
+
+                int child = tree_child_toward(g_rank, c->destination_rank);
+                CHECK(dstm_dqueue_push(s->schedule_q, child, c, t,
+                                       s->hop_down),
+                      "schedule relay push");
+                pushed[child - first]++;
         }
-        memcpy(s->pending_schedule, s->bundle_buffer, cnt*sizeof(struct schedule_event));
+
+        for (int k = 0; k < kids; k++)
+                if (pushed[k] == 0)
+                        push_marker(s, first + k, t);
+
+        free(pushed);
+}
+
+static int schedule_event_cmp(const void *a, const void *b)
+{
+        const struct schedule_event *x = a, *y = b;
+
+        if (x->tick_offset != y->tick_offset)
+                return x->tick_offset < y->tick_offset ? -1 : 1;
+        return (x->local_node_index > y->local_node_index) -
+               (x->local_node_index < y->local_node_index);
 }
 
 static void receive_schedule_block(
@@ -1922,9 +2061,31 @@ static void receive_schedule_block(
         REQUIRE(!s->is_scheduler,
                 "scheduler cannot receive schedule");
 
-        memcpy(s->schedule_buffer,
-               s->pending_schedule,
-               schedule_block_size(s));
+        /*
+         * The relay path delivers bare events. Finish the block header here,
+         * order the events by tick (chunks may arrive in any order), and copy
+         * only the used part into the installed block.
+         */
+        struct schedule_block_header *pending = s->pending_schedule;
+        int tick_count = s->steps - (int)epoch_start;
+
+        if (tick_count > s->schedule_window)
+                tick_count = s->schedule_window;
+
+        pending->generation = (int)epoch_start / s->schedule_window;
+        pending->start_time = (int)epoch_start;
+        pending->tick_count = tick_count;
+        pending->destination_rank = g_rank;
+        pending->rack_count = (int)s->local_racks;
+        pending->nodes_per_rack = s->nodes_per_rack;
+        pending->event_capacity = (int)s->schedule_event_capacity;
+
+        qsort(schedule_block_events(pending), (size_t)pending->event_count,
+              sizeof(struct schedule_event), schedule_event_cmp);
+
+        memcpy(s->schedule_buffer, pending,
+               sizeof(*pending) + (size_t)pending->event_count *
+                                          sizeof(struct schedule_event));
 
         const struct schedule_block_header *header =
                 (const struct schedule_block_header *)
@@ -2422,8 +2583,20 @@ static void run_scheduler_step(
         REQUIRE(s->is_scheduler,
                 "scheduler step on thermal rank");
 
-	if (t == (dstm_time_t)s->steps - 1)
-		// no dummy feedback put - queue empty handled by cnt==0 check above
+        /*
+         * The root only issues DSTM ops at epoch boundaries, so its clock
+         * stops at its last epoch op. A depth-1 rank near the end of the run
+         * still needs the root's clock to pass (t - distance), so advance it
+         * once at the last tick with a local self-append that nobody pops.
+         */
+        if (t == (dstm_time_t)s->steps - 1) {
+                struct schedule_chunk m;
+
+                memset(&m, 0, sizeof(m));
+                m.kind = CHUNK_MARKER;
+                CHECK(dstm_dqueue_push(s->schedule_q, g_rank, &m, t, 0),
+                      "scheduler final clock advance");
+        }
 
         if (t < s->control_latency)
                 return;
@@ -2671,13 +2844,14 @@ static int setup(
         s->schedule_region_id =
                 dstm_get_local_region_id();
 
-	// QUEUE SIZING RULE: capacity must be SUM over all producers max/tick
-        // feedback: every thermal rank contributes local_racks per snapshot
-        s->feedback_q_capacity = (size_t)s->total_racks; // total_racks * 1 feedback/rack
-        // schedule: max 1 event/node/tick -> per epoch per subtree worst case
-        // conservative upper bound: all nodes change every tick of window
-        s->schedule_q_capacity = (size_t)s->schedule_window * (size_t)s->total_racks * (size_t)s->nodes_per_rack;
-        size_t schedule_payload = s->schedule_q_capacity * sizeof(struct schedule_event) + 4096;
+        /*
+         * Queue capacities are per rank (a rank's slot only has to hold what
+         * its own subtree can send it), in chunks.
+         */
+        s->schedule_q_capacity = schedule_q_capacity_for(s, g_rank);
+        s->feedback_q_capacity = feedback_q_capacity_for(s, g_rank);
+        size_t schedule_payload =
+                s->schedule_q_capacity * sizeof(struct schedule_chunk) + 4096;
 
         dstm_opts_t opts =
                 dstm_default_options;
@@ -2692,7 +2866,7 @@ static int setup(
               "dstm_start_custom");
 
         size_t feedback_payload = s->feedback_q_capacity *
-                sizeof(struct rack_feedback) +
+                sizeof(struct feedback_chunk) +
                 4096;
 
         CHECK(dstm_region_register(
@@ -2713,11 +2887,17 @@ static int setup(
                       "heat region register");
         }
 
-        CHECK(dstm_dqueue_create_on_region(&s->schedule_q,sizeof(struct schedule_event), 
-		s->schedule_q_capacity, s->distance, s->schedule_region_id),"schedule queue create");
+        CHECK(dstm_dqueue_create_on_region(&s->schedule_q,
+                                           sizeof(struct schedule_chunk),
+                                           s->schedule_q_capacity, s->distance,
+                                           s->schedule_region_id),
+              "schedule queue create");
 
-        CHECK(dstm_dqueue_create_on_region(&s->feedback_q,sizeof(struct rack_feedback), 
-		s->feedback_q_capacity, s->distance, s->feedback_region_id),"feedback queue create");
+        CHECK(dstm_dqueue_create_on_region(&s->feedback_q,
+                                           sizeof(struct feedback_chunk),
+                                           s->feedback_q_capacity, s->distance,
+                                           s->feedback_region_id),
+              "feedback queue create");
 
         /*
          * Each delay graph uses the same vertex partition but a topology
@@ -2751,18 +2931,19 @@ static int setup(
                       "delay heat graph create");
         }
 
-        s->schedule_buffer =
-                calloc(1,
-                       schedule_bundle_size(s));
-
-	s->feedback_buffer =
-                calloc(1,
-                       feedback_stage_size(s));
-
-	s->pending_schedule = calloc(1, schedule_block_size(s));
-	s->bundle_buffer = calloc(1, s->schedule_q_capacity * sizeof(struct schedule_event));
-        s->own_feedback     = calloc(s->local_racks ? s->local_racks : 1,
-                                     sizeof(*s->own_feedback));
+        s->schedule_buffer = calloc(1, schedule_block_size(s));
+        s->pending_schedule = calloc(1, schedule_block_size(s));
+        s->bundle_buffer = calloc(s->schedule_q_capacity,
+                                  sizeof(struct schedule_chunk));
+        s->feedback_buffer = calloc(s->feedback_q_capacity,
+                                    sizeof(struct feedback_chunk));
+        s->own_feedback = calloc(s->local_racks ? s->local_racks : 1,
+                                 sizeof(*s->own_feedback));
+        s->feedback_agg_capacity =
+                (size_t)tree_subtree_size(g_rank) * s->local_racks;
+        s->feedback_agg = calloc(s->feedback_agg_capacity ?
+                                         s->feedback_agg_capacity : 1,
+                                 sizeof(*s->feedback_agg));
 
         REQUIRE(s->schedule_buffer != NULL,
                 "schedule buffer allocation");
@@ -2770,7 +2951,8 @@ static int setup(
         REQUIRE(s->feedback_buffer != NULL &&
                 s->pending_schedule != NULL &&
                 s->bundle_buffer != NULL &&
-                s->own_feedback != NULL,
+                s->own_feedback != NULL &&
+                s->feedback_agg != NULL,
                 "tree buffer allocation");
 
         return 0;
@@ -2825,6 +3007,7 @@ static void teardown_local(struct sim *s)
 	free(s->pending_schedule);
         free(s->bundle_buffer);
         free(s->own_feedback);
+        free(s->feedback_agg);
 }
 
 /*******************************************************************************
