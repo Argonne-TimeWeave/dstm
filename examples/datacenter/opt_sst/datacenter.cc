@@ -13,6 +13,7 @@
 #include <cstdio>
 #include <fstream>
 #include <limits>
+#include <map>
 #include <queue>
 #include <sstream>
 #include <string>
@@ -93,6 +94,64 @@ static int thermalDelay(int a, int b)
         static_cast<int>(
             hash %
             static_cast<uint64_t>(MAX_THERMAL_DELAY));
+}
+
+/*******************************************************************************
+ * Relay-tree topology over MPI ranks.
+ *
+ * Tree node 0 is the scheduler; tree node d+1 is thermal domain d. This
+ * mirrors the DSTM opt_dstm tree: parent(t) = (t-1)/K, children are
+ * K*t+1 .. K*t+K. Fanout K >= (node count - 1) collapses to the old star
+ * (depth 1), which reproduces the dedicated-scheduler baseline exactly.
+ ******************************************************************************/
+
+static int treeParent(int node, int fanout)
+{
+    return node == 0 ? -1 : (node - 1) / fanout;
+}
+
+static int treeFirstChild(int node, int fanout)
+{
+    return fanout * node + 1;
+}
+
+static int treeChildCount(int node, int fanout, int nodeCount)
+{
+    int first = treeFirstChild(node, fanout);
+    int last = nodeCount - 1;
+
+    if (first > last)
+        return 0;
+
+    int n = last - first + 1;
+
+    return n > fanout ? fanout : n;
+}
+
+static int treeDepthOf(int node, int fanout)
+{
+    int depth = 0;
+
+    while (node > 0) {
+        node = (node - 1) / fanout;
+        ++depth;
+    }
+
+    return depth;
+}
+
+static int treeMaxDepth(int nodeCount, int fanout)
+{
+    return treeDepthOf(nodeCount - 1, fanout);
+}
+
+/* The child of `node` whose subtree contains `target` (target != node). */
+static int treeChildToward(int node, int target, int fanout)
+{
+    while (treeParent(target, fanout) != node)
+        target = treeParent(target, fanout);
+
+    return target;
 }
 
 /*******************************************************************************
@@ -436,16 +495,17 @@ public:
         {"steps", "Simulation seconds", "300"},
         {"schedule_window", "Scheduling epoch length", "60"},
         {"control_latency", "Feedback latency", "30"},
+        {"tree_fanout", "Relay-tree fanout K", "1073741824"},
         {"jobs", "CSV job trace", "jobs.csv"}
     )
 
     SST_ELI_DOCUMENT_PORTS(
-        {"feedback%(domains)d",
-         "Feedback from a thermal domain",
+        {"dn_fb%(domains)d",
+         "Aggregated feedback from a child subtree",
          {"dcbench.FeedbackEvent"}},
 
-        {"schedule%(domains)d",
-         "Schedule sent to a thermal domain",
+        {"dn_sched%(domains)d",
+         "Schedule blocks sent down to a child subtree",
          {"dcbench.ScheduleBlockEvent"}}
     )
 
@@ -474,6 +534,12 @@ public:
 
         jobPath_ =
             params.find<std::string>("jobs", "jobs.csv");
+
+        treeFanout_ =
+            params.find<int>("tree_fanout", 1 << 30);
+
+        if (treeFanout_ < 2)
+            treeFanout_ = 2;
 
         if (domains_ < 1) {
             fatal("domains must be positive");
@@ -507,6 +573,22 @@ public:
         localRacks_ =
             totalRacks_ / domains_;
 
+        nodeCount_ = domains_ + 1;
+
+        treeDepth_ =
+            treeMaxDepth(nodeCount_, treeFanout_);
+
+        if (treeDepth_ < 1)
+            treeDepth_ = 1;
+
+        if (controlLatency_ % treeDepth_ != 0 ||
+            (scheduleWindow_ - controlLatency_) %
+                    treeDepth_ != 0) {
+            fatal(
+                "tree depth must divide control latency "
+                "and schedule delay");
+        }
+
         schedulerNodes_.resize(
             static_cast<size_t>(totalRacks_) *
             static_cast<size_t>(nodesPerRack_));
@@ -514,56 +596,36 @@ public:
         schedulerFeedback_.resize(
             static_cast<size_t>(totalRacks_));
 
-        feedbackLinks_.resize(
-            static_cast<size_t>(domains_),
+        childCount_ =
+            treeChildCount(0, treeFanout_, nodeCount_);
+
+        childFeedbackLinks_.resize(
+            static_cast<size_t>(childCount_),
             nullptr);
 
-        scheduleLinks_.resize(
-            static_cast<size_t>(domains_),
+        childScheduleLinks_.resize(
+            static_cast<size_t>(childCount_),
             nullptr);
 
-        for (int domain = 0;
-             domain < domains_;
-             ++domain) {
-            std::string feedbackPort =
-                "feedback" +
-                std::to_string(domain);
-
-            std::string schedulePort =
-                "schedule" +
-                std::to_string(domain);
-
-            feedbackLinks_[domain] =
+        for (int c = 0; c < childCount_; ++c) {
+            childFeedbackLinks_[c] =
                 configureLink(
-                    feedbackPort,
+                    "dn_fb" + std::to_string(c),
                     new SST::Event::Handler2<
                         Scheduler,
                         &Scheduler::handleFeedback>(this));
 
-            scheduleLinks_[domain] =
+            childScheduleLinks_[c] =
                 configureLink(
-                    schedulePort);
+                    "dn_sched" + std::to_string(c));
 
-            if (feedbackLinks_[domain] == nullptr ||
-                scheduleLinks_[domain] == nullptr) {
+            if (childFeedbackLinks_[c] == nullptr ||
+                childScheduleLinks_[c] == nullptr) {
                 fatal(
-                    "scheduler control links are missing for domain " +
-                    std::to_string(domain));
+                    "scheduler child links are missing for child " +
+                    std::to_string(c));
             }
         }
-
-        size_t feedbackTimes =
-            static_cast<size_t>(
-                steps_ +
-                scheduleWindow_ +
-                MAX_THERMAL_DELAY +
-                2);
-
-        feedbackReceived_.resize(
-            feedbackTimes,
-            std::vector<bool>(
-                static_cast<size_t>(domains_),
-                false));
 
         loadJobs();
 
@@ -650,11 +712,15 @@ private:
         std::greater<CompletionEntry>>
         completionHeap_;
 
-    std::vector<SST::Link*> feedbackLinks_;
-    std::vector<SST::Link*> scheduleLinks_;
+    std::vector<SST::Link*> childFeedbackLinks_;
+    std::vector<SST::Link*> childScheduleLinks_;
 
-    std::vector<std::vector<bool>>
-        feedbackReceived_;
+    int treeFanout_ = 1;
+    int nodeCount_ = 0;
+    int treeDepth_ = 1;
+    int childCount_ = 0;
+
+    std::map<int, int> feedbackRackCount_;
 
     uint64_t jobsStarted_ = 0;
     uint64_t jobsCompleted_ = 0;
@@ -1284,7 +1350,13 @@ private:
                 static_cast<uint64_t>(
                     eventCapacity);
 
-            scheduleLinks_[destination]
+            int child =
+                treeChildToward(
+                    0,
+                    destination + 1,
+                    treeFanout_) - 1;
+
+            childScheduleLinks_[child]
                 ->send(0, block);
         }
 
@@ -1297,8 +1369,7 @@ private:
         SST::Event* event)
     {
         auto* feedback =
-            dynamic_cast<FeedbackEvent*>(
-                event);
+            dynamic_cast<FeedbackEvent*>(event);
 
         if (feedback == nullptr) {
             delete event;
@@ -1307,112 +1378,47 @@ private:
                 "an invalid feedback event");
         }
 
-        if (feedback->sourceDomain < 0 ||
-            feedback->sourceDomain >=
-                domains_) {
-            delete feedback;
-            fatal(
-                "invalid feedback source");
-        }
+        size_t count =
+            feedback->globalRack.size();
 
-        if (feedback->snapshotTime < 0 ||
-            static_cast<size_t>(
-                feedback->snapshotTime) >=
-                feedbackReceived_.size()) {
-            delete feedback;
-            fatal(
-                "invalid feedback timestamp");
-        }
-
-        size_t expectedCount =
-            static_cast<size_t>(
-                localRacks_);
-
-        if (feedback->rackCount !=
-                localRacks_ ||
-            feedback->globalRack.size() !=
-                expectedCount ||
-            feedback->inletTempC.size() !=
-                expectedCount ||
-            feedback->outletTempC.size() !=
-                expectedCount ||
-            feedback->coolantTempC.size() !=
-                expectedCount ||
-            feedback->coolingRemovalW.size() !=
-                expectedCount ||
-            feedback->totalPowerW.size() !=
-                expectedCount) {
+        if (static_cast<size_t>(feedback->rackCount) != count ||
+            feedback->inletTempC.size() != count ||
+            feedback->outletTempC.size() != count ||
+            feedback->coolantTempC.size() != count ||
+            feedback->coolingRemovalW.size() != count ||
+            feedback->totalPowerW.size() != count) {
             delete feedback;
             fatal(
                 "invalid feedback array sizes");
         }
 
-        size_t snapshotIndex =
-            static_cast<size_t>(
-                feedback->snapshotTime);
-
-        size_t sourceIndex =
-            static_cast<size_t>(
-                feedback->sourceDomain);
-
-        if (feedbackReceived_[
-                snapshotIndex]
-                [sourceIndex]) {
-            delete feedback;
-            fatal(
-                "duplicate feedback event");
-        }
-
-        feedbackReceived_[
-            snapshotIndex]
-            [sourceIndex] = true;
-
-        int expectedFirstRack =
-            feedback->sourceDomain *
-            localRacks_;
-
-        for (int i = 0;
-             i < localRacks_;
-             ++i) {
-            size_t index =
-                static_cast<size_t>(i);
-
+        for (size_t i = 0; i < count; ++i) {
             int globalRack =
-                feedback->globalRack[index];
+                feedback->globalRack[i];
 
-            if (globalRack !=
-                expectedFirstRack + i) {
+            if (globalRack < 0 ||
+                globalRack >= totalRacks_) {
                 delete feedback;
                 fatal(
-                    "feedback rack ownership "
-                    "mismatch");
+                    "feedback rack out of range");
             }
 
             RackFeedback rack;
 
-            rack.globalRack =
-                globalRack;
-
-            rack.inletTempC =
-                feedback->inletTempC[index];
-
-            rack.outletTempC =
-                feedback->outletTempC[index];
-
-            rack.coolantTempC =
-                feedback->coolantTempC[index];
-
-            rack.coolingRemovalW =
-                feedback->coolingRemovalW[index];
-
-            rack.totalPowerW =
-                feedback->totalPowerW[index];
+            rack.globalRack = globalRack;
+            rack.inletTempC = feedback->inletTempC[i];
+            rack.outletTempC = feedback->outletTempC[i];
+            rack.coolantTempC = feedback->coolantTempC[i];
+            rack.coolingRemovalW = feedback->coolingRemovalW[i];
+            rack.totalPowerW = feedback->totalPowerW[i];
 
             schedulerFeedback_[
-                static_cast<size_t>(
-                    globalRack)] =
+                static_cast<size_t>(globalRack)] =
                 rack;
         }
+
+        feedbackRackCount_[feedback->snapshotTime] +=
+            static_cast<int>(count);
 
         delete feedback;
     }
@@ -1420,33 +1426,17 @@ private:
     void collectFeedback(
         int snapshotTime)
     {
-        if (snapshotTime < 0 ||
-            static_cast<size_t>(
-                snapshotTime) >=
-                feedbackReceived_.size()) {
+        auto it =
+            feedbackRackCount_.find(snapshotTime);
+
+        if (it == feedbackRackCount_.end() ||
+            it->second != totalRacks_) {
             fatal(
-                "feedback collection timestamp "
-                "is out of range");
+                "feedback incomplete at snapshot " +
+                std::to_string(snapshotTime));
         }
 
-        const std::vector<bool>& received =
-            feedbackReceived_[
-                static_cast<size_t>(
-                    snapshotTime)];
-
-        for (int domain = 0;
-             domain < domains_;
-             ++domain) {
-            if (!received[
-                    static_cast<size_t>(
-                        domain)]) {
-                fatal(
-                    "feedback missing for domain " +
-                    std::to_string(domain) +
-                    " at snapshot " +
-                    std::to_string(snapshotTime));
-            }
-        }
+        feedbackRackCount_.erase(it);
     }
 
     bool clockTick(
@@ -1530,7 +1520,8 @@ public:
         {"nodes_per_rack", "Nodes per rack", "8"},
         {"steps", "Simulation seconds", "300"},
         {"schedule_window", "Scheduling epoch length", "60"},
-        {"control_latency", "Feedback latency", "30"}
+        {"control_latency", "Feedback latency", "30"},
+        {"tree_fanout", "Relay-tree fanout K", "1073741824"}
     )
 
     SST_ELI_DOCUMENT_PORTS(
@@ -1542,12 +1533,20 @@ public:
          "Right thermal-domain neighbor",
          {"dcbench.HeatEvent"}},
 
-        {"feedback",
-         "Feedback link to scheduler",
+        {"up_fb",
+         "Aggregated feedback to parent",
          {"dcbench.FeedbackEvent"}},
 
-        {"schedule",
-         "Schedule link from scheduler",
+        {"up_sched",
+         "Schedule blocks from parent",
+         {"dcbench.ScheduleBlockEvent"}},
+
+        {"dn_fb%(domains)d",
+         "Aggregated feedback from a child subtree",
+         {"dcbench.FeedbackEvent"}},
+
+        {"dn_sched%(domains)d",
+         "Schedule blocks sent down to a child subtree",
          {"dcbench.ScheduleBlockEvent"}}
     )
 
@@ -1611,22 +1610,76 @@ public:
             domain_ *
             localRacks_;
 
-        feedbackLink_ =
-            configureLink("feedback");
+        treeFanout_ =
+            params.find<int>("tree_fanout", 1 << 30);
 
-        scheduleLink_ =
+        if (treeFanout_ < 2)
+            treeFanout_ = 2;
+
+        treeNode_ = domain_ + 1;
+        nodeCount_ = domains_ + 1;
+        parentNode_ = treeParent(treeNode_, treeFanout_);
+        isParentScheduler_ = (parentNode_ == 0);
+
+        childCount_ =
+            treeChildCount(
+                treeNode_, treeFanout_, nodeCount_);
+
+        treeDepth_ =
+            treeMaxDepth(nodeCount_, treeFanout_);
+
+        if (treeDepth_ < 1)
+            treeDepth_ = 1;
+
+        if (controlLatency_ % treeDepth_ != 0 ||
+            (scheduleWindow_ - controlLatency_) %
+                    treeDepth_ != 0) {
+            fatal(
+                "tree depth must divide control latency "
+                "and schedule delay");
+        }
+
+        parentFeedbackLink_ =
+            configureLink("up_fb");
+
+        parentScheduleLink_ =
             configureLink(
-                "schedule",
+                "up_sched",
                 new SST::Event::Handler2<
                     ThermalDomain,
                     &ThermalDomain::handleSchedule>(
                         this));
 
-        if (feedbackLink_ == nullptr ||
-            scheduleLink_ == nullptr) {
+        if (parentFeedbackLink_ == nullptr ||
+            parentScheduleLink_ == nullptr) {
             fatal(
-                "scheduler control links "
-                "are required");
+                "parent control links are required");
+        }
+
+        childFeedbackLinks_.resize(
+            static_cast<size_t>(childCount_), nullptr);
+
+        childScheduleLinks_.resize(
+            static_cast<size_t>(childCount_), nullptr);
+
+        for (int c = 0; c < childCount_; ++c) {
+            childFeedbackLinks_[c] =
+                configureLink(
+                    "dn_fb" + std::to_string(c),
+                    new SST::Event::Handler2<
+                        ThermalDomain,
+                        &ThermalDomain::handleChildFeedback>(
+                            this));
+
+            childScheduleLinks_[c] =
+                configureLink(
+                    "dn_sched" + std::to_string(c));
+
+            if (childFeedbackLinks_[c] == nullptr ||
+                childScheduleLinks_[c] == nullptr) {
+                fatal(
+                    "child control links are required");
+            }
         }
 
         if (domains_ > 1) {
@@ -1751,8 +1804,29 @@ private:
     SST::Link* leftLink_ = nullptr;
     SST::Link* rightLink_ = nullptr;
 
-    SST::Link* feedbackLink_ = nullptr;
-    SST::Link* scheduleLink_ = nullptr;
+    SST::Link* parentFeedbackLink_ = nullptr;
+    SST::Link* parentScheduleLink_ = nullptr;
+
+    std::vector<SST::Link*> childFeedbackLinks_;
+    std::vector<SST::Link*> childScheduleLinks_;
+
+    int treeFanout_ = 1;
+    int treeNode_ = 0;
+    int parentNode_ = -1;
+    int nodeCount_ = 0;
+    int childCount_ = 0;
+    int treeDepth_ = 1;
+    bool isParentScheduler_ = true;
+
+    struct FeedbackAgg {
+        std::vector<RackFeedback> racks;
+        int childrenReceived = 0;
+        bool ownStashed = false;
+    };
+
+    std::map<int, FeedbackAgg> feedbackAgg_;
+
+    std::map<int, ScheduleBlockEvent*> pendingSchedule_;
 
     std::vector<RackState> racks_;
 
@@ -1878,70 +1952,160 @@ private:
                 "received invalid schedule event");
         }
 
-        if (block->destinationDomain !=
-            domain_) {
-            delete block;
-            fatal(
-                "schedule delivered to "
-                "the wrong domain");
-        }
-
-        if (block->rackCount !=
-                localRacks_ ||
-            block->nodesPerRack !=
-                nodesPerRack_) {
-            delete block;
-            fatal(
-                "schedule topology mismatch");
-        }
-
-        if (block->startTime !=
-            currentTime_) {
-            delete block;
-            fatal(
-                "schedule arrival timestamp "
-                "mismatch");
-        }
-
-        if (block->tickCount <= 0 ||
-            block->tickCount >
-                scheduleWindow_) {
-            delete block;
-            fatal(
-                "invalid schedule tick count");
-        }
-
         if (!block->hasValidChangeArrays()) {
             delete block;
             fatal(
                 "inconsistent schedule change arrays");
         }
 
-        if (scheduleBlock_ != nullptr) {
-            delete block;
-            fatal(
-                "new schedule arrived before "
-                "the prior schedule was released");
+        /*
+         * Not ours: relay down toward the child subtree that owns the
+         * destination domain. One hop of hop_down latency per level.
+         */
+        if (block->destinationDomain != domain_) {
+            int target =
+                block->destinationDomain + 1;
+
+            int child =
+                treeChildToward(
+                    treeNode_, target, treeFanout_) -
+                treeFirstChild(
+                    treeNode_, treeFanout_);
+
+            if (child < 0 ||
+                child >= childCount_) {
+                delete block;
+                fatal(
+                    "schedule has no route "
+                    "to destination");
+            }
+
+            childScheduleLinks_[child]->send(0, block);
+            return;
         }
 
-        scheduleBlock_ =
-            block;
+        if (block->rackCount != localRacks_ ||
+            block->nodesPerRack != nodesPerRack_) {
+            delete block;
+            fatal(
+                "schedule topology mismatch");
+        }
 
-        scheduleCursor_ = 0;
+        /*
+         * Ours. Shallow nodes receive it before the epoch starts; hold it
+         * (keyed by start time) until applyScheduleTick consumes it.
+         */
+        if (block->startTime < currentTime_) {
+            delete block;
+            fatal(
+                "schedule arrived after its "
+                "epoch start");
+        }
+
+        if (block->tickCount <= 0 ||
+            block->tickCount > scheduleWindow_) {
+            delete block;
+            fatal(
+                "invalid schedule tick count");
+        }
+
+        if (pendingSchedule_.count(block->startTime)) {
+            delete block;
+            fatal(
+                "duplicate schedule block for epoch");
+        }
+
+        pendingSchedule_[block->startTime] = block;
     }
 
-    void publishFeedback(
+    void stashOwnFeedback(
         int snapshotTime)
     {
+        FeedbackAgg& agg =
+            feedbackAgg_[snapshotTime];
+
+        for (const RackState& rack : racks_) {
+            RackFeedback fb;
+
+            fb.globalRack = rack.globalRack;
+            fb.inletTempC = rack.inletTempC;
+            fb.outletTempC = rack.outletTempC;
+            fb.coolantTempC = rack.coolantTempC;
+            fb.coolingRemovalW = rack.coolingRemovalW;
+            fb.totalPowerW = rack.totalPowerW;
+
+            agg.racks.push_back(fb);
+        }
+
+        agg.ownStashed = true;
+
+        tryFlushFeedback(snapshotTime);
+    }
+
+    void handleChildFeedback(
+        SST::Event* event)
+    {
+        auto* feedback =
+            dynamic_cast<FeedbackEvent*>(event);
+
+        if (feedback == nullptr) {
+            delete event;
+            fatal(
+                "received invalid child "
+                "feedback event");
+        }
+
+        size_t count =
+            feedback->globalRack.size();
+
+        FeedbackAgg& agg =
+            feedbackAgg_[feedback->snapshotTime];
+
+        for (size_t i = 0; i < count; ++i) {
+            RackFeedback fb;
+
+            fb.globalRack = feedback->globalRack[i];
+            fb.inletTempC = feedback->inletTempC[i];
+            fb.outletTempC = feedback->outletTempC[i];
+            fb.coolantTempC = feedback->coolantTempC[i];
+            fb.coolingRemovalW = feedback->coolingRemovalW[i];
+            fb.totalPowerW = feedback->totalPowerW[i];
+
+            agg.racks.push_back(fb);
+        }
+
+        agg.childrenReceived += 1;
+
+        int snapshot = feedback->snapshotTime;
+
+        delete feedback;
+
+        tryFlushFeedback(snapshot);
+    }
+
+    void tryFlushFeedback(
+        int snapshotTime)
+    {
+        auto it =
+            feedbackAgg_.find(snapshotTime);
+
+        if (it == feedbackAgg_.end())
+            return;
+
+        FeedbackAgg& agg = it->second;
+
+        if (!agg.ownStashed ||
+            agg.childrenReceived < childCount_) {
+            return;
+        }
+
+        size_t count = agg.racks.size();
+
         auto* event =
             new FeedbackEvent(
                 snapshotTime,
                 domain_,
-                localRacks_);
-
-        size_t count =
-            static_cast<size_t>(
-                localRacks_);
+                static_cast<int>(count));
 
         event->globalRack.reserve(count);
         event->inletTempC.reserve(count);
@@ -1950,32 +2114,19 @@ private:
         event->coolingRemovalW.reserve(count);
         event->totalPowerW.reserve(count);
 
-        for (const RackState& rack :
-             racks_) {
-            event->globalRack.push_back(
-                rack.globalRack);
-
-            event->inletTempC.push_back(
-                rack.inletTempC);
-
-            event->outletTempC.push_back(
-                rack.outletTempC);
-
-            event->coolantTempC.push_back(
-                rack.coolantTempC);
-
-            event->coolingRemovalW.push_back(
-                rack.coolingRemovalW);
-
-            event->totalPowerW.push_back(
-                rack.totalPowerW);
+        for (const RackFeedback& fb : agg.racks) {
+            event->globalRack.push_back(fb.globalRack);
+            event->inletTempC.push_back(fb.inletTempC);
+            event->outletTempC.push_back(fb.outletTempC);
+            event->coolantTempC.push_back(fb.coolantTempC);
+            event->coolingRemovalW.push_back(fb.coolingRemovalW);
+            event->totalPowerW.push_back(fb.totalPowerW);
         }
 
-        /*
-         * The feedback link has control_latency seconds
-         * of latency. No additional delay is required.
-         */
-        feedbackLink_->send(0, event);
+        /* One hop up; the parent link carries hop_up latency. */
+        parentFeedbackLink_->send(0, event);
+
+        feedbackAgg_.erase(it);
     }
 
     void applyScheduleTick(
@@ -1986,10 +2137,27 @@ private:
             return;
         }
 
-        if (scheduleBlock_ == nullptr) {
-            fatal(
-                "missing schedule block at time " +
-                std::to_string(time));
+        int epochStart =
+            (time / scheduleWindow_) *
+            scheduleWindow_;
+
+        if (scheduleBlock_ == nullptr ||
+            scheduleBlock_->startTime != epochStart) {
+            auto it =
+                pendingSchedule_.find(epochStart);
+
+            if (it == pendingSchedule_.end()) {
+                fatal(
+                    "missing schedule block at time " +
+                    std::to_string(time));
+            }
+
+            if (scheduleBlock_ != nullptr)
+                delete scheduleBlock_;
+
+            scheduleBlock_ = it->second;
+            scheduleCursor_ = 0;
+            pendingSchedule_.erase(it);
         }
 
         int offset =
@@ -2382,7 +2550,7 @@ private:
             if (currentTime_ %
                     scheduleWindow_ ==
                 0) {
-                publishFeedback(
+                stashOwnFeedback(
                     currentTime_);
             }
 
